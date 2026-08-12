@@ -347,7 +347,7 @@ function callEntries(name, input) {
     return directRenders(name, input).map((render) => ({ name, input, render, resultIndex: 0 }));
   }
   return nested.flatMap((call, resultIndex) => directRenders(call.name, call.input, input)
-    .map((render) => ({ ...call, render, resultIndex })));
+    .map((render) => ({ ...call, render, resultIndex, nested: true })));
 }
 
 export function callRenders(name, input) {
@@ -388,12 +388,18 @@ export function resultRender(meta, text, output) {
     if (image) return { ...meta.render, image_src: image.image_url };
     const content = execPayload(text);
     // a failed command's output is NOT file content: ANSI styling means a
-    // colored error, and a harness call without its Output marker never ran.
-    // Treating either as a read poisons file-state chains with garbage.
+    // colored error, a harness call without its Output marker never ran, and
+    // a harness header saying so (Script failed / nonzero Exit code) means the
+    // payload is an error message. Treating any as a read poisons file-state
+    // chains with garbage. Only genuinely direct shell calls (whose raw
+    // stdout has no header at all) skip the header checks.
     // eslint-disable-next-line no-control-regex
     const ansi = /\x1b\[/.test(content);
-    const harnessNoMarker = !DIRECT_SHELL_NAMES.has(meta.name) && !text.includes('\nOutput:\n');
-    if (ansi || harnessNoMarker) return { verb: 'exec', stdout: content, stderr: '' };
+    const direct = DIRECT_SHELL_NAMES.has(meta.name) && !meta.nested;
+    const markerAt = text.indexOf('\nOutput:\n');
+    const header = markerAt < 0 ? text : text.slice(0, markerAt);
+    const failed = /^Script (failed|error)/.test(header) || /^Exit code:\s*[1-9]/m.test(header);
+    if (ansi || (!direct && (markerAt < 0 || failed))) return { verb: 'exec', stdout: content, stderr: '' };
     const lines = content.split('\n').length;
     return { ...meta.render, content, start_line: 1, total_lines: lines, region: { start: 1, end: lines } };
   }
@@ -440,9 +446,11 @@ export function patchRenders(input) {
     }
     return {
       verb: 'patch_file', path: filePath, title: path.basename(filePath),
+      // codex patch envelopes carry no line numbers; 0 = "position unknown",
+      // so downstream never mistakes it for a real placement hint
       hunks: groups.filter((group) => group.length).map((group) => ({
-        oldStart: 1, oldLines: group.filter((line) => !line.startsWith('+')).length,
-        newStart: 1, newLines: group.filter((line) => !line.startsWith('-')).length,
+        oldStart: 0, oldLines: group.filter((line) => !line.startsWith('+')).length,
+        newStart: 0, newLines: group.filter((line) => !line.startsWith('-')).length,
         lines: group,
       })),
     };

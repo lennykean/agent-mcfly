@@ -94,16 +94,28 @@ export function applyPatch(
   const lines = content.replace(/\r\n/g, '\n').split('\n');
   if (trailingNewline) lines.pop();
   const stamps = blame ? [...blame] : undefined;
-  let first = Infinity, last = 0, from = 0;
+  let first = Infinity, last = 0, from = 0, offset = 0;
 
   for (const hunk of hunks) {
     const before = hunk.lines.filter((line) => !line.startsWith('+')).map((line) => line.slice(1));
     const after = hunk.lines.filter((line) => !line.startsWith('-')).map((line) => line.slice(1));
-    let at = -1;
+    const candidates: number[] = [];
     for (let i = from; i <= lines.length - before.length; i++) {
-      if (before.every((line, j) => lines[i + j] === line)) { at = i; break; }
+      if (before.every((line, j) => lines[i + j] === line)) candidates.push(i);
     }
-    if (at < 0) return null;
+    let at: number;
+    if (candidates.length === 1) at = candidates[0];
+    else if (candidates.length > 1) {
+      // duplicate context: only a REAL position hint (codex placeholders are
+      // 0) that lands exactly on a candidate may disambiguate; otherwise
+      // refuse to guess history
+      if (hunk.oldStart < 1) return null;
+      const expected = hunk.oldStart - 1 + offset;
+      const hit = candidates.find((c) => c === expected);
+      if (hit === undefined) return null;
+      at = hit;
+    } else return null;
+    offset += after.length - before.length;
     lines.splice(at, before.length, ...after);
     if (stamps) {
       // walk the hunk keeping stamps aligned: kept lines inherit, added get stamped
@@ -141,17 +153,22 @@ export function applyPatch(
   };
 }
 
-// un-applying a patch is applying it with additions and removals swapped
+// un-applying a patch is applying it with additions and removals swapped —
+// and old/new positions swapped, so placement hints point into the right file
 export const invertHunks = (hunks: NonNullable<ResultRender['hunks']>) =>
   hunks.map((h) => ({
-    ...h,
+    oldStart: h.newStart, oldLines: h.newLines, newStart: h.oldStart, newLines: h.oldLines,
     lines: h.lines.map((l) => (l.startsWith('+') ? '-' + l.slice(1) : l.startsWith('-') ? '+' + l.slice(1) : l)),
   }));
 
+// a read is a full-file authority only when it PROVES completeness: starts at
+// line 1 and carries a loader-attested total it covers. A missing total means
+// an untrusted slice (head/sed inferred reads), never a whole file.
 const isFullContent = (r: ResultRender): boolean =>
   r.content !== undefined
   && (r.start_line ?? 1) === 1
-  && (r.total_lines === undefined || r.content.split(/\r?\n/).length >= r.total_lines);
+  && r.total_lines !== undefined
+  && r.content.split(/\r?\n/).length >= r.total_lines;
 
 // A patch with no prior content can still get a full file view if some FUTURE
 // step reveals the file: take that content and un-apply every intervening
@@ -160,14 +177,14 @@ const isFullContent = (r: ResultRender): boolean =>
 function backfillFromFuture(
   steps: Step[], at: number, path: string, hunksAtP: NonNullable<ResultRender['hunks']>,
 ): { content: string; region?: { start: number; end: number } } | null {
-  const want = path.replace(/\//g, '\\').toLowerCase();
+  const want = normPath(path);
   const pending: NonNullable<ResultRender['hunks']>[] = [];
   for (let i = at + 1; i < steps.length; i++) {
     const s = steps[i];
     if (s.kind !== 'tool' || !s.result) continue;
     const r = s.result;
     const p = r.path ?? s.call.path;
-    if (!p || p.replace(/\//g, '\\').toLowerCase() !== want) continue;
+    if (!p || normPath(p) !== want) continue;
     if (r.verb === 'write_file') return null;
     if (r.verb === 'read_file') {
       if (isFullContent(r)) return unwind(r.content!, pending, hunksAtP);
@@ -218,8 +235,10 @@ export interface FileSnapshot {
 const TOUCH_VERBS = new Set<RenderVerb>(['read_file', 'patch_file', 'write_file']);
 
 // paths meet here from multiple sources (transcripts, explorer) with mixed
-// separators and drive-letter casing; compare normalized
-const normPath = (p: string) => p.replace(/\//g, '\\').toLowerCase();
+// separators and drive-letter casing; fold case only for Windows-style paths —
+// on POSIX, Foo.ts and foo.ts are different files
+const normPath = (p: string) =>
+  (/^[a-zA-Z]:[\\/]|\\/.test(p) ? p.replace(/\//g, '\\').toLowerCase() : p);
 
 export function fileChain(steps: Step[], path: string): { touches: FileTouch[]; snapshots: Map<number, FileSnapshot> } {
   const want = normPath(path);
@@ -245,14 +264,26 @@ export function fileChain(steps: Step[], path: string): { touches: FileTouch[]; 
     const r = (steps[t.index] as Step & { kind: 'tool' }).result!;
     if (r.verb === 'read_file') {
       if (r.image_src) { snapshots.set(t.index, { image: true }); continue; }
+      const eol = (s: string) => s.replace(/\r\n/g, '\n');
       if (isFullContent(r)) {
         // reads are ground truth: always adopt; keep accumulated blame only
         // when the read CONFIRMS the carried chain, reset it when it refutes
-        const eol = (s: string) => s.replace(/\r\n/g, '\n');
         if (content === undefined || eol(content) !== eol(r.content!)) {
           blame = freshBlame(r.content!, null);
         }
         content = r.content!;
+      } else if (content !== undefined && r.content !== undefined) {
+        // slice read: reads are still ground truth — a slice that contradicts
+        // the carried state proves the chain wrong, so sever rather than keep
+        // showing refuted content as fact
+        const carried = eol(content).split('\n');
+        const got = eol(r.content).split('\n');
+        if (got.at(-1) === '') got.pop();
+        const start = (r.start_line ?? 1) - 1;
+        if (!got.every((line, j) => carried[start + j] === line)) {
+          content = undefined;
+          blame = undefined;
+        }
       }
       snapshots.set(t.index, content !== undefined
         ? { content, blame, region: r.region }

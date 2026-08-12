@@ -48,9 +48,18 @@ test('renders conservative shell reads in the editor', () => {
   assert.equal(inferBashTool('cd /repo && ls'), null);
   assert.equal(inferBashRead("cd src && sed -n '5p' app.js", '/repo').path, '/repo/src/app.js');
   assert.deepEqual(inferBashRead("cd /repo && cat -- 'src/app.js'", '/elsewhere'), {
-    verb: 'read_file', path: '/repo/src/app.js', title: 'src/app.js', start_line: 1,
+    verb: 'read_file', path: '/repo/src/app.js', title: 'src/app.js', start_line: 1, full: true,
   });
-  assert.equal(inferBashRead('head -20 src/app.js', '/repo').path, '/repo/src/app.js');
+  // cat sees the whole file: its result may claim full-file authority
+  assert.equal(bashReadResult(
+    inferBashRead("cd /repo && cat -- 'src/app.js'", '/elsewhere'),
+    { stdout: 'a\nb\n' }, {},
+  ).total_lines, 2);
+  // head is a slice: no total_lines, never an authority
+  const head = inferBashRead('head -20 src/app.js', '/repo');
+  assert.equal(head.path, '/repo/src/app.js');
+  assert.equal(head.full, undefined);
+  assert.equal(bashReadResult(head, { stdout: 'a\nb\n' }, {}).total_lines, undefined);
   assert.equal(inferBashRead("sed -n '5p' app.js", 'C:\\repo').path, 'C:\\repo\\app.js');
   assert.equal(bashReadResult(read, { stdout: '', stderr: 'sed: failed' }, {}), null);
   assert.equal(inferBashRead("cd \"$HOME\" && sed -n '1p' app.js", '/repo'), null);

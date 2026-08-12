@@ -191,7 +191,7 @@ export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId }: {
   cwd?: string;
   currentSession?: { provider: string; id: string } | null;
   onToolStart?: (tool: string) => void;
-  onPtyId?: (id: string, tool: string) => void;
+  onPtyId?: (id: string, tool: string, fresh: boolean) => void;
 }) {
   const [config, setConfig] = useState<Config | null>(null);
   const [error, setError] = useState<string>();
@@ -309,7 +309,9 @@ export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId }: {
               visible={active === e.key}
               onPtyId={(id) => {
                 setTerms((t) => t.map((x) => (x.key === e.key ? { ...x, ptyId: id } : x)));
-                onPtyId?.(id, e.tool);
+                // fresh = started here, not adopted/taken back — only fresh
+                // starts may satisfy a session hunt
+                onPtyId?.(id, e.tool, !e.attachId);
               }}
               onExit={() => removeTerm(e.key)}
               onTakeBack={() => takeBack(e.key)}

@@ -56,7 +56,7 @@ export interface BlameMark { text: string; title: string; step: number }
 export function CodeView({ file, animate, speed, flashOnly, blame }: {
   file: FileView; animate: boolean; speed: number;
   flashOnly?: boolean;
-  blame?: { marks: (BlameMark | null)[]; compact?: boolean; onJump: (step: number) => void };
+  blame?: { marks: (BlameMark | null)[]; compact?: boolean; onJump: (step: number) => void; onToggle?: () => void };
 }) {
   const r = file.render;
   const ref = useRef<HTMLDivElement>(null);
@@ -67,6 +67,9 @@ export function CodeView({ file, animate, speed, flashOnly, blame }: {
   const typing = !!(animate && region && isEdit && !flashOnly);
   const [typedDone, setTypedDone] = useState(!typing);
   const [typedChars, setTypedChars] = useState(0);
+  // single click toggles blame detail; a short timer lets double-click (jump)
+  // cancel it so jumping doesn't also flip the gutter
+  const blameClickTimer = useRef<number>(undefined);
 
   const html = useMemo(() => highlightHtml(content, file.path), [content, file.path]);
   const total = useMemo(() => content.split('\n').length, [content]);
@@ -139,11 +142,25 @@ export function CodeView({ file, animate, speed, flashOnly, blame }: {
           {Array.from({ length: total }, (_, i) => <div key={i}>{startLine + i}</div>)}
         </div>
         {blame && (
-          <div className={`blameGutter${blame.compact ? ' compact' : ''}`}>
+          <div
+            className={`blameGutter${blame.compact ? ' compact' : ''}`}
+            onClick={() => {
+              if (!blame.onToggle) return;
+              clearTimeout(blameClickTimer.current);
+              blameClickTimer.current = window.setTimeout(blame.onToggle, 220);
+            }}
+            onDoubleClick={() => clearTimeout(blameClickTimer.current)}
+            title={blame.onToggle ? 'Click to toggle blame detail' : undefined}
+          >
             {Array.from({ length: total }, (_, i) => {
               const m = blame.marks[i] ?? null;
               return m ? (
-                <div key={i} className="blameStamp" title={m.title} onClick={() => blame.onJump(m.step)}>{m.text}</div>
+                <div
+                  key={i}
+                  className="blameStamp"
+                  title={`${m.title} · double-click to jump`}
+                  onDoubleClick={(e) => { e.stopPropagation(); clearTimeout(blameClickTimer.current); blame.onJump(m.step); }}
+                >{m.text}</div>
               ) : (
                 <div key={i} className="blameNone">·</div>
               );
@@ -183,7 +200,7 @@ export function DiffView({ file, animate }: { file: FileView; animate: boolean }
         <div key={hi}>
           <div className="codeline hunk">
             <span className="ln" />
-            <span>{`@@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@`}</span>
+            <span>{h.oldStart >= 1 ? `@@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@` : '@@'}</span>
           </div>
           {h.lines.map((line, li) => {
             const cls = line.startsWith('+') ? 'added' : line.startsWith('-') ? 'removed' : '';

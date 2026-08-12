@@ -284,25 +284,27 @@ function unwrapCd(command) {
 function parseBashRead(command) {
   const parsed = unwrapCd(command);
   if (!parsed) return null;
+  let full = false; // only cat sees the whole file; head/sed are slices
   let match = parsed.command.match(/^sed\s+-n\s+(['"])(\d+)(?:,(\d+))?p\1\s+(?:--\s+)?(.+)$/);
   let start = Number(match?.[2]);
   if (match && Number(match[3] ?? match[2]) < start) return null;
   if (!match) {
     match = parsed.command.match(/^cat\s+(?:--\s+)?(.+)$/);
     start = 1;
+    full = !!match;
   }
   if (!match) {
     match = parsed.command.match(/^head\s+(?:(?:-n\s+|-)(\d+)\s+)?(?:--\s+)?(.+)$/);
     start = 1;
   }
   const file = literalShellArg(match?.at(-1) ?? '');
-  return file && !file.startsWith('-') && start >= 1 ? { parsed, file, start } : null;
+  return file && !file.startsWith('-') && start >= 1 ? { parsed, file, start, full } : null;
 }
 
 export function inferBashRead(command, sessionCwd) {
   const spec = parseBashRead(command);
   if (!spec) return null;
-  const { parsed, file, start } = spec;
+  const { parsed, file, start, full } = spec;
 
   const windows = [file, parsed.cwd, sessionCwd]
     .some((value) => /^[a-z]:[\\/]|^\\\\/i.test(value ?? ''));
@@ -314,7 +316,7 @@ export function inferBashRead(command, sessionCwd) {
   }
   if (!paths.isAbsolute(file) && (!cwd || !paths.isAbsolute(cwd))) return null;
   const resolved = paths.isAbsolute(file) ? file : paths.resolve(cwd, file);
-  return { verb: 'read_file', path: resolved, title: shortPath(resolved), start_line: start };
+  return { verb: 'read_file', path: resolved, title: shortPath(resolved), start_line: start, ...(full ? { full: true } : {}) };
 }
 
 export function bashReadResult(read, result, block) {
@@ -323,6 +325,9 @@ export function bashReadResult(read, result, block) {
   const lines = content ? content.replace(/\r?\n$/, '').split(/\r?\n/).length : 0;
   return {
     verb: 'read_file', path: read.path, content, start_line: read.start_line,
+    // total_lines only when the command provably saw the whole file (cat);
+    // head/sed slices must never become full-file authorities downstream
+    ...(read.full && read.start_line === 1 ? { total_lines: lines } : {}),
     region: { start: read.start_line, end: read.start_line + Math.max(0, lines - 1) },
   };
 }

@@ -116,41 +116,59 @@ export default function App() {
   // writing its transcript; poll this pwd's session list and auto-load the one
   // that appears after launch.
   const TOOL_PROVIDERS: Record<string, string> = { claude: 'claude-code', codex: 'codex' };
-  const [hunt, setHunt] = useState<{ provider: string; since: number } | null>(null);
-  const lastPty = useRef<{ id: string; tool: string } | null>(null);
+  // one hunt per launch, each remembering which PTY it came from — a second
+  // terminal starting mid-hunt must not steal or clobber the first's identity
+  const [hunts, setHunts] = useState<{ key: number; provider: string; tool: string; since: number; ptyId?: string }[]>([]);
+  const huntKey = useRef(1);
+  const claimed = useRef(new Set<string>());
   const onToolStart = useCallback((tool: string) => {
     const provider = TOOL_PROVIDERS[tool];
-    if (provider) setHunt({ provider, since: Date.now() });
+    if (provider) setHunts((hs) => [...hs, { key: huntKey.current++, provider, tool, since: Date.now() }]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const onPtyStart = useCallback((id: string, tool: string, fresh: boolean) => {
+    // only a freshly started terminal (not an adoption/take-back) can be the
+    // one a hunt launched; bind to the oldest unbound hunt of that tool
+    if (!fresh) return;
+    setHunts((hs) => {
+      const i = hs.findIndex((h) => h.tool === tool && !h.ptyId);
+      return i < 0 ? hs : hs.map((h, j) => (j === i ? { ...h, ptyId: id } : h));
+    });
   }, []);
   const sessionId = r.session?.id;
   useEffect(() => {
-    if (!hunt || !pwd) return;
+    if (!hunts.length || !pwd) return;
     const id = setInterval(async () => {
-      if (Date.now() - hunt.since > 120_000) { setHunt(null); return; }
-      try {
-        const list: SessionMeta[] = await (
-          await fetch(`/api/sessions?pwd=${encodeURIComponent(pwd)}&provider=${encodeURIComponent(hunt.provider)}`)
-        ).json();
-        const cand = Array.isArray(list)
-          ? list.find((s) => s.updated_at > hunt.since - 5_000 && s.id !== sessionId)
-          : undefined;
-        if (cand) {
-          setHunt(null);
+      const now = Date.now();
+      if (hunts.some((h) => now - h.since > 120_000)) {
+        setHunts((hs) => hs.filter((h) => now - h.since <= 120_000));
+        return;
+      }
+      for (const h of hunts) {
+        try {
+          const list: SessionMeta[] = await (
+            await fetch(`/api/sessions?pwd=${encodeURIComponent(pwd)}&provider=${encodeURIComponent(h.provider)}`)
+          ).json();
+          const cand = Array.isArray(list)
+            ? list.filter((s) => s.updated_at > h.since - 5_000 && s.id !== sessionId && !claimed.current.has(s.id))
+              .sort((a, b) => a.updated_at - b.updated_at)[0]
+            : undefined;
+          if (!cand) continue;
+          claimed.current.add(cand.id);
+          setHunts((hs) => hs.filter((x) => x.key !== h.key));
           applyPick(pwd, cand);
           // label the PTY with its transcript so the live-terminal picker can offer it
-          const pty = lastPty.current;
-          if (pty) {
+          if (h.ptyId) {
             void fetch('/api/pty-session', {
               method: 'POST',
-              body: JSON.stringify({ ptyId: pty.id, provider: cand.provider, session: cand.id, pwd }),
+              body: JSON.stringify({ ptyId: h.ptyId, provider: cand.provider, session: cand.id, pwd }),
             });
           }
-        }
-      } catch { /* retry next tick */ }
+        } catch { /* retry next tick */ }
+      }
     }, 3000);
     return () => clearInterval(id);
-  }, [hunt, pwd, sessionId, applyPick]);
+  }, [hunts, pwd, sessionId, applyPick]);
 
 
   const folder = pwd?.replace(/[\\/]+$/, '').split(/[\\/]/).pop();
@@ -358,7 +376,7 @@ export default function App() {
                   cwd={cwd}
                   currentSession={r.session && { provider: r.session.provider, id: r.session.id }}
                   onToolStart={onToolStart}
-                  onPtyId={(id, tool) => { lastPty.current = { id, tool }; }}
+                  onPtyId={onPtyStart}
                 />
               </div>
             </div>

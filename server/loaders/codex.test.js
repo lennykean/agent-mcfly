@@ -38,7 +38,7 @@ test('recovers patch semantics from Codex exec wrappers', () => {
   const patch = 'const patch = "*** Begin Patch\\n*** Update File: server/server.js\\n@@\\n-old\\n+new\\n*** End Patch"; await tools.apply_patch(patch);';
   assert.deepEqual(patchRender(patch), {
     verb: 'patch_file', path: 'server/server.js', title: 'server.js',
-    hunks: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ['-old', '+new'] }],
+    hunks: [{ oldStart: 0, oldLines: 1, newStart: 0, newLines: 1, lines: ['-old', '+new'] }],
   });
 
   const add = 'const patch = "*** Begin Patch\\n*** Add File: hello.txt\\n+hello\\n+world\\n*** End Patch"; await tools.apply_patch(patch);';
@@ -84,6 +84,19 @@ test('failed commands never masquerade as file reads', () => {
   const direct = resultRender({ name: 'local_shell', input: '', render }, 'raw file body');
   assert.equal(direct.verb, 'read_file');
   assert.equal(direct.content, 'raw file body');
+  // nested harness shell_command failures are NOT direct: plain error text
+  // without ANSI must not classify as a read
+  const nestedFail = resultRender({ name: 'shell_command', input: '', render, nested: true },
+    'Exit code: 1\nWall time: 0.1 seconds\nOutput:\ncat: a.js: No such file or directory');
+  assert.equal(nestedFail.verb, 'exec');
+  const scriptError = resultRender({ name: 'shell_command', input: '', render, nested: true },
+    'Script error:\nExit code: 124\nWall time: 14.4 seconds\nOutput:\ncommand timed out');
+  assert.equal(scriptError.verb, 'exec');
+  // nested success still reads
+  const nestedOk = resultRender({ name: 'shell_command', input: '', render, nested: true },
+    'Exit code: 0\nWall time: 0.1 seconds\nOutput:\nreal file body');
+  assert.equal(nestedOk.verb, 'read_file');
+  assert.equal(nestedOk.content, 'real file body');
 });
 
 test('keeps non-shell Codex wrappers out of the terminal and preserves images', () => {
