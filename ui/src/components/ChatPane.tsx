@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef } from 'react';
+import { useStickyScroll } from '../lib/useStickyScroll';
 import type { Step } from '../types';
 import { durationFor } from '../lib/timeline';
 import { TypeText } from './TypeText';
@@ -35,7 +36,7 @@ const Bubble = memo(function Bubble({ step, onOpenAgent }: { step: Step; onOpenA
     const r = step.result;
     return (
       <div className="msg agentcard">
-        <div>🤖 <strong>{step.call.agent_type ?? r?.agent_type ?? 'agent'}</strong> — {step.call.title}</div>
+        <div><span className="codicon codicon-hubot agentIcon" /> <strong>{step.call.agent_type ?? r?.agent_type ?? 'agent'}</strong> — {step.call.title}</div>
         {r?.summary && <div className="agentSummary">{r.summary.slice(0, 300)}</div>}
         {r?.child_session_id && (
           <button onClick={() => onOpenAgent(r.child_session_id!)}>open timeline</button>
@@ -59,23 +60,24 @@ const Bubble = memo(function Bubble({ step, onOpenAgent }: { step: Step; onOpenA
 });
 
 export function ChatPane({
-  steps, pointer, animateIndex, onOpenAgent, visible = true,
+  steps, pointer, animateIndex, seekTick, onOpenAgent, visible = true,
 }: {
-  steps: Step[]; pointer: number; animateIndex: number; onOpenAgent: (key: string) => void; visible?: boolean;
+  steps: Step[]; pointer: number; animateIndex: number; seekTick: number;
+  onOpenAgent: (key: string) => void; visible?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
 
-  // re-snap on reveal too — scrolls while display:none are no-ops
-  useEffect(() => {
-    if (visible) ref.current?.scrollTo({ top: ref.current.scrollHeight });
-  }, [pointer, visible]);
+  // pin to bottom; user scrolling up holds position until they return or time travel
+  const stuck = useStickyScroll(ref, [pointer], `${seekTick}:${visible}`, visible);
 
   // keep the streaming bubble in view while TypeText grows it
   useEffect(() => {
     if (animateIndex < 0) return;
-    const id = setInterval(() => ref.current?.scrollTo({ top: ref.current.scrollHeight }), 300);
+    const id = setInterval(() => {
+      if (stuck.current) ref.current?.scrollTo({ top: ref.current.scrollHeight });
+    }, 300);
     return () => clearInterval(id);
-  }, [animateIndex]);
+  }, [animateIndex, stuck]);
 
   return (
     <div className="chatPane">

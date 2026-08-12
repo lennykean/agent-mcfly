@@ -15,7 +15,7 @@ export function AgentTree({
         onClick={() => onSelect(node.key)}
         title={node.label}
       >
-        {node.parentKey === null ? '● ' : '🤖 '}
+        <span className={`codicon ${node.parentKey === null ? 'codicon-broadcast' : 'codicon-hubot'} agentIcon`} />
         {node.agentType ? `[${node.agentType}] ` : ''}
         {node.label}
       </div>

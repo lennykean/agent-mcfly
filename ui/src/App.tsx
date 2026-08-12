@@ -5,7 +5,7 @@ import { ChatPane } from './components/ChatPane';
 import { DataPane } from './components/DataPane';
 import { EditorPane, type UserTab } from './components/EditorPane';
 import { Explorer } from './components/Explorer';
-import { LiveTerm, storedPty } from './components/LivePane';
+import { LiveTerm } from './components/LivePane';
 import { SessionPicker } from './components/SessionPicker';
 import { Splitter } from './components/Splitter';
 import type { SessionMeta } from './types';
@@ -113,6 +113,7 @@ export default function App() {
   // that appears after launch.
   const TOOL_PROVIDERS: Record<string, string> = { claude: 'claude-code', codex: 'codex' };
   const [hunt, setHunt] = useState<{ provider: string; since: number } | null>(null);
+  const lastPty = useRef<{ id: string; tool: string } | null>(null);
   const onToolStart = useCallback((tool: string) => {
     const provider = TOOL_PROVIDERS[tool];
     if (provider) setHunt({ provider, since: Date.now() });
@@ -134,7 +135,7 @@ export default function App() {
           setHunt(null);
           applyPick(pwd, cand);
           // label the PTY with its transcript so the live-terminal picker can offer it
-          const pty = storedPty();
+          const pty = lastPty.current;
           if (pty) {
             void fetch('/api/pty-session', {
               method: 'POST',
@@ -261,6 +262,7 @@ export default function App() {
                 <ToolLog
                   key={`${r.session?.id}:${r.viewKey}`}
                   steps={r.steps} pointer={r.pointer} currentToolIndex={r.view.currentToolIndex} onJump={r.jump}
+                  seekTick={r.seekTick}
                   visible={leftTab === 'tools'}
                 />
               </div>
@@ -304,7 +306,7 @@ export default function App() {
                   </div>
                 </div>
                 <div className={bottomTab === 'term' ? 'tabBody' : 'tabBody hiddenTab'}>
-                  <Terminal blocks={r.view.term} animatedAt={animatedTermAt} speed={r.speed} visible={bottomTab === 'term'} />
+                  <Terminal blocks={r.view.term} animatedAt={animatedTermAt} speed={r.speed} seekTick={r.seekTick} visible={bottomTab === 'term'} />
                 </div>
                 <div className={bottomTab === 'data' ? 'tabBody' : 'tabBody hiddenTab'}>
                   <DataPane data={r.view.data} animate={r.view.data?.touchedAt === r.animateIndex} />
@@ -332,13 +334,19 @@ export default function App() {
                   steps={r.steps}
                   pointer={r.pointer}
                   animateIndex={r.animateIndex}
+                  seekTick={r.seekTick}
                   onOpenAgent={openAgent}
                   visible={rightTab === 'chat'}
                 />
               </div>
               {/* stays mounted across tab switches so the PTY session survives */}
               <div className={rightTab === 'term' ? 'tabBody' : 'tabBody hiddenTab'}>
-                <LiveTerm cwd={cwd} onToolStart={onToolStart} />
+                <LiveTerm
+                  cwd={cwd}
+                  currentSession={r.session && { provider: r.session.provider, id: r.session.id }}
+                  onToolStart={onToolStart}
+                  onPtyId={(id, tool) => { lastPty.current = { id, tool }; }}
+                />
               </div>
             </div>
           </>

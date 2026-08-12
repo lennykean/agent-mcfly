@@ -16,13 +16,6 @@ export interface LivePty {
   screen?: { text: string; cols: number; rows: number } | null;
 }
 
-// the PTY this tab currently holds (or last held); no auto-reattach — the
-// gallery is the only way back in
-const PTY_KEY = 'mcfly.pty';
-export const storedPty = (): { id: string; tool: string } | null => {
-  try { return JSON.parse(sessionStorage.getItem(PTY_KEY) ?? 'null'); } catch { return null; }
-};
-
 // VS Code dark terminal palette
 const THEME = {
   background: '#181818',
@@ -58,12 +51,16 @@ function MiniScreen({ screen }: { screen: { text: string; cols: number; rows: nu
 // A live PTY session: xterm.js <-> websocket <-> node-pty on the server.
 // Control frames from the server are \x00-prefixed JSON; everything else is
 // terminal data. 'taken' = another window stole the terminal (tmux attach -d).
-function PtySession({ tool, token, cwd, steal, onExit, onTakeBack }: {
-  tool: string; token: string; cwd?: string; steal?: boolean;
-  onExit: () => void; onTakeBack: () => void;
+// Stays mounted while hidden so backgrounded terminals keep their sockets.
+function PtySession({ tool, token, cwd, attachId, steal, visible, onPtyId, onExit, onTakeBack }: {
+  tool: string; token: string; cwd?: string; attachId?: string; steal?: boolean; visible: boolean;
+  onPtyId: (id: string) => void; onExit: () => void; onTakeBack: () => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const termRef = useRef<Xterm | null>(null);
   const [status, setStatus] = useState<'connecting' | 'up' | 'closed' | 'taken'>('connecting');
+  const onPtyIdRef = useRef(onPtyId);
+  onPtyIdRef.current = onPtyId;
   const onExitRef = useRef(onExit);
   onExitRef.current = onExit;
 
@@ -81,6 +78,7 @@ function PtySession({ tool, token, cwd, steal, onExit, onTakeBack }: {
       cursorBlink: true,
       theme: THEME,
     });
+    termRef.current = term;
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(host);
@@ -95,13 +93,11 @@ function PtySession({ tool, token, cwd, steal, onExit, onTakeBack }: {
     // deferred connect: StrictMode's throwaway first mount must never reach
     // the server, or every terminal start leaves a ghost PTY
     const timer = setTimeout(() => {
-      const prior = storedPty();
-      const attach = prior && prior.tool === tool ? prior.id : null;
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
       const sock = new WebSocket(
         `${proto}://${location.host}/ws/pty?token=${token}&tool=${encodeURIComponent(tool)}&cwd=${encodeURIComponent(cwd ?? '')}`
-        + (attach ? `&attach=${attach}` : '')
-        + (attach && steal ? '&steal=1' : ''),
+        + (attachId ? `&attach=${attachId}` : '')
+        + (attachId && steal ? '&steal=1' : ''),
       );
       ws = sock;
       sock.onopen = () => {
@@ -113,10 +109,9 @@ function PtySession({ tool, token, cwd, steal, onExit, onTakeBack }: {
         if (typeof e.data === 'string' && e.data.charCodeAt(0) === 0) {
           try {
             const c = JSON.parse(e.data.slice(1));
-            if (c.ptyId) sessionStorage.setItem(PTY_KEY, JSON.stringify({ id: c.ptyId, tool }));
-            if (c.exit) sessionStorage.removeItem(PTY_KEY);
-            if (c.gone) { sessionStorage.removeItem(PTY_KEY); onExitRef.current(); }
-            if (c.busy || c.taken) setStatus('taken'); // keep ptyId: take-back stays possible
+            if (c.ptyId) onPtyIdRef.current(c.ptyId);
+            if (c.exit || c.gone) onExitRef.current();
+            if (c.busy || c.taken) setStatus('taken'); // take-back stays possible
           } catch { /* not a control frame after all */ }
           return;
         }
@@ -130,7 +125,9 @@ function PtySession({ tool, token, cwd, steal, onExit, onTakeBack }: {
 
     const ro = new ResizeObserver(() => {
       fit.fit();
-      if (ws?.readyState === 1) ws.send(JSON.stringify({ t: 'r', cols: term.cols, rows: term.rows }));
+      if (ws?.readyState === 1 && term.cols > 1 && term.rows > 1) {
+        ws.send(JSON.stringify({ t: 'r', cols: term.cols, rows: term.rows }));
+      }
     });
     ro.observe(host);
 
@@ -146,8 +143,14 @@ function PtySession({ tool, token, cwd, steal, onExit, onTakeBack }: {
       ro.disconnect();
       dataSub?.dispose();
       term.dispose();
+      termRef.current = null;
     };
-  }, [tool, token, cwd, steal]);
+  }, [tool, token, cwd, attachId, steal]);
+
+  // focus when this terminal's tab is revealed
+  useEffect(() => {
+    if (visible) termRef.current?.focus();
+  }, [visible]);
 
   return (
     <div className="ptySession">
@@ -155,7 +158,7 @@ function PtySession({ tool, token, cwd, steal, onExit, onTakeBack }: {
       {status === 'closed' && (
         <div className="ptyClosed">
           session ended
-          <button onClick={() => { sessionStorage.removeItem(PTY_KEY); onExit(); }}>back</button>
+          <button onClick={onExit}>close</button>
         </div>
       )}
       {status === 'taken' && (
@@ -163,7 +166,7 @@ function PtySession({ tool, token, cwd, steal, onExit, onTakeBack }: {
           terminal is live in another window
           <div className="ptyTakenActions">
             <button onClick={onTakeBack}>take it back</button>
-            <button onClick={() => { sessionStorage.removeItem(PTY_KEY); onExit(); }}>close</button>
+            <button onClick={onExit}>close</button>
           </div>
         </div>
       )}
@@ -171,19 +174,32 @@ function PtySession({ tool, token, cwd, steal, onExit, onTakeBack }: {
   );
 }
 
-// LIVE TERMINAL pane: attach to an existing terminal from the gallery, or
-// start a new one in the open folder. Terminals are independent of the
-// folder/session you have open; refresh detaches (never kills).
-export function LiveTerm({ cwd, onToolStart }: {
-  cwd?: string; onToolStart?: (tool: string) => void;
+interface TermEntry {
+  key: number;
+  tool: string;
+  attachId?: string; // set when adopting an existing PTY
+  steal?: boolean;
+  nonce: number; // bump to force a fresh socket (take-back)
+  ptyId?: string; // learned from the server's control frame
+}
+
+// LIVE TERMINAL pane: multiple terminals as tabs (tmux windows). Every
+// terminal stays mounted while backgrounded; '+' opens the picker (attach an
+// existing PTY from the gallery, or start a new tool in the open folder).
+// Refresh detaches all (PTYs persist server-side; re-adopt via the gallery).
+export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId }: {
+  cwd?: string;
+  currentSession?: { provider: string; id: string } | null;
+  onToolStart?: (tool: string) => void;
+  onPtyId?: (id: string, tool: string) => void;
 }) {
   const [config, setConfig] = useState<Config | null>(null);
   const [error, setError] = useState<string>();
-  const [tool, setTool] = useState<string>();
-  const [steal, setSteal] = useState(false);
-  const [nonce, setNonce] = useState(0);
+  const [terms, setTerms] = useState<TermEntry[]>([]);
+  const [active, setActive] = useState<number | null>(null); // null => picker
   const [ptys, setPtys] = useState<LivePty[]>([]);
   const [confirmSteal, setConfirmSteal] = useState<string>();
+  const nextKey = useRef(1);
 
   useEffect(() => {
     fetch('/api/config')
@@ -192,95 +208,148 @@ export function LiveTerm({ cwd, onToolStart }: {
       .catch(() => setError('api unreachable'));
   }, []);
 
-  // gallery refresh while in picker state
+  // registry poll: feeds the gallery AND the tab badges (which terminal is
+  // the live agent of the session being watched)
   useEffect(() => {
-    if (tool) return;
     const load = () =>
       fetch('/api/ptys')
         .then((r) => r.json())
         .then((d) => setPtys(Array.isArray(d) ? d : []))
         .catch(() => setPtys([]));
     void load();
-    const t = setInterval(load, 4000);
+    const t = setInterval(load, active === null ? 4000 : 8000);
     return () => clearInterval(t);
-  }, [tool]);
+  }, [active]);
 
-  const startNew = (t: string) => {
-    sessionStorage.removeItem(PTY_KEY); // never silently attach an old id
-    setSteal(false);
-    setNonce((n) => n + 1);
-    setTool(t);
-    onToolStart?.(t);
+  const sessionOf = (ptyId?: string) => ptys.find((p) => p.id === ptyId)?.session ?? null;
+  const isWatched = (session: LivePty['session']) =>
+    !!session && !!currentSession
+    && session.provider === currentSession.provider && session.id === currentSession.id;
+
+  const addTerm = (entry: Omit<TermEntry, 'key' | 'nonce'>) => {
+    const key = nextKey.current++;
+    setTerms((t) => [...t, { ...entry, key, nonce: 0 }]);
+    setActive(key);
+    setConfirmSteal(undefined);
+    return key;
+  };
+
+  const startNew = (tool: string) => {
+    addTerm({ tool });
+    onToolStart?.(tool);
   };
 
   const adopt = (p: LivePty, doSteal: boolean) => {
-    sessionStorage.setItem(PTY_KEY, JSON.stringify({ id: p.id, tool: p.tool }));
-    setSteal(doSteal);
-    setNonce((n) => n + 1);
-    setTool(p.tool);
+    addTerm({ tool: p.tool, attachId: p.id, steal: doSteal, ptyId: p.id });
   };
 
-  const detach = () => {
-    sessionStorage.removeItem(PTY_KEY);
-    setTool(undefined);
+  const removeTerm = (key: number) => {
+    setTerms((t) => {
+      const rest = t.filter((e) => e.key !== key);
+      setActive((cur) => (cur === key ? (rest.at(-1)?.key ?? null) : cur));
+      return rest;
+    });
   };
 
-  const kill = (id?: string) => {
-    const target = id ?? storedPty()?.id;
-    if (target) {
-      void fetch('/api/pty-kill', { method: 'POST', body: JSON.stringify({ id: target }) })
-        .then(() => setPtys((cur) => cur.filter((p) => p.id !== target)));
+  const killTerm = (key: number) => {
+    const entry = terms.find((e) => e.key === key);
+    if (entry?.ptyId) {
+      void fetch('/api/pty-kill', { method: 'POST', body: JSON.stringify({ id: entry.ptyId }) });
     }
-    if (!id) detach();
+    removeTerm(key);
   };
 
-  const takeBack = () => {
-    setSteal(true);
-    setNonce((n) => n + 1);
+  const takeBack = (key: number) => {
+    setTerms((t) => t.map((e) => (
+      e.key === key ? { ...e, attachId: e.ptyId ?? e.attachId, steal: true, nonce: e.nonce + 1 } : e
+    )));
   };
+
+  // PTYs already attached as tabs here shouldn't be offered in the gallery
+  const ownIds = new Set(terms.map((e) => e.ptyId).filter(Boolean));
+  const offered = ptys.filter((p) => !ownIds.has(p.id));
 
   return (
     <div className="livePane">
-      {tool && (
-        <div className="liveBar">
-          <span>{tool === '_' ? 'shell' : tool}</span>
-          <span>
-            <button onClick={detach} title="Detach: leave it running">⏏ detach</button>
-            <button onClick={() => kill()} title="Kill the terminal">■ kill</button>
+      <div className="liveTabs">
+        {terms.map((e) => (
+          <span key={e.key} className={`liveTab ${active === e.key ? 'active' : ''}`} onClick={() => setActive(e.key)}>
+            {isWatched(sessionOf(e.ptyId))
+              ? <span className="liveDot" title="this terminal is running the session you're watching" />
+              : <span className="codicon codicon-terminal" />}
+            {e.tool === '_' ? 'shell' : e.tool}
+            <span
+              className="codicon codicon-close liveTabClose"
+              title="Detach (leave it running)"
+              onClick={(ev) => { ev.stopPropagation(); removeTerm(e.key); }}
+            />
           </span>
+        ))}
+        <span className={`liveTab plus ${active === null ? 'active' : ''}`} title="New / attach" onClick={() => setActive(null)}>
+          <span className="codicon codicon-add" />
+        </span>
+        {active !== null && (
+          <span className="liveTabActions">
+            <button onClick={() => removeTerm(active)} title="Detach: leave it running">⏏ detach</button>
+            <button onClick={() => killTerm(active)} title="Kill the terminal">■ kill</button>
+          </span>
+        )}
+      </div>
+
+      {terms.map((e) => (
+        <div key={e.key} className={active === e.key ? 'tabBody' : 'tabBody hiddenTab'}>
+          {config && (
+            <PtySession
+              key={`${e.key}:${e.nonce}`}
+              tool={e.tool}
+              token={config.token}
+              cwd={cwd}
+              attachId={e.attachId}
+              steal={e.steal}
+              visible={active === e.key}
+              onPtyId={(id) => {
+                setTerms((t) => t.map((x) => (x.key === e.key ? { ...x, ptyId: id } : x)));
+                onPtyId?.(id, e.tool);
+              }}
+              onExit={() => removeTerm(e.key)}
+              onTakeBack={() => takeBack(e.key)}
+            />
+          )}
         </div>
-      )}
-      {tool && config ? (
-        <PtySession
-          key={`${tool}:${nonce}`}
-          tool={tool} token={config.token} cwd={cwd} steal={steal}
-          onExit={detach} onTakeBack={takeBack}
-        />
-      ) : (
+      ))}
+
+      {active === null && (
         <div className="livePicker">
           {error && <div className="pickerError">{error}</div>}
 
-          {ptys.length > 0 && (
+          {offered.length > 0 && (
             <>
               <div className="pickerTitle">attach a terminal</div>
               <div className="liveGallery">
-                {ptys.map((p) => (
+                {offered.map((p) => (
                   <div
                     key={p.id}
-                    className={`ptyTile ${p.attached ? 'inUse' : ''}`}
+                    className={`ptyTile ${p.attached ? 'inUse' : ''} ${isWatched(p.session) ? 'watching' : ''}`}
                     onClick={() => (p.attached ? setConfirmSteal(p.id) : adopt(p, false))}
                   >
                     <div className="tileHead">
-                      <span className="codicon codicon-terminal" />
+                      {isWatched(p.session)
+                        ? <span className="liveDot" title="running the session you're watching" />
+                        : <span className="codicon codicon-terminal" />}
                       <span className="tileName">
                         {p.tool === '_' ? 'shell' : p.tool} · {p.cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop()}
                       </span>
+                      {isWatched(p.session) && <span className="tileBadge watchBadge">watching</span>}
                       <span className={`tileBadge ${p.attached ? 'busy' : ''}`}>{p.attached ? 'in use' : 'detached'}</span>
                       {!p.attached && (
                         <span
                           className="codicon codicon-close tileKill"
                           title="Kill this terminal"
-                          onClick={(e) => { e.stopPropagation(); kill(p.id); }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void fetch('/api/pty-kill', { method: 'POST', body: JSON.stringify({ id: p.id }) })
+                              .then(() => setPtys((cur) => cur.filter((x) => x.id !== p.id)));
+                          }}
                         />
                       )}
                     </div>
@@ -297,7 +366,7 @@ export function LiveTerm({ cwd, onToolStart }: {
                       <div className="tileConfirm" onClick={(e) => e.stopPropagation()}>
                         live in another window — take the terminal?
                         <div>
-                          <button onClick={() => { setConfirmSteal(undefined); adopt(p, true); }}>yes</button>
+                          <button onClick={() => adopt(p, true)}>yes</button>
                           <button onClick={() => setConfirmSteal(undefined)}>no</button>
                         </div>
                       </div>

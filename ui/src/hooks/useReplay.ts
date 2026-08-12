@@ -22,6 +22,9 @@ export function useReplay() {
   const [speed, setSpeed] = useState(1);
   // step index (within viewKey) revealed by playback → gets entry animations
   const [animate, setAnimate] = useState<{ key: string; index: number } | null>(null);
+  // bumped on every USER-initiated seek (jump/step/scrub/session switch) —
+  // distinguishes time travel from playback advance for sticky scrolling
+  const [seekTick, setSeekTick] = useState(0);
 
   const busy = useRef(new WeakSet<Timeline>());
 
@@ -84,6 +87,7 @@ export function useReplay() {
     setPlaying(false);
     setFollow(false);
     setAnimate(null);
+    setSeekTick((t) => t + 1);
     setTick((t) => t + 1);
     void tailOnce('main');
   }, [tailOnce]);
@@ -156,6 +160,7 @@ export function useReplay() {
 
   const jump = useCallback((index: number) => {
     setAnimate(null);
+    setSeekTick((t) => t + 1);
     setPointers((prev) => ({ ...prev, [viewKey]: index }));
     if (index < head) setFollow(false);
   }, [viewKey, head]);
@@ -163,6 +168,7 @@ export function useReplay() {
   // moving the pointer never exits play mode — only the pause button does
   const stepBy = useCallback((delta: number) => {
     setAnimate(null);
+    setSeekTick((t) => t + 1);
     setFollow(false);
     setPointers((prev) => {
       const cur = Math.min(prev[viewKey] ?? head, head);
@@ -172,6 +178,7 @@ export function useReplay() {
 
   const goLive = useCallback(() => {
     setAnimate(null);
+    setSeekTick((t) => t + 1);
     setPointers((prev) => ({ ...prev, [viewKey]: head }));
     setFollow(true);
     setPlaying(true);
@@ -184,6 +191,7 @@ export function useReplay() {
       void tailOnce(key);
     }
     setAnimate(null);
+    setSeekTick((t) => t + 1);
     setPlaying(false);
     setViewKey(key);
     // no pointer entry: new timelines open at their head
@@ -225,7 +233,7 @@ export function useReplay() {
   return {
     session, selectSession, clearSession,
     viewKey, switchView, syncToMain, agents,
-    steps, pointer, head, view, animateIndex, follow,
+    steps, pointer, head, view, animateIndex, follow, seekTick,
     playing, togglePlay, speed, setSpeed,
     jump, stepBy, goLive,
   };

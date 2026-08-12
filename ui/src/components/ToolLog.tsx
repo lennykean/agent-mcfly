@@ -33,22 +33,42 @@ const Row = memo(function Row({
 });
 
 export function ToolLog({
-  steps, pointer, currentToolIndex, onJump, visible = true,
+  steps, pointer, currentToolIndex, seekTick = 0, onJump, visible = true,
 }: {
-  steps: Step[]; pointer: number; currentToolIndex: number; onJump: (i: number) => void; visible?: boolean;
+  steps: Step[]; pointer: number; currentToolIndex: number; seekTick?: number;
+  onJump: (i: number) => void; visible?: boolean;
 }) {
   const currentRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
   const wasVisible = useRef(false);
+  const engaged = useRef(true); // false after a manual scroll, until time travel/reveal
+  const programmatic = useRef(false);
 
-  // scrolls while display:none are no-ops, so re-snap on reveal (centered);
-  // in-view updates keep the gentler 'nearest'
+  // a manual scroll disengages following; our own scrollIntoView must not
   useEffect(() => {
-    if (visible) currentRef.current?.scrollIntoView({ block: wasVisible.current ? 'nearest' : 'center' });
+    const el = listRef.current;
+    if (!el) return;
+    const onScroll = () => { if (!programmatic.current) engaged.current = false; };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, []);
+
+  // time travel or reveal re-engages
+  useEffect(() => { engaged.current = true; }, [seekTick, visible]);
+
+  useEffect(() => {
+    if (!visible || !engaged.current) {
+      wasVisible.current = visible;
+      return;
+    }
+    programmatic.current = true;
+    currentRef.current?.scrollIntoView({ block: wasVisible.current ? 'nearest' : 'center' });
+    setTimeout(() => { programmatic.current = false; }, 150);
     wasVisible.current = visible;
-  }, [currentToolIndex, visible]);
+  }, [currentToolIndex, visible, seekTick]);
 
   return (
-    <div className="toolLog">
+    <div className="toolLog" ref={listRef}>
       {steps.map((step, i) => {
         if (step.kind !== 'tool') return null;
         const isCurrent = i === currentToolIndex;

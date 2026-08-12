@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { TermBlock, TermBlocks } from '../lib/timeline';
+import { useStickyScroll } from '../lib/useStickyScroll';
 import { TypeText } from './TypeText';
 
 // eslint-disable-next-line no-control-regex
@@ -37,16 +38,16 @@ function FreshBlock({ b, speed, onGrow }: { b: TermBlock; speed: number; onGrow:
   );
 }
 
-export function Terminal({ blocks, animatedAt, speed, visible = true }: {
-  blocks: TermBlocks; animatedAt: number; speed: number; visible?: boolean;
+export function Terminal({ blocks, animatedAt, speed, seekTick = 0, visible = true }: {
+  blocks: TermBlocks; animatedAt: number; speed: number; seekTick?: number; visible?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
-  const scrollBottom = () => ref.current?.scrollTo({ top: ref.current.scrollHeight });
 
-  // also re-snap when the pane is revealed — scrolls while display:none are no-ops
-  useEffect(() => {
-    if (visible) scrollBottom();
-  }, [blocks.length, animatedAt, visible]); // eslint-disable-line react-hooks/exhaustive-deps
+  // pin to bottom; user scrolling up holds position until they return or time travel
+  const stuck = useStickyScroll(ref, [blocks.length, animatedAt], `${seekTick}:${visible}`, visible);
+  const scrollBottom = () => {
+    if (stuck.current) ref.current?.scrollTo({ top: ref.current.scrollHeight });
+  };
 
   // ponytail: render last 60 blocks only; full scrollback when someone asks
   const shown = blocks.slice(-60);
