@@ -56,7 +56,7 @@ export interface BlameMark { text: string; title: string; step: number }
 export function CodeView({ file, animate, speed, flashOnly, blame }: {
   file: FileView; animate: boolean; speed: number;
   flashOnly?: boolean;
-  blame?: { marks: (BlameMark | null)[]; onJump: (step: number) => void };
+  blame?: { marks: (BlameMark | null)[]; compact?: boolean; onJump: (step: number) => void };
 }) {
   const r = file.render;
   const ref = useRef<HTMLDivElement>(null);
@@ -139,7 +139,7 @@ export function CodeView({ file, animate, speed, flashOnly, blame }: {
           {Array.from({ length: total }, (_, i) => <div key={i}>{startLine + i}</div>)}
         </div>
         {blame && (
-          <div className="blameGutter">
+          <div className={`blameGutter${blame.compact ? ' compact' : ''}`}>
             {Array.from({ length: total }, (_, i) => {
               const m = blame.marks[i] ?? null;
               return m ? (
