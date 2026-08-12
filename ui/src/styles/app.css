@@ -244,6 +244,16 @@ pre.code.hljs { padding: 0; background: transparent; }
 .tOut { color: var(--fg); }
 .tErr { color: var(--red); }
 
+/* semantic data */
+.dataPane { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--bg-inset); }
+.dataPane.fresh { animation: readflash 1.2s; }
+.dataTitle { padding: 6px 10px; color: var(--fg-dim); border-bottom: 1px solid var(--border); font-size: 12px; }
+.dataScroll { flex: 1; min-height: 0; overflow: auto; padding-bottom: 24px; }
+.dataPane table { border-collapse: collapse; min-width: 100%; font-size: 12px; font-family: var(--font-mono); }
+.dataPane th, .dataPane td { padding: 5px 9px; border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); text-align: left; white-space: pre; }
+.dataPane th { position: sticky; top: 0; background: var(--bg-panel-alt); color: var(--accent); z-index: 1; }
+.dataPane tr:nth-child(even) td { background: rgb(255 255 255 / 2%); }
+
 /* chat */
 .chat { flex: 1; overflow-y: auto; padding: 8px; }
 .msg { margin-bottom: 10px; padding: 6px 10px; border-radius: 4px; overflow-wrap: break-word; white-space: pre-wrap; }

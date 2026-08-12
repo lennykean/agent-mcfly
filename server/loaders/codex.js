@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { isTableTool, tableCall, tableResult } from '../mcfly-data.js';
 
 const ROOT = path.join(os.homedir(), '.codex', 'sessions');
 const INDEX = path.join(os.homedir(), '.codex', 'session_index.jsonl');
@@ -323,6 +324,7 @@ export function callRender(name, input) {
 }
 
 function directRenders(name, input, source = input) {
+  if (isTableTool(name)) return [tableCall(input)];
   if (DIRECT_SHELL_NAMES.has(name) || (name === 'exec' && isCommandJson(input))) {
     const command = commandOf(input);
     const read = !command.includes('${') && fileReadRender(command, input);
@@ -373,6 +375,9 @@ function execPayload(text) {
 
 export function resultRender(meta, text, output) {
   if (!meta) return { verb: 'other' };
+  if (meta.render?.verb === 'data') {
+    return tableResult(output) ?? tableResult(text) ?? { verb: 'exec', stdout: execPayload(text), stderr: '' };
+  }
   // Edits render from the result side so the timeline applies them only after completion.
   if (meta.name === 'apply_patch' || nestedToolNames(meta.input).includes('apply_patch')) {
     return meta.render;

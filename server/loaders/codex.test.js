@@ -96,3 +96,17 @@ test('keeps non-shell Codex wrappers out of the terminal and preserves images', 
   assert.deepEqual(result, { ...render, image_src: 'data:image/png;base64,cG5n' });
   assert.equal(resultRender({ name: 'exec', input: 'await tools.web__run({})', render: { verb: 'other' } }, 'web output').verb, 'other');
 });
+
+test('recovers McFly table semantics from MCP results', () => {
+  const input = JSON.stringify({ script: "printf 'name\\tcount\\nalpha\\t2\\n'", title: 'counts' });
+  const call = callRender('mcp__mcfly__run_table', input);
+  assert.deepEqual(call, { verb: 'data', command: "printf 'name\\tcount\\nalpha\\t2\\n'", title: 'counts', cwd: undefined });
+  const envelope = {
+    schema: 'mcfly.data.v1', kind: 'table', command: 'printf ...', cwd: '/repo', exitCode: 0,
+    stdout: 'name\tcount\nalpha\t2\n', stderr: '', data: { columns: ['name', 'count'], rows: [['alpha', '2']] },
+  };
+  assert.deepEqual(resultRender({ name: 'mcp__mcfly__run_table', render: call }, `MCFLY_DATA_V1\n${JSON.stringify(envelope)}`), {
+    verb: 'data', command: 'printf ...', cwd: '/repo', exit_code: 0, stdout: envelope.stdout, stderr: '',
+    table: envelope.data,
+  });
+});

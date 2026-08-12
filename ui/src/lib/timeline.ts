@@ -64,10 +64,17 @@ export interface TermBlock {
   at: number;
 }
 
+export interface DataView {
+  title: string;
+  table: NonNullable<ResultRender['table']>;
+  touchedAt: number;
+}
+
 export interface ViewState {
   tabs: FileView[];
   activePath?: string;
   term: TermBlocks;
+  data?: DataView;
   currentToolIndex: number; // last tool step at or before pointer, -1 if none
 }
 
@@ -117,6 +124,7 @@ export function applyPatch(content: string, hunks: NonNullable<ResultRender['hun
 export function foldState(steps: Step[], pointer: number): ViewState {
   const byPath = new Map<string, FileView>();
   const term: TermBlock[] = [];
+  let data: DataView | undefined;
   let currentToolIndex = -1;
   for (let i = 0; i <= pointer && i < steps.length; i++) {
     const s = steps[i];
@@ -158,13 +166,21 @@ export function foldState(steps: Step[], pointer: number): ViewState {
         });
         break;
       }
+      case 'data': {
+        term.push({
+          command: s.call.command ?? r?.command ?? '', stdout: r?.stdout ?? '', stderr: r?.stderr ?? '',
+          interrupted: !!r?.interrupted, at: i,
+        });
+        if (r?.verb === 'data' && r.table) data = { title: s.call.title ?? 'table', table: r.table, touchedAt: i };
+        break;
+      }
     }
   }
   const tabs = [...byPath.values()];
   let activePath: string | undefined;
   let latest = -1;
   for (const t of tabs) if (t.touchedAt > latest) { latest = t.touchedAt; activePath = t.path; }
-  return { tabs, activePath, term, currentToolIndex };
+  return { tabs, activePath, term, data, currentToolIndex };
 }
 
 // Edit typing rate at 1x playback, scaled by playback speed. Deliberately
@@ -196,6 +212,8 @@ export function durationFor(step: Step): number {
           return Math.min(600 + (step.call.command?.length ?? 0) * 15 + out / 10, 3000);
         }
         case 'read_file':
+          return 1800;
+        case 'data':
           return 1800;
         case 'patch_file':
         case 'write_file': {

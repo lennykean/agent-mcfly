@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useReplay } from './hooks/useReplay';
 import { AgentTree } from './components/AgentTree';
 import { ChatPane } from './components/ChatPane';
+import { DataPane } from './components/DataPane';
 import { EditorPane, type UserTab } from './components/EditorPane';
 import { Explorer } from './components/Explorer';
 import { LiveTerm, storedPty } from './components/LivePane';
@@ -49,7 +50,7 @@ export default function App() {
   const [bottomOpen, setBottomOpen] = useStoredBool('bottomOpen', true);
   const [leftTab, setLeftTab] = useStoredTab<'tools' | 'explorer'>('leftTab', 'tools');
   const [rightTab, setRightTab] = useStoredTab<'chat' | 'term'>('rightTab', 'chat');
-  const [bottomTab, setBottomTab] = useStoredTab<'term' | 'tool'>('bottomTab', 'term');
+  const [bottomTab, setBottomTab] = useStoredTab<'term' | 'data' | 'tool'>('bottomTab', 'term');
   const [editorTab, setEditorTab] = useState('pinned');
   const [userTabs, setUserTabs] = useState<UserTab[]>([]);
   const [pwd, setPwd] = useState<string>();
@@ -176,6 +177,12 @@ export default function App() {
       : undefined;
   const animatedTermAt = animStep?.kind === 'tool' && animStep.call.command ? r.animateIndex : -1;
 
+  useEffect(() => {
+    if (r.view.data?.touchedAt === undefined) return;
+    setBottomOpen(true);
+    setBottomTab('data');
+  }, [r.view.data?.touchedAt, setBottomOpen, setBottomTab]);
+
   const pinned = r.view.tabs.find((t) => t.path === r.view.activePath);
 
   // any touch of a file yanks the editor to the pinned live tab
@@ -289,12 +296,18 @@ export default function App() {
                   <div className={`paneTab ${bottomTab === 'term' ? 'active' : ''}`} onClick={() => setBottomTab('term')}>
                     TOOL TERMINAL <span className="roBadge">read only</span>
                   </div>
+                  <div className={`paneTab ${bottomTab === 'data' ? 'active' : ''}`} onClick={() => setBottomTab('data')}>
+                    DATA
+                  </div>
                   <div className={`paneTab ${bottomTab === 'tool' ? 'active' : ''}`} onClick={() => setBottomTab('tool')}>
                     TOOL CALL
                   </div>
                 </div>
                 <div className={bottomTab === 'term' ? 'tabBody' : 'tabBody hiddenTab'}>
                   <Terminal blocks={r.view.term} animatedAt={animatedTermAt} speed={r.speed} visible={bottomTab === 'term'} />
+                </div>
+                <div className={bottomTab === 'data' ? 'tabBody' : 'tabBody hiddenTab'}>
+                  <DataPane data={r.view.data} animate={r.view.data?.touchedAt === r.animateIndex} />
                 </div>
                 <div className={bottomTab === 'tool' ? 'tabBody' : 'tabBody hiddenTab'}>
                   <ToolDetail step={currentTool} />

@@ -12,7 +12,7 @@ export interface SessionMeta {
   size: number;
 }
 
-export type RenderVerb = 'read_file' | 'patch_file' | 'write_file' | 'exec' | 'spawn_agent' | 'other';
+export type RenderVerb = 'read_file' | 'patch_file' | 'write_file' | 'exec' | 'data' | 'spawn_agent' | 'other';
 
 export interface CallRender {
   verb: RenderVerb;
@@ -41,7 +41,11 @@ export interface ResultRender {
   hunks?: PatchHunk[];
   stdout?: string;
   stderr?: string;
+  command?: string;
+  cwd?: string;
   interrupted?: boolean;
+  exit_code?: number;
+  table?: { columns: string[]; rows: string[][] };
   agent_id?: string;
   agent_type?: string;
   status?: string;

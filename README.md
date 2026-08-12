@@ -12,6 +12,16 @@ npx agent-mcfly
 
 Open `http://localhost:7777` after the server starts.
 
+## Semantic data MCP
+
+Configure the McFly MCP for supported local agents:
+
+```bash
+mcfly mcp config
+```
+
+This writes `~/.mcfly/mcp.json` and best-effort configures Codex and Claude Code. The MCP's `run_table` tool runs Bash and requires strict TSV on stdout; successful results appear in McFly's Data tab.
+
 ## Run from source
 
 ```bash

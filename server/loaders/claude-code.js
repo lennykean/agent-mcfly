@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { isTableTool, tableCall, tableResult } from '../mcfly-data.js';
 
 const ROOT = path.resolve(os.homedir(), '.claude', 'projects');
 
@@ -329,6 +330,7 @@ export function bashReadResult(read, result, block) {
 // ---- render verbs: the provider-neutral contract the UI consumes ----
 
 function callRender(tool, input) {
+  if (isTableTool(tool)) return tableCall(input);
   switch (tool) {
     case 'Read':
       return { verb: 'read_file', path: input.file_path, title: shortPath(input.file_path) };
@@ -358,6 +360,13 @@ function callRender(tool, input) {
 }
 
 function resultRender(tool, r, block, ctx) {
+  if (isTableTool(tool)) {
+    const data = tableResult(r) ?? tableResult(flatten(block.content));
+    if (data) return data;
+    return block.is_error
+      ? { verb: 'exec', stdout: '', stderr: flatten(block.content) }
+      : { verb: 'exec', stdout: flatten(block.content), stderr: '' };
+  }
   // search tools render as terminal commands; their readable output is the block text
   if (tool === 'Grep' || tool === 'Glob') {
     return { verb: 'exec', stdout: flatten(block.content), stderr: '' };
