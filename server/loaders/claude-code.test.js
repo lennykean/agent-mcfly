@@ -18,6 +18,7 @@ test('finds Claude titles written after the transcript head', () => {
 
 test('conservatively infers file operations from Claude Bash commands', () => {
   assert.equal(inferBashTool('cat "README.md"'), 'Read');
+  assert.equal(inferBashTool('head -20 README.md'), 'Read');
   assert.equal(inferBashTool("sed -n '10,30p' src/app.js"), 'Read');
   assert.equal(inferBashTool("echo 'hello' > hello.txt"), 'Write');
   assert.equal(inferBashTool("printf '%s' hello >> hello.txt"), 'Edit');
@@ -26,12 +27,15 @@ test('conservatively infers file operations from Claude Bash commands', () => {
   assert.equal(inferBashTool('rg needle src'), null);
   assert.equal(inferBashTool('ls -la'), null);
   assert.equal(inferBashTool('cat README.md | head'), null);
+  assert.equal(inferBashTool('cat one.txt two.txt'), null);
+  assert.equal(inferBashTool('tail -20 README.md'), null);
+  assert.equal(inferBashTool('nl README.md'), null);
   assert.equal(inferBashTool("echo 'not > a write'"), null);
   assert.equal(inferBashTool('cat --help'), null);
   assert.equal(inferBashTool('echo done > /dev/null'), null);
 });
 
-test('renders numeric sed ranges as positioned file reads', () => {
+test('renders conservative shell reads in the editor', () => {
   const read = inferBashRead("cd '/repo' && sed -n '10,30p' -- 'src/app.js'", '/elsewhere');
   assert.deepEqual(read, {
     verb: 'read_file', path: '/repo/src/app.js', title: 'src/app.js', start_line: 10,
@@ -43,6 +47,10 @@ test('renders numeric sed ranges as positioned file reads', () => {
   assert.equal(inferBashTool("cd '/repo' && sed -n '10,30p' src/app.js"), 'Read');
   assert.equal(inferBashTool('cd /repo && ls'), null);
   assert.equal(inferBashRead("cd src && sed -n '5p' app.js", '/repo').path, '/repo/src/app.js');
+  assert.deepEqual(inferBashRead("cd /repo && cat -- 'src/app.js'", '/elsewhere'), {
+    verb: 'read_file', path: '/repo/src/app.js', title: 'src/app.js', start_line: 1,
+  });
+  assert.equal(inferBashRead('head -20 src/app.js', '/repo').path, '/repo/src/app.js');
   assert.equal(inferBashRead("sed -n '5p' app.js", 'C:\\repo').path, 'C:\\repo\\app.js');
   assert.equal(bashReadResult(read, { stdout: '', stderr: 'sed: failed' }, {}), null);
   assert.equal(inferBashRead("cd \"$HOME\" && sed -n '1p' app.js", '/repo'), null);

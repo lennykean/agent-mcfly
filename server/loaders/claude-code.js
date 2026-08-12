@@ -156,7 +156,8 @@ function convertLine(line, ctx, messages) {
         toolNameById.set(c.id, c.name);
         const inferredRead = c.name === 'Bash' ? inferBashRead(c.input?.command, o.cwd) : null;
         if (inferredRead) inferredReadById.set(c.id, inferredRead);
-        const displayTool = c.name === 'Bash' ? inferBashTool(c.input?.command) ?? c.name : c.name;
+        const inferredTool = c.name === 'Bash' ? inferBashTool(c.input?.command) : null;
+        const displayTool = inferredTool === 'Read' && !inferredRead ? c.name : inferredTool ?? c.name;
         content.push({
           type: 'tool',
           tool_request_id: c.id,
@@ -253,9 +254,8 @@ export function inferBashTool(command) {
     return null;
   }
 
+  if (parseBashRead(command)) return 'Read';
   if (/(?:&&|\|\||[;|`]|\$\()/.test(source)) return null;
-  if (/^(?:cat|head|tail|nl)\s+/.test(source) && !/(?:--help|--version|\s-$|[<>])/.test(source)) return 'Read';
-  if (/^sed\s+-n\s+(['"])\d+(?:,\d+)?p\1\s+[^<>]+$/.test(source)) return 'Read';
   if (/^(?:sed\s+-\S*i\S*|perl\s+-\S*pi\S*)\s+/.test(source)) return 'Edit';
 
   const output = source.match(/^(?:echo|printf|cat)\s+.+\s(>>?)\s*("[^"\r\n]+"|'[^'\r\n]+'|[^\s;&|<>"']+)$/);
@@ -280,15 +280,28 @@ function unwrapCd(command) {
   return cwd === null ? null : { command: match[2].trim(), cwd };
 }
 
-export function inferBashRead(command, sessionCwd) {
+function parseBashRead(command) {
   const parsed = unwrapCd(command);
   if (!parsed) return null;
-  const match = parsed.command.match(/^sed\s+-n\s+(['"])(\d+)(?:,(\d+))?p\1\s+(?:--\s+)?(.+)$/);
-  if (!match) return null;
-  const start = Number(match[2]);
-  const requestedEnd = Number(match[3] ?? match[2]);
-  const file = literalShellArg(match[4]);
-  if (!file || start < 1 || requestedEnd < start) return null;
+  let match = parsed.command.match(/^sed\s+-n\s+(['"])(\d+)(?:,(\d+))?p\1\s+(?:--\s+)?(.+)$/);
+  let start = Number(match?.[2]);
+  if (match && Number(match[3] ?? match[2]) < start) return null;
+  if (!match) {
+    match = parsed.command.match(/^cat\s+(?:--\s+)?(.+)$/);
+    start = 1;
+  }
+  if (!match) {
+    match = parsed.command.match(/^head\s+(?:(?:-n\s+|-)(\d+)\s+)?(?:--\s+)?(.+)$/);
+    start = 1;
+  }
+  const file = literalShellArg(match?.at(-1) ?? '');
+  return file && !file.startsWith('-') && start >= 1 ? { parsed, file, start } : null;
+}
+
+export function inferBashRead(command, sessionCwd) {
+  const spec = parseBashRead(command);
+  if (!spec) return null;
+  const { parsed, file, start } = spec;
 
   const windows = [file, parsed.cwd, sessionCwd]
     .some((value) => /^[a-z]:[\\/]|^\\\\/i.test(value ?? ''));
