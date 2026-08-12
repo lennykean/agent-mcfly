@@ -387,6 +387,13 @@ export function resultRender(meta, text, output) {
       && output.find((item) => item.type === 'input_image' && item.image_url);
     if (image) return { ...meta.render, image_src: image.image_url };
     const content = execPayload(text);
+    // a failed command's output is NOT file content: ANSI styling means a
+    // colored error, and a harness call without its Output marker never ran.
+    // Treating either as a read poisons file-state chains with garbage.
+    // eslint-disable-next-line no-control-regex
+    const ansi = /\x1b\[/.test(content);
+    const harnessNoMarker = !DIRECT_SHELL_NAMES.has(meta.name) && !text.includes('\nOutput:\n');
+    if (ansi || harnessNoMarker) return { verb: 'exec', stdout: content, stderr: '' };
     const lines = content.split('\n').length;
     return { ...meta.render, content, start_line: 1, total_lines: lines, region: { start: 1, end: lines } };
   }

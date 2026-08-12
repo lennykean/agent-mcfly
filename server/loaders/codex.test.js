@@ -70,6 +70,22 @@ test('recovers patch semantics from Codex exec wrappers', () => {
   );
 });
 
+test('failed commands never masquerade as file reads', () => {
+  const render = { verb: 'read_file', path: 'C:\\repo\\a.js', title: 'a.js' };
+  // ANSI-styled output = a colored error, not file content
+  const ansi = resultRender({ name: 'exec', input: '', render },
+    'Script completed\nWall time 0.1 seconds\nOutput:\n\u001b[31;1msqlite3: \u001b[0mnear "x": syntax error');
+  assert.equal(ansi.verb, 'exec');
+  assert.equal(ansi.content, undefined);
+  // harness call with no Output marker never actually ran
+  const noMarker = resultRender({ name: 'exec', input: '', render }, 'Script failed: boom');
+  assert.equal(noMarker.verb, 'exec');
+  // direct shell tools return raw stdout with no marker: still a read
+  const direct = resultRender({ name: 'local_shell', input: '', render }, 'raw file body');
+  assert.equal(direct.verb, 'read_file');
+  assert.equal(direct.content, 'raw file body');
+});
+
 test('keeps non-shell Codex wrappers out of the terminal and preserves images', () => {
   assert.equal(callRender('exec', 'await tools.web__run({ search_query: [] });').verb, 'other');
   assert.equal(callRender('exec', 'await tools.other({ command: "not a shell" });').verb, 'other');
