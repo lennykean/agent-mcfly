@@ -12,6 +12,7 @@ const ROOT = path.resolve(os.homedir(), '.claude', 'projects');
 // even when the call arrived in an earlier tail() chunk.
 // ponytail: unbounded cache; fine for a local tool's process lifetime.
 const toolNameById = new Map();
+const inferredReadById = new Map();
 
 const rel = (p) => path.relative(ROOT, p).split(path.sep).join('/');
 
@@ -153,13 +154,15 @@ function convertLine(line, ctx, messages) {
       else if (c.type === 'thinking' && c.thinking) content.push({ type: 'thinking', thought: c.thinking });
       else if (c.type === 'tool_use') {
         toolNameById.set(c.id, c.name);
+        const inferredRead = c.name === 'Bash' ? inferBashRead(c.input?.command, o.cwd) : null;
+        if (inferredRead) inferredReadById.set(c.id, inferredRead);
         const displayTool = c.name === 'Bash' ? inferBashTool(c.input?.command) ?? c.name : c.name;
         content.push({
           type: 'tool',
           tool_request_id: c.id,
           tool: displayTool,
           params: c.input,
-          extended: { render: callRender(c.name, c.input ?? {}) },
+          extended: { render: inferredRead ?? callRender(c.name, c.input ?? {}) },
         });
       }
     }
@@ -174,13 +177,19 @@ function convertLine(line, ctx, messages) {
         if (c.type === 'text' && c.text && !o.isMeta) pushUserText(content, c.text);
         else if (c.type === 'tool_result') {
           const tool = toolNameById.get(c.tool_use_id) ?? sniffTool(o.toolUseResult) ?? '?';
+          const inferredRead = inferredReadById.get(c.tool_use_id);
           content.push({
             type: 'tool_result',
             tool_request_id: c.tool_use_id,
             tool,
             // structured result when the transcript has one; flattened text otherwise
             result: o.toolUseResult ?? flatten(c.content),
-            extended: { render: resultRender(tool, o.toolUseResult, c, ctx), is_error: !!c.is_error },
+            extended: {
+              render: inferredRead && !c.is_error
+                ? bashReadResult(inferredRead, o.toolUseResult, c) ?? resultRender(tool, o.toolUseResult, c, ctx)
+                : resultRender(tool, o.toolUseResult, c, ctx),
+              is_error: !!c.is_error,
+            },
           });
         }
       }
@@ -227,8 +236,9 @@ function sniffTool(r) {
 }
 
 export function inferBashTool(command) {
-  const source = String(command ?? '').trim();
-  if (!source) return null;
+  const parsed = unwrapCd(command);
+  if (!parsed) return null;
+  const source = parsed.command;
   const lines = source.split(/\r?\n/);
 
   // Exact heredoc-to-file shape only; scripts around it stay Bash.
@@ -252,6 +262,55 @@ export function inferBashTool(command) {
   if (!output) return null;
   const target = output[2].replace(/^(['"])(.*)\1$/, '$2');
   return target.startsWith('/dev/') ? null : output[1] === '>>' ? 'Edit' : 'Write';
+}
+
+function literalShellArg(source) {
+  const value = source.trim();
+  if (/^'[^']+'$/.test(value)) return value.slice(1, -1);
+  if (/^"[^"\\$`]+"$/.test(value)) return value.slice(1, -1);
+  return /^[^\s;&|<>\\'"`$()]+$/.test(value) ? value : null;
+}
+
+function unwrapCd(command) {
+  const source = String(command ?? '').trim();
+  if (!source) return null;
+  const match = source.match(/^cd(?:\s+--)?\s+(.+?)\s+&&\s+([\s\S]+)$/);
+  if (!match) return { command: source };
+  const cwd = literalShellArg(match[1]);
+  return cwd === null ? null : { command: match[2].trim(), cwd };
+}
+
+export function inferBashRead(command, sessionCwd) {
+  const parsed = unwrapCd(command);
+  if (!parsed) return null;
+  const match = parsed.command.match(/^sed\s+-n\s+(['"])(\d+)(?:,(\d+))?p\1\s+(?:--\s+)?(.+)$/);
+  if (!match) return null;
+  const start = Number(match[2]);
+  const requestedEnd = Number(match[3] ?? match[2]);
+  const file = literalShellArg(match[4]);
+  if (!file || start < 1 || requestedEnd < start) return null;
+
+  const windows = [file, parsed.cwd, sessionCwd]
+    .some((value) => /^[a-z]:[\\/]|^\\\\/i.test(value ?? ''));
+  const paths = windows ? path.win32 : path.posix;
+  let cwd = parsed.cwd ?? sessionCwd;
+  if (parsed.cwd && !paths.isAbsolute(parsed.cwd)) {
+    if (!sessionCwd || !paths.isAbsolute(sessionCwd)) return null;
+    cwd = paths.resolve(sessionCwd, parsed.cwd);
+  }
+  if (!paths.isAbsolute(file) && (!cwd || !paths.isAbsolute(cwd))) return null;
+  const resolved = paths.isAbsolute(file) ? file : paths.resolve(cwd, file);
+  return { verb: 'read_file', path: resolved, title: shortPath(resolved), start_line: start };
+}
+
+export function bashReadResult(read, result, block) {
+  if (result?.stderr) return null;
+  const content = result?.stdout ?? flatten(block.content);
+  const lines = content ? content.replace(/\r?\n$/, '').split(/\r?\n/).length : 0;
+  return {
+    verb: 'read_file', path: read.path, content, start_line: read.start_line,
+    region: { start: read.start_line, end: read.start_line + Math.max(0, lines - 1) },
+  };
 }
 
 // ---- render verbs: the provider-neutral contract the UI consumes ----
