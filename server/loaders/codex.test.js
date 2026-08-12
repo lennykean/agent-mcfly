@@ -138,4 +138,9 @@ test('recovers McFly table semantics from MCP results', () => {
     verb: 'data', command: 'printf ...', cwd: '/repo', exit_code: 0, stdout: envelope.stdout, stderr: '',
     table: envelope.data,
   });
+  // structuredContent results reach transcripts as bare envelope JSON with NO
+  // marker (Claude Code replaces the text content) — must still render
+  const bare = resultRender({ name: 'mcp__mcfly__run_table', render: call }, JSON.stringify(envelope));
+  assert.equal(bare.verb, 'data');
+  assert.deepEqual(bare.table, envelope.data);
 });
