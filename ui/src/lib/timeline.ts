@@ -1,4 +1,4 @@
-import type { Message, ResultRender, Step, Timeline } from '../types';
+import type { Message, RenderVerb, ResultRender, Step, Timeline } from '../types';
 
 export function createTimeline(key: string, sessionId: string, provider: string): Timeline {
   return { key, sessionId, provider, steps: [], cursor: 0, mtime: 0, pending: new Map() };
@@ -80,12 +80,20 @@ export interface ViewState {
 
 export type TermBlocks = TermBlock[];
 
-export function applyPatch(content: string, hunks: NonNullable<ResultRender['hunks']>): { content: string; region: { start: number; end: number } } | null {
+export type Blame = (number | null)[]; // per-line: step index responsible, null = pre-history
+
+export function applyPatch(
+  content: string,
+  hunks: NonNullable<ResultRender['hunks']>,
+  blame?: Blame,
+  stamp: number | null = null,
+): { content: string; region: { start: number; end: number }; blame?: Blame } | null {
   if (!hunks.length) return null;
   const newline = content.includes('\r\n') ? '\r\n' : '\n';
   const trailingNewline = /\r?\n$/.test(content);
   const lines = content.replace(/\r\n/g, '\n').split('\n');
   if (trailingNewline) lines.pop();
+  const stamps = blame ? [...blame] : undefined;
   let first = Infinity, last = 0, from = 0;
 
   for (const hunk of hunks) {
@@ -97,6 +105,17 @@ export function applyPatch(content: string, hunks: NonNullable<ResultRender['hun
     }
     if (at < 0) return null;
     lines.splice(at, before.length, ...after);
+    if (stamps) {
+      // walk the hunk keeping stamps aligned: kept lines inherit, added get stamped
+      const next: Blame = [];
+      let bi = at;
+      for (const line of hunk.lines) {
+        if (line.startsWith('+')) next.push(stamp);
+        else if (line.startsWith('-')) bi++;
+        else { next.push(stamps[bi] ?? null); bi++; }
+      }
+      stamps.splice(at, before.length, ...next);
+    }
     let outputLine = at + 1;
     for (const line of hunk.lines) {
       if (line.startsWith('-')) {
@@ -118,7 +137,169 @@ export function applyPatch(content: string, hunks: NonNullable<ResultRender['hun
   return {
     content: lines.join(newline) + (trailingNewline ? newline : ''),
     region: { start: Math.min(first, finalLine), end: Math.min(last, finalLine) },
+    ...(stamps ? { blame: stamps } : {}),
   };
+}
+
+// un-applying a patch is applying it with additions and removals swapped
+export const invertHunks = (hunks: NonNullable<ResultRender['hunks']>) =>
+  hunks.map((h) => ({
+    ...h,
+    lines: h.lines.map((l) => (l.startsWith('+') ? '-' + l.slice(1) : l.startsWith('-') ? '+' + l.slice(1) : l)),
+  }));
+
+const isFullContent = (r: ResultRender): boolean =>
+  r.content !== undefined
+  && (r.start_line ?? 1) === 1
+  && (r.total_lines === undefined || r.content.split(/\r?\n/).length >= r.total_lines);
+
+// A patch with no prior content can still get a full file view if some FUTURE
+// step reveals the file: take that content and un-apply every intervening
+// patch, newest first, strictly while they un-apply clean. A write or an
+// opaque patch in between severs the chain.
+function backfillFromFuture(
+  steps: Step[], at: number, path: string, hunksAtP: NonNullable<ResultRender['hunks']>,
+): { content: string; region?: { start: number; end: number } } | null {
+  const want = path.replace(/\//g, '\\').toLowerCase();
+  const pending: NonNullable<ResultRender['hunks']>[] = [];
+  for (let i = at + 1; i < steps.length; i++) {
+    const s = steps[i];
+    if (s.kind !== 'tool' || !s.result) continue;
+    const r = s.result;
+    const p = r.path ?? s.call.path;
+    if (!p || p.replace(/\//g, '\\').toLowerCase() !== want) continue;
+    if (r.verb === 'write_file') return null;
+    if (r.verb === 'read_file') {
+      if (isFullContent(r)) return unwind(r.content!, pending, hunksAtP);
+      continue; // slice read: no anchor, but no sever either
+    }
+    if (r.verb === 'patch_file') {
+      if (!r.hunks) return null;
+      if (r.content !== undefined) return unwind(r.content, [...pending, r.hunks], hunksAtP);
+      pending.push(r.hunks);
+    }
+  }
+  return null;
+}
+
+function unwind(
+  future: string, pendingOldestFirst: NonNullable<ResultRender['hunks']>[],
+  hunksAtP: NonNullable<ResultRender['hunks']>,
+): { content: string; region?: { start: number; end: number } } | null {
+  let content = future;
+  for (let i = pendingOldestFirst.length - 1; i >= 0; i--) {
+    const undone = applyPatch(content, invertHunks(pendingOldestFirst[i]));
+    if (!undone) return null;
+    content = undone.content;
+  }
+  // content should now be the state right after the patch at P; round-trip
+  // P's own hunks to recover its changed region AND validate the chain — if
+  // they don't fit, the anchor wasn't really this file's history
+  const pre = applyPatch(content, invertHunks(hunksAtP));
+  if (!pre) return null;
+  const redo = applyPatch(pre.content, hunksAtP);
+  if (!redo || redo.content !== content) return null;
+  return { content, region: redo.region };
+}
+
+// ---- per-file timeline: every touch of a path, with state + blame where
+// the patch chain applies (or un-applies) clean ----
+
+export interface FileTouch { index: number; verb: RenderVerb; ts?: number }
+export interface FileSnapshot {
+  content?: string;
+  start_line?: number;
+  blame?: Blame;
+  region?: { start: number; end: number };
+  hunks?: NonNullable<ResultRender['hunks']>;
+  image?: boolean;
+}
+
+const TOUCH_VERBS = new Set<RenderVerb>(['read_file', 'patch_file', 'write_file']);
+
+// paths meet here from multiple sources (transcripts, explorer) with mixed
+// separators and drive-letter casing; compare normalized
+const normPath = (p: string) => p.replace(/\//g, '\\').toLowerCase();
+
+export function fileChain(steps: Step[], path: string): { touches: FileTouch[]; snapshots: Map<number, FileSnapshot> } {
+  const want = normPath(path);
+  const touches: FileTouch[] = [];
+  const snapshots = new Map<number, FileSnapshot>();
+  for (let i = 0; i < steps.length; i++) {
+    const s = steps[i];
+    if (s.kind !== 'tool' || !s.result) continue;
+    const r = s.result;
+    const p = r.path ?? s.call.path;
+    if (!p || normPath(p) !== want || !TOUCH_VERBS.has(r.verb)) continue;
+    touches.push({ index: i, verb: r.verb, ts: s.ts });
+  }
+
+  // forward pass: carry {content, blame} through clean applications
+  let content: string | undefined;
+  let blame: Blame | undefined;
+  const freshBlame = (c: string, stamp: number | null) => c.split(/\r?\n/).map(() => stamp);
+  const regionBlame = (c: string, region: FileSnapshot['region'], stamp: number) =>
+    c.split(/\r?\n/).map((_, li) => (region && li + 1 >= region.start && li + 1 <= region.end ? stamp : null));
+
+  for (const t of touches) {
+    const r = (steps[t.index] as Step & { kind: 'tool' }).result!;
+    if (r.verb === 'read_file') {
+      if (r.image_src) { snapshots.set(t.index, { image: true }); continue; }
+      if (isFullContent(r)) {
+        // reads are ground truth: always adopt; keep accumulated blame only
+        // when the read CONFIRMS the carried chain, reset it when it refutes
+        const eol = (s: string) => s.replace(/\r\n/g, '\n');
+        if (content === undefined || eol(content) !== eol(r.content!)) {
+          blame = freshBlame(r.content!, null);
+        }
+        content = r.content!;
+      }
+      snapshots.set(t.index, content !== undefined
+        ? { content, blame, region: r.region }
+        : { content: r.content, start_line: r.start_line, region: r.region });
+    } else if (r.verb === 'write_file') {
+      const written = r.content ?? '';
+      content = written;
+      blame = freshBlame(written, t.index);
+      snapshots.set(t.index, { content, blame });
+    } else {
+      if (content !== undefined && r.hunks) {
+        const res = applyPatch(content, r.hunks, blame, t.index);
+        if (res) {
+          content = res.content;
+          blame = res.blame ?? blame;
+          snapshots.set(t.index, { content, blame, region: res.region, hunks: r.hunks });
+          continue;
+        }
+      }
+      if (r.content !== undefined) {
+        // loader-reconstructed post state; blame only for its own region
+        const post = r.content;
+        content = post;
+        blame = regionBlame(post, r.region, t.index);
+        snapshots.set(t.index, { content, blame, region: r.region, hunks: r.hunks });
+        continue;
+      }
+      // chain broken: keep the raw patch, forget carried state
+      content = undefined;
+      blame = undefined;
+      snapshots.set(t.index, { hunks: r.hunks, region: r.region });
+    }
+  }
+
+  // backward pass: content-less patches try reconstruction from the future
+  for (const t of touches) {
+    const snap = snapshots.get(t.index);
+    if (t.verb !== 'patch_file' || !snap || snap.content !== undefined || !snap.hunks) continue;
+    const back = backfillFromFuture(steps, t.index, path, snap.hunks);
+    if (back) {
+      snap.content = back.content;
+      snap.region = back.region ?? snap.region;
+      snap.blame = regionBlame(back.content, snap.region, t.index);
+    }
+  }
+
+  return { touches, snapshots };
 }
 
 export function foldState(steps: Step[], pointer: number): ViewState {
@@ -174,6 +355,21 @@ export function foldState(steps: Step[], pointer: number): ViewState {
         if (r?.verb === 'data' && r.table) data = { title: s.call.title ?? 'table', table: r.table, touchedAt: i };
         break;
       }
+    }
+  }
+  // diff-only tabs: try reconstructing the full file backward from the future
+  for (const t of byPath.values()) {
+    if (t.mode !== 'diff' || t.render.content !== undefined || !t.render.hunks) continue;
+    const back = backfillFromFuture(steps, t.touchedAt, t.path, t.render.hunks);
+    if (back) {
+      t.render = {
+        ...t.render,
+        content: back.content,
+        region: back.region ?? t.render.region,
+        start_line: 1,
+        total_lines: back.content.split(/\r?\n/).length,
+      };
+      t.mode = 'file';
     }
   }
   const tabs = [...byPath.values()];

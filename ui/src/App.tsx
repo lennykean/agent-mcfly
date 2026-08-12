@@ -5,6 +5,7 @@ import { ChatPane } from './components/ChatPane';
 import { DataPane } from './components/DataPane';
 import { EditorPane, type UserTab } from './components/EditorPane';
 import { Explorer } from './components/Explorer';
+import { FileTimeline } from './components/FileTimeline';
 import { LiveTerm } from './components/LivePane';
 import { SessionPicker } from './components/SessionPicker';
 import { Splitter } from './components/Splitter';
@@ -53,6 +54,9 @@ export default function App() {
   const [bottomTab, setBottomTab] = useStoredTab<'term' | 'data' | 'tool'>('bottomTab', 'term');
   const [editorTab, setEditorTab] = useState('pinned');
   const [userTabs, setUserTabs] = useState<UserTab[]>([]);
+  // singleton by construction: the timeline is a projection of the one global
+  // playhead, so a second timeline tab would just be the same cursor
+  const [timelinePath, setTimelinePath] = useState<string>();
   const [pwd, setPwd] = useState<string>();
   const [pickerOpen, setPickerOpen] = useState(false);
   const centerRef = useRef<HTMLDivElement>(null);
@@ -186,8 +190,11 @@ export default function App() {
 
   const pinned = r.view.tabs.find((t) => t.path === r.view.activePath);
 
-  // any touch of a file yanks the editor to the pinned live tab
-  useEffect(() => { setEditorTab('pinned'); }, [pinned?.path, pinned?.touchedAt]);
+  // any touch of a file yanks the editor to the pinned live tab — unless
+  // you're inspecting a file timeline, which follows the playhead itself
+  useEffect(() => {
+    setEditorTab((cur) => (cur === 'timeline' ? cur : 'pinned'));
+  }, [pinned?.path, pinned?.touchedAt]);
 
   // the project pwd governs terminals and the explorer; session cwd is fallback
   const cwd = pwd ?? r.session?.cwd;
@@ -285,6 +292,12 @@ export default function App() {
               onSelect={setEditorTab}
               onClose={closeFile}
               onOpenCurrent={openAbs}
+              timelinePath={timelinePath}
+              onOpenTimeline={(p) => { setTimelinePath(p); setEditorTab('timeline'); }}
+              onCloseTimeline={() => { setTimelinePath(undefined); setEditorTab('pinned'); }}
+              timelineBody={timelinePath && (
+                <FileTimeline steps={r.steps} pointer={r.pointer} path={timelinePath} speed={r.speed} onJump={r.jump} />
+              )}
             />
           </div>
           {bottomOpen && (

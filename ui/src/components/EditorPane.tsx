@@ -51,14 +51,20 @@ function charWidth(): number {
 // Edits/writes "type out": overlay masks hide the not-yet-typed characters of
 // the changed region and recede as a caret sweeps through, so the code appears
 // to be typed live — in full color. A region band flashes and fades after.
-function CodeView({ file, animate, speed }: { file: FileView; animate: boolean; speed: number }) {
+export interface BlameMark { text: string; title: string; step: number }
+
+export function CodeView({ file, animate, speed, flashOnly, blame }: {
+  file: FileView; animate: boolean; speed: number;
+  flashOnly?: boolean;
+  blame?: { marks: (BlameMark | null)[]; onJump: (step: number) => void };
+}) {
   const r = file.render;
   const ref = useRef<HTMLDivElement>(null);
   const content = r.content ?? '';
   const startLine = r.start_line ?? 1;
   const region = r.region;
   const isEdit = r.verb === 'patch_file' || r.verb === 'write_file';
-  const typing = !!(animate && region && isEdit);
+  const typing = !!(animate && region && isEdit && !flashOnly);
   const [typedDone, setTypedDone] = useState(!typing);
   const [typedChars, setTypedChars] = useState(0);
 
@@ -132,6 +138,18 @@ function CodeView({ file, animate, speed }: { file: FileView; animate: boolean; 
         <div className="gutter">
           {Array.from({ length: total }, (_, i) => <div key={i}>{startLine + i}</div>)}
         </div>
+        {blame && (
+          <div className="blameGutter">
+            {Array.from({ length: total }, (_, i) => {
+              const m = blame.marks[i] ?? null;
+              return m ? (
+                <div key={i} className="blameStamp" title={m.title} onClick={() => blame.onJump(m.step)}>{m.text}</div>
+              ) : (
+                <div key={i} className="blameNone">·</div>
+              );
+            })}
+          </div>
+        )}
         <pre className="code hljs" dangerouslySetInnerHTML={{ __html: html }} />
         {typing && <div className="regionTint" style={{ top: regionTop, height: regionH }} />}
         {typing && !typedDone && (
@@ -140,7 +158,7 @@ function CodeView({ file, animate, speed }: { file: FileView; animate: boolean; 
             {maskBH > 0 && <div className="typeMask" style={{ top: caretY + LH, left: GUTTER_W, height: maskBH }} />}
           </>
         )}
-        {animate && !isEdit && region && <div className="flashBand" style={{ top: regionTop, height: regionH }} />}
+        {animate && (!isEdit || flashOnly) && region && <div className="flashBand" style={{ top: regionTop, height: regionH }} />}
       </div>
     </div>
   );
@@ -154,7 +172,7 @@ function ImageView({ file, animate }: { file: FileView; animate: boolean }) {
   );
 }
 
-function DiffView({ file, animate }: { file: FileView; animate: boolean }) {
+export function DiffView({ file, animate }: { file: FileView; animate: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     ref.current?.scrollTo({ top: 0 });
@@ -196,18 +214,31 @@ function FileBody({ file, animate, speed }: { file: FileView; animate: boolean; 
 // every touch, cannot be closed); explorer files open as closable read-only tabs.
 export function EditorPane({
   pinned, animate, speed, userTabs, active, onSelect, onClose, onOpenCurrent,
+  timelinePath, onOpenTimeline, onCloseTimeline, timelineBody,
 }: {
   pinned?: FileView; animate: boolean; speed: number;
-  userTabs: UserTab[]; active: string; // 'pinned' | user tab path
+  userTabs: UserTab[]; active: string; // 'pinned' | 'timeline' | user tab path
   onSelect: (key: string) => void; onClose: (path: string) => void;
   onOpenCurrent?: (path: string) => void;
+  timelinePath?: string;
+  onOpenTimeline?: (path: string) => void;
+  onCloseTimeline?: () => void;
+  timelineBody?: React.ReactNode;
 }) {
   const activeTabRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     activeTabRef.current?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }, [active]);
 
-  const userTab = active !== 'pinned' ? userTabs.find((t) => t.path === active) : undefined;
+  const userTab = active !== 'pinned' && active !== 'timeline' ? userTabs.find((t) => t.path === active) : undefined;
+
+  const historyAction = (path: string) => onOpenTimeline && (
+    <span
+      className="codicon codicon-history tabAction"
+      title="File timeline: every touch of this file in the session"
+      onClick={(e) => { e.stopPropagation(); onOpenTimeline(path); }}
+    />
+  );
 
   return (
     <div className="editorPane">
@@ -227,7 +258,20 @@ export function EditorPane({
               onClick={(e) => { e.stopPropagation(); onOpenCurrent(pinned.path); }}
             />
           )}
+          {pinned && historyAction(pinned.path)}
         </div>
+        {timelinePath && (
+          <div
+            ref={active === 'timeline' ? activeTabRef : undefined}
+            className={`tab timelineTab ${active === 'timeline' ? 'active' : ''}`}
+            title={`${timelinePath} — session history of this file`}
+            onClick={() => onSelect('timeline')}
+          >
+            <span className="codicon codicon-history tabAction" style={{ margin: 0 }} />
+            {shortName(timelinePath)} <span className="roBadge">timeline</span>
+            <span className="tabClose" onClick={(e) => { e.stopPropagation(); onCloseTimeline?.(); }}>✕</span>
+          </div>
+        )}
         {userTabs.map((t) => (
           <div key={t.path}
             ref={t.path === active ? activeTabRef : undefined}
@@ -235,11 +279,14 @@ export function EditorPane({
             title={`${t.path} (read only)`}
             onClick={() => onSelect(t.path)}>
             {shortName(t.path)} <span className="roBadge">read only</span>
+            {historyAction(t.path)}
             <span className="tabClose" onClick={(e) => { e.stopPropagation(); onClose(t.path); }}>✕</span>
           </div>
         ))}
       </div>
-      {userTab ? (
+      {active === 'timeline' && timelinePath ? (
+        timelineBody
+      ) : userTab ? (
         userTab.error ? (
           <div className="emptyHint">{userTab.error}</div>
         ) : userTab.image_src ? (
