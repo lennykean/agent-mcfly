@@ -14,7 +14,8 @@ export function SessionPicker({ initialPwd, onPick, onOpenFolder, onClose }: {
   onOpenFolder?: (pwd: string) => void;
   onClose: () => void;
 }) {
-  const [pwd, setPwd] = useState(() => localStorage.getItem('mcfly.lastPwd') || initialPwd);
+  // the currently-open project wins; last-used pwd only seeds a bare open
+  const [pwd, setPwd] = useState(() => initialPwd || localStorage.getItem('mcfly.lastPwd') || '');
   const [providers, setProviders] = useState<ProviderInfo[] | null>(null);
   const [provider, setProvider] = useState<string>();
   const [sessions, setSessions] = useState<SessionMeta[] | null>(null);
@@ -48,7 +49,7 @@ export function SessionPicker({ initialPwd, onPick, onOpenFolder, onClose }: {
   };
 
   useEffect(() => {
-    const dir = localStorage.getItem('mcfly.lastPwd') || initialPwd;
+    const dir = initialPwd || localStorage.getItem('mcfly.lastPwd');
     if (dir) { setPwd(dir); loadProviders(dir); return; }
     fetch('/api/config').then((r) => r.json()).then((d) => {
       if (typeof d.pwd === 'string') setPwd((current) => current || d.pwd);
