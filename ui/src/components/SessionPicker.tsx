@@ -14,7 +14,7 @@ export function SessionPicker({ initialPwd, onPick, onOpenFolder, onClose }: {
   onOpenFolder?: (pwd: string) => void;
   onClose: () => void;
 }) {
-  const [pwd, setPwd] = useState(initialPwd);
+  const [pwd, setPwd] = useState(() => localStorage.getItem('mcfly.lastPwd') || initialPwd);
   const [providers, setProviders] = useState<ProviderInfo[] | null>(null);
   const [provider, setProvider] = useState<string>();
   const [sessions, setSessions] = useState<SessionMeta[] | null>(null);
@@ -47,7 +47,13 @@ export function SessionPicker({ initialPwd, onPick, onOpenFolder, onClose }: {
       .catch(() => setSessions([]));
   };
 
-  useEffect(() => { if (initialPwd) loadProviders(initialPwd); }, [initialPwd]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const dir = localStorage.getItem('mcfly.lastPwd') || initialPwd;
+    if (dir) { setPwd(dir); loadProviders(dir); return; }
+    fetch('/api/config').then((r) => r.json()).then((d) => {
+      if (typeof d.pwd === 'string') setPwd((current) => current || d.pwd);
+    }).catch(() => {});
+  }, [initialPwd]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (sessions) filterRef.current?.focus(); }, [sessions]);
 
   const shown = useMemo(() => {
@@ -74,7 +80,6 @@ export function SessionPicker({ initialPwd, onPick, onOpenFolder, onClose }: {
             value={pwd}
             onChange={(e) => setPwd(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') loadProviders(pwd); }}
-            placeholder="C:\path\to\project"
             spellCheck={false}
           />
           <button onClick={() => loadProviders(pwd)}>go</button>

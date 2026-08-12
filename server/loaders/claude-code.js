@@ -73,25 +73,25 @@ function listDir(dir, projName) {
   return out;
 }
 
-// Session title ("custom-title" line) and working directory ("cwd" on message
-// lines) both live near the top of the file.
-function scanHead(file) {
+// The cwd lives near the head; current Claude versions repeat custom titles
+// near the tail after a session is renamed.
+export function scanHead(file) {
   const out = {};
   let fd;
   try {
     fd = fs.openSync(file, 'r');
-    const buf = Buffer.alloc(16384);
-    const n = fs.readSync(fd, buf, 0, buf.length, 0);
-    for (const line of buf.toString('utf8', 0, n).split('\n')) {
-      if (out.title && out.cwd) break;
-      const wantTitle = !out.title && line.includes('"custom-title"');
-      const wantCwd = !out.cwd && line.includes('"cwd"');
-      if (!wantTitle && !wantCwd) continue;
-      try {
-        const o = JSON.parse(line);
-        if (o.type === 'custom-title' && o.customTitle) out.title = o.customTitle;
-        if (typeof o.cwd === 'string') out.cwd = o.cwd;
-      } catch { /* partial line at buffer edge */ }
+    const size = fs.fstatSync(fd).size;
+    for (const start of new Set([0, Math.max(0, size - 64 * 1024)])) {
+      const buf = Buffer.alloc(Math.min(64 * 1024, size - start));
+      const n = fs.readSync(fd, buf, 0, buf.length, start);
+      for (const line of buf.toString('utf8', 0, n).split('\n')) {
+        if (!line.includes('"custom-title"') && (out.cwd || !line.includes('"cwd"'))) continue;
+        try {
+          const o = JSON.parse(line);
+          if (o.type === 'custom-title' && o.customTitle) out.title = o.customTitle;
+          if (!out.cwd && typeof o.cwd === 'string') out.cwd = o.cwd;
+        } catch { /* partial line at chunk edge */ }
+      }
     }
   } catch { /* unreadable */ } finally {
     if (fd !== undefined) fs.closeSync(fd);
@@ -153,10 +153,11 @@ function convertLine(line, ctx, messages) {
       else if (c.type === 'thinking' && c.thinking) content.push({ type: 'thinking', thought: c.thinking });
       else if (c.type === 'tool_use') {
         toolNameById.set(c.id, c.name);
+        const displayTool = c.name === 'Bash' ? inferBashTool(c.input?.command) ?? c.name : c.name;
         content.push({
           type: 'tool',
           tool_request_id: c.id,
-          tool: c.name,
+          tool: displayTool,
           params: c.input,
           extended: { render: callRender(c.name, c.input ?? {}) },
         });
@@ -223,6 +224,34 @@ function sniffTool(r) {
   if (r.stdout !== undefined || r.stderr !== undefined) return 'Bash';
   if (r.agentId && r.agentType) return 'Agent';
   return null;
+}
+
+export function inferBashTool(command) {
+  const source = String(command ?? '').trim();
+  if (!source) return null;
+  const lines = source.split(/\r?\n/);
+
+  // Exact heredoc-to-file shape only; scripts around it stay Bash.
+  if (lines.length > 1) {
+    const first = lines[0];
+    const delimiter = first.match(/<<-?\s*(['"]?)([A-Za-z_]\w*)\1/)?.[2];
+    const output = first.match(/\s(>>?)\s*("[^"\r\n]+"|'[^'\r\n]+'|[^\s;&|<>"']+)(?:\s|$)/);
+    if (/^cat\b/.test(first) && delimiter && output && lines.at(-1)?.trim() === delimiter && !/[;&|`]|\$\(/.test(first)) {
+      const target = output[2].replace(/^(['"])(.*)\1$/, '$2');
+      if (!target.startsWith('/dev/')) return output[1] === '>>' ? 'Edit' : 'Write';
+    }
+    return null;
+  }
+
+  if (/(?:&&|\|\||[;|`]|\$\()/.test(source)) return null;
+  if (/^(?:cat|head|tail|nl)\s+/.test(source) && !/(?:--help|--version|\s-$|[<>])/.test(source)) return 'Read';
+  if (/^sed\s+-n\s+(['"])\d+(?:,\d+)?p\1\s+[^<>]+$/.test(source)) return 'Read';
+  if (/^(?:sed\s+-\S*i\S*|perl\s+-\S*pi\S*)\s+/.test(source)) return 'Edit';
+
+  const output = source.match(/^(?:echo|printf|cat)\s+.+\s(>>?)\s*("[^"\r\n]+"|'[^'\r\n]+'|[^\s;&|<>"']+)$/);
+  if (!output) return null;
+  const target = output[2].replace(/^(['"])(.*)\1$/, '$2');
+  return target.startsWith('/dev/') ? null : output[1] === '>>' ? 'Edit' : 'Write';
 }
 
 // ---- render verbs: the provider-neutral contract the UI consumes ----

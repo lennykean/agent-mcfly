@@ -385,7 +385,7 @@ export function resultRender(meta, text, output) {
     const lines = content.split('\n').length;
     return { ...meta.render, content, start_line: 1, total_lines: lines, region: { start: 1, end: lines } };
   }
-  if (meta.render?.verb === 'exec') return { verb: 'exec', stdout: text, stderr: '' };
+  if (meta.render?.verb === 'exec') return { verb: 'exec', stdout: execPayload(text), stderr: '' };
   return { verb: 'other' };
 }
 

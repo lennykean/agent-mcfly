@@ -56,6 +56,8 @@ export default function App() {
   const [pickerOpen, setPickerOpen] = useState(false);
   const centerRef = useRef<HTMLDivElement>(null);
 
+  useEffect(() => { if (pwd) localStorage.setItem('mcfly.lastPwd', pwd); }, [pwd]);
+
   // URL is the source of truth: ?pwd=&provider=&session= loads that view;
   // bare startup scopes to the server's pwd with nothing loaded.
   const { selectSession } = r;
@@ -200,7 +202,7 @@ export default function App() {
 
   const openFile = useCallback((rel: string) => {
     if (!cwd) return;
-    openAbs(`${cwd.replace(/[\\/]+$/, '')}\\${rel.replace(/\//g, '\\')}`);
+    openAbs(`${cwd.replace(/[\\/]+$/, '')}/${rel}`);
   }, [cwd, openAbs]);
 
   const closeFile = useCallback((path: string) => {

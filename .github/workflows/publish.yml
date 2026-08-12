@@ -43,7 +43,7 @@ jobs:
         run: |
           set -o pipefail
           if ! npm publish --access public 2>&1 | tee /tmp/publish-out; then
-            if grep -qE "EPUBLISHCONFLICT|E403|You cannot publish over" /tmp/publish-out; then
+            if grep -qE "EPUBLISHCONFLICT|You cannot publish over" /tmp/publish-out; then
               echo "Version already published, skipping"
             else
               echo "::error::Failed to publish package"

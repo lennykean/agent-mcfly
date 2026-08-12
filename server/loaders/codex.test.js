@@ -76,6 +76,13 @@ test('keeps non-shell Codex wrappers out of the terminal and preserves images', 
   assert.equal(callRender('exec', 'plain JavaScript').verb, 'other');
   assert.equal(callRender('exec', '{"cmd":"git status"}').verb, 'exec');
   assert.equal(callRender('exec_command', '{"cmd":"git status"}').verb, 'exec');
+  assert.equal(
+    resultRender(
+      { name: 'shell_command', render: { verb: 'exec' } },
+      'Script completed\nWall time 1.5 seconds\nOutput:\n\nExit code: 0\nWall time: 0.7 seconds\nOutput:\nhi',
+    ).stdout,
+    'hi',
+  );
 
   const input = 'const r = await tools.view_image({ path: "C:\\\\repo\\\\picture.png" }); image(r.image_url);';
   const render = callRender('exec', input);
