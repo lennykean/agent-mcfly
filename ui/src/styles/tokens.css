@@ -1,0 +1,21 @@
+:root {
+  --bg: #1e1e1e;
+  --bg-panel: #252526;
+  --bg-panel-alt: #2d2d2d;
+  --bg-inset: #181818;
+  --bg-detail: #1b1b1c;
+  --border: #1b1b1c;
+  --border-light: #333;
+  --fg: #ccc;
+  --fg-dim: #9d9d9d;
+  --fg-faint: #666;
+  --accent: #4fc1ff;
+  --accent-bg: #094771;
+  --statusbar: #007acc;
+  --green: #4ec9b0;
+  --red: #f47474;
+  --yellow: #dcdcaa;
+  --purple: #b180d7;
+  --font-ui: 'Segoe UI', system-ui, sans-serif;
+  --font-mono: consolas, 'Cascadia Mono', monospace;
+}

@@ -1,0 +1,63 @@
+name: Version Bump
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types:
+      - completed
+
+permissions:
+  contents: write
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      startsWith(github.event.workflow_run.head_branch, 'v')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ github.event.workflow_run.head_branch }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Validate semver
+        run: |
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9._-]+)?$'; then
+            echo "::error::Invalid semver: $VERSION"
+            exit 1
+          fi
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+
+      - name: Check version is not already applied
+        run: |
+          CURRENT=$(node -p "require('./package.json').version")
+          if [ "$CURRENT" = "$VERSION" ]; then
+            echo "::error::Version $CURRENT already matches tag. Nothing to bump."
+            exit 1
+          fi
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+
+      - name: Bump package version
+        run: npm version "$VERSION" --no-git-tag-version
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+
+      - uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "release: v${{ steps.version.outputs.version }}"
+          branch: main
+          push_options: "--force-with-lease"

@@ -1,0 +1,52 @@
+name: Publish to npm
+
+on:
+  workflow_run:
+    workflows: ["Version Bump"]
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Verify version was bumped
+        if: github.event_name != 'workflow_dispatch'
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [ "$VERSION" = "0.0.0" ] || [ -z "$VERSION" ]; then
+            echo "::error::Checked out version is $VERSION, version bump may not have landed yet"
+            exit 1
+          fi
+          echo "Publishing version $VERSION"
+
+      - run: npm ci
+      - run: npm ci --prefix ui
+
+      - name: Publish package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -o pipefail
+          if ! npm publish --access public 2>&1 | tee /tmp/publish-out; then
+            if grep -qE "EPUBLISHCONFLICT|E403|You cannot publish over" /tmp/publish-out; then
+              echo "Version already published, skipping"
+            else
+              echo "::error::Failed to publish package"
+              exit 1
+            fi
+          fi

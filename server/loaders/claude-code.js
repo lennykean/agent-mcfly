@@ -1,0 +1,354 @@
+// Claude Code session loader. Reads ~/.claude/projects JSONL transcripts and
+// converts them to simulacra-shaped normalized messages (see DESIGN.md "Wire
+// format"). Designed to the @simulacra-ai/session SessionStore contract
+// (read-only, plus tail() for live follow) so it can be upstreamed later.
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+
+const ROOT = path.resolve(os.homedir(), '.claude', 'projects');
+
+// tool_request_id -> tool name, so result lines can be tagged with their verb
+// even when the call arrived in an earlier tail() chunk.
+// ponytail: unbounded cache; fine for a local tool's process lifetime.
+const toolNameById = new Map();
+
+const rel = (p) => path.relative(ROOT, p).split(path.sep).join('/');
+
+function resolveId(id) {
+  const p = path.resolve(ROOT, id);
+  if (!p.startsWith(ROOT + path.sep)) throw new Error('session id outside root');
+  return p;
+}
+
+// Claude Code stores per-project sessions in a directory whose name is the
+// slugified cwd (C:\Users\X\proj -> C--Users-X-proj, drive case varies).
+const slug = (p) => p.replace(/[:\\/.]/g, '-');
+
+export function listForCwd(cwd) {
+  const want = slug(cwd).toLowerCase();
+  let projects = [];
+  try { projects = fs.readdirSync(ROOT, { withFileTypes: true }); } catch { return []; }
+  const out = [];
+  for (const proj of projects) {
+    if (!proj.isDirectory() || proj.name.toLowerCase() !== want) continue;
+    out.push(...listDir(path.join(ROOT, proj.name), proj.name));
+  }
+  out.sort((a, b) => b.updated_at - a.updated_at);
+  return out;
+}
+
+export function list() {
+  const out = [];
+  let projects = [];
+  try { projects = fs.readdirSync(ROOT, { withFileTypes: true }); } catch { return out; }
+  for (const proj of projects) {
+    if (!proj.isDirectory()) continue;
+    out.push(...listDir(path.join(ROOT, proj.name), proj.name));
+  }
+  out.sort((a, b) => b.updated_at - a.updated_at);
+  return out;
+}
+
+function listDir(dir, projName) {
+  const out = [];
+  let files = [];
+  try { files = fs.readdirSync(dir, { withFileTypes: true }); } catch { return out; }
+  for (const f of files) {
+    if (!f.isFile() || !f.name.endsWith('.jsonl')) continue;
+    const full = path.join(dir, f.name);
+    let st;
+    try { st = fs.statSync(full); } catch { continue; }
+    const head = scanHead(full);
+    out.push({
+      id: rel(full),
+      provider: 'claude-code',
+      project: projName,
+      label: head.title ?? f.name.replace(/\.jsonl$/, '').slice(0, 8),
+      cwd: head.cwd,
+      updated_at: st.mtimeMs,
+      size: st.size,
+    });
+  }
+  return out;
+}
+
+// Session title ("custom-title" line) and working directory ("cwd" on message
+// lines) both live near the top of the file.
+function scanHead(file) {
+  const out = {};
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(16384);
+    const n = fs.readSync(fd, buf, 0, buf.length, 0);
+    for (const line of buf.toString('utf8', 0, n).split('\n')) {
+      if (out.title && out.cwd) break;
+      const wantTitle = !out.title && line.includes('"custom-title"');
+      const wantCwd = !out.cwd && line.includes('"cwd"');
+      if (!wantTitle && !wantCwd) continue;
+      try {
+        const o = JSON.parse(line);
+        if (o.type === 'custom-title' && o.customTitle) out.title = o.customTitle;
+        if (typeof o.cwd === 'string') out.cwd = o.cwd;
+      } catch { /* partial line at buffer edge */ }
+    }
+  } catch { /* unreadable */ } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+  return out;
+}
+
+// Complete lines only from byte offset `cursor`, so tailing a mid-write file is
+// safe. Chunked: at most ~2MB per call (grown if a single line exceeds that);
+// the client keeps calling while cursor < size.
+const MAX_CHUNK = 2 * 1024 * 1024;
+
+export function tail(id, cursor = 0) {
+  const file = resolveId(id);
+  const st = fs.statSync(file);
+  const messages = [];
+  let offset = cursor;
+  if (st.size > cursor) {
+    const fd = fs.openSync(file, 'r');
+    let buf;
+    try {
+      let want = Math.min(st.size - cursor, MAX_CHUNK);
+      for (;;) {
+        buf = Buffer.alloc(want);
+        fs.readSync(fd, buf, 0, want, cursor);
+        if (buf.lastIndexOf(10) >= 0 || want >= st.size - cursor) break;
+        want = Math.min(want * 2, st.size - cursor); // single line bigger than chunk
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+    const end = buf.lastIndexOf(10); // \n
+    if (end >= 0) {
+      offset = cursor + end + 1;
+      const ctx = {
+        sessionDir: file.replace(/\.jsonl$/, ''),
+        allowSidechain: file.includes(`${path.sep}subagents${path.sep}`),
+      };
+      for (const line of buf.toString('utf8', 0, end).split('\n')) {
+        if (line.trim()) convertLine(line, ctx, messages);
+      }
+    }
+  }
+  return { messages, cursor: offset, mtime: st.mtimeMs, size: st.size };
+}
+
+function convertLine(line, ctx, messages) {
+  let o;
+  try { o = JSON.parse(line); } catch { return; }
+  // Sidechain lines in a main transcript belong to subagents, which have their
+  // own files; skip them to avoid double-rendering.
+  if (o.isSidechain && !ctx.allowSidechain) return;
+  const timestamp = o.timestamp ? Date.parse(o.timestamp) : undefined;
+
+  if (o.type === 'assistant' && Array.isArray(o.message?.content)) {
+    const content = [];
+    for (const c of o.message.content) {
+      if (c.type === 'text' && c.text) content.push({ type: 'text', text: c.text });
+      else if (c.type === 'thinking' && c.thinking) content.push({ type: 'thinking', thought: c.thinking });
+      else if (c.type === 'tool_use') {
+        toolNameById.set(c.id, c.name);
+        content.push({
+          type: 'tool',
+          tool_request_id: c.id,
+          tool: c.name,
+          params: c.input,
+          extended: { render: callRender(c.name, c.input ?? {}) },
+        });
+      }
+    }
+    if (content.length) messages.push({ id: o.uuid, timestamp, role: 'assistant', content });
+  } else if (o.type === 'user' && o.message) {
+    const raw = o.message.content;
+    const content = [];
+    if (typeof raw === 'string') {
+      if (!o.isMeta && raw.trim()) pushUserText(content, raw);
+    } else if (Array.isArray(raw)) {
+      for (const c of raw) {
+        if (c.type === 'text' && c.text && !o.isMeta) pushUserText(content, c.text);
+        else if (c.type === 'tool_result') {
+          const tool = toolNameById.get(c.tool_use_id) ?? sniffTool(o.toolUseResult) ?? '?';
+          content.push({
+            type: 'tool_result',
+            tool_request_id: c.tool_use_id,
+            tool,
+            // structured result when the transcript has one; flattened text otherwise
+            result: o.toolUseResult ?? flatten(c.content),
+            extended: { render: resultRender(tool, o.toolUseResult, c, ctx), is_error: !!c.is_error },
+          });
+        }
+      }
+    }
+    if (content.length) messages.push({ id: o.uuid, timestamp, role: 'user', content });
+  }
+  // every other line type (mode, snapshots, attachments, system, ...) is meta: skipped
+}
+
+// Local slash-command turns arrive as XML-ish envelopes; render the command
+// itself, drop its stdout echo and the caveat wrapper.
+function pushUserText(content, text) {
+  const t = text.trim();
+  if (t.startsWith('<local-command-stdout>')) return;
+  if (t.startsWith('Caveat: The messages below were generated')) return;
+  const cmd = t.match(/<command-name>([^<]*)<\/command-name>/);
+  if (cmd) {
+    const args = t.match(/<command-args>([^<]*)<\/command-args>/);
+    content.push({ type: 'text', text: `⌘ ${cmd[1]}${args?.[1] ? ' ' + args[1] : ''}` });
+    return;
+  }
+  content.push({ type: 'text', text });
+}
+
+function flatten(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.map((c) => (c.type === 'text' ? c.text : `[${c.type}]`)).join('\n');
+  }
+  return content == null ? '' : JSON.stringify(content);
+}
+
+// The call→name map is process memory; after a server restart, results whose
+// calls were converted by the previous process would lose their verb. The
+// structured result shape identifies the tool well enough.
+function sniffTool(r) {
+  if (r == null || typeof r !== 'object') return null;
+  if (r.file?.content !== undefined) return 'Read';
+  if (r.structuredPatch && r.oldString !== undefined) return 'Edit';
+  if (r.structuredPatch && r.filePath && r.content !== undefined) return 'Write';
+  if (r.stdout !== undefined || r.stderr !== undefined) return 'Bash';
+  if (r.agentId && r.agentType) return 'Agent';
+  return null;
+}
+
+// ---- render verbs: the provider-neutral contract the UI consumes ----
+
+function callRender(tool, input) {
+  switch (tool) {
+    case 'Read':
+      return { verb: 'read_file', path: input.file_path, title: shortPath(input.file_path) };
+    case 'Edit':
+    case 'MultiEdit':
+    case 'NotebookEdit':
+      return { verb: 'patch_file', path: input.file_path ?? input.notebook_path, title: shortPath(input.file_path ?? input.notebook_path) };
+    case 'Write':
+      return { verb: 'write_file', path: input.file_path, title: shortPath(input.file_path) };
+    case 'Bash':
+    case 'PowerShell':
+      return { verb: 'exec', command: input.command, title: input.description ?? truncate(input.command, 60) };
+    case 'Grep': {
+      let cmd = `grep${input['-i'] ? ' -i' : ''} "${input.pattern}"`;
+      if (input.path) cmd += ` ${input.path}`;
+      if (input.glob) cmd += ` --glob "${input.glob}"`;
+      return { verb: 'exec', command: cmd, title: truncate(input.pattern, 60) };
+    }
+    case 'Glob':
+      return { verb: 'exec', command: `glob "${input.pattern}"${input.path ? ' ' + input.path : ''}`, title: truncate(input.pattern, 60) };
+    case 'Agent':
+    case 'Task':
+      return { verb: 'spawn_agent', agent_type: input.subagent_type, title: input.description ?? 'agent' };
+    default:
+      return { verb: 'other', title: summarizeParams(tool, input) };
+  }
+}
+
+function resultRender(tool, r, block, ctx) {
+  // search tools render as terminal commands; their readable output is the block text
+  if (tool === 'Grep' || tool === 'Glob') {
+    return { verb: 'exec', stdout: flatten(block.content), stderr: '' };
+  }
+  if (r == null) return { verb: 'other' };
+  switch (tool) {
+    case 'Read':
+      if (r.file?.content !== undefined) {
+        const start = r.file.startLine ?? 1;
+        return {
+          verb: 'read_file', path: r.file.filePath, content: r.file.content,
+          start_line: start, total_lines: r.file.totalLines,
+          region: { start, end: start + (r.file.numLines ?? 1) - 1 },
+        };
+      }
+      if (r.type === 'image' && r.file?.base64) {
+        return { verb: 'read_file', image_src: `data:${r.file.type ?? 'image/png'};base64,${r.file.base64}` };
+      }
+      return { verb: 'other' };
+    case 'Edit':
+    case 'MultiEdit':
+    case 'NotebookEdit':
+      if (r.structuredPatch) {
+        const out = { verb: 'patch_file', path: r.filePath, hunks: r.structuredPatch };
+        // with the pre-edit file we can reconstruct the post-edit state and
+        // show the full file with the changed region; hunks stay as fallback
+        if (typeof r.originalFile === 'string' && r.structuredPatch.length) {
+          out.content = applyPatch(r.originalFile, r.structuredPatch);
+          out.region = patchRegion(r.structuredPatch);
+        }
+        return out;
+      }
+      return { verb: 'other' };
+    case 'Write': {
+      if (!r.filePath) return { verb: 'other' };
+      const content = r.content ?? '';
+      return { verb: 'write_file', path: r.filePath, content, region: { start: 1, end: content.split('\n').length } };
+    }
+    case 'Bash':
+    case 'PowerShell': {
+      let { stdout, stderr } = r;
+      if (stdout === undefined && stderr === undefined) {
+        // older shape: result text only lives in the content block
+        if (block.is_error) stderr = flatten(block.content);
+        else stdout = flatten(block.content);
+      }
+      return { verb: 'exec', stdout: stdout ?? '', stderr: stderr ?? '', interrupted: !!r.interrupted };
+    }
+    case 'Agent':
+    case 'Task':
+      if (r.agentId) {
+        return {
+          verb: 'spawn_agent', agent_id: r.agentId, agent_type: r.agentType, status: r.status,
+          summary: truncate(flatten(r.content), 2000),
+          child_session_id: rel(path.join(ctx.sessionDir, 'subagents', `agent-${r.agentId}.jsonl`)),
+        };
+      }
+      return { verb: 'other' };
+    default:
+      return { verb: 'other' };
+  }
+}
+
+// Rebuild the post-edit file from the pre-edit content plus unified-diff hunks.
+function applyPatch(original, hunks) {
+  const old = original.split('\n');
+  const out = [];
+  let oi = 0;
+  for (const h of hunks) {
+    while (oi < h.oldStart - 1 && oi < old.length) out.push(old[oi++]);
+    for (const l of h.lines) {
+      if (l.startsWith('\\')) continue; // "\ No newline at end of file"
+      if (l.startsWith('+')) out.push(l.slice(1));
+      else if (l.startsWith('-')) oi++;
+      else { out.push(old[oi] ?? l.slice(1)); oi++; }
+    }
+  }
+  while (oi < old.length) out.push(old[oi++]);
+  return out.join('\n');
+}
+
+function patchRegion(hunks) {
+  const last = hunks[hunks.length - 1];
+  return { start: hunks[0].newStart, end: last.newStart + Math.max(last.newLines, 1) - 1 };
+}
+
+function summarizeParams(tool, input) {
+  for (const k of ['pattern', 'query', 'path', 'file_path', 'url', 'description', 'prompt']) {
+    if (typeof input?.[k] === 'string') return `${truncate(input[k], 60)}`;
+  }
+  return tool;
+}
+
+const shortPath = (p) => (p ? String(p).split(/[\\/]/).slice(-2).join('/') : '');
+const truncate = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + '…' : (s ?? ''));
