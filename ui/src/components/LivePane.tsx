@@ -4,7 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
 
-interface Config { tools: string[]; token: string }
+interface Config { tools: string[]; token: string; platform?: string }
 
 export interface LivePty {
   id: string;
@@ -64,8 +64,8 @@ function parseFileRef(text: string): { path: string; line?: number } | null {
 // Control frames from the server are \x00-prefixed JSON; everything else is
 // terminal data. 'taken' = another window stole the terminal (tmux attach -d).
 // Stays mounted while hidden so backgrounded terminals keep their sockets.
-function PtySession({ tool, token, cwd, attachId, steal, visible, onPtyId, onExit, onTakeBack, onOpenFileRef }: {
-  tool: string; token: string; cwd?: string; attachId?: string; steal?: boolean; visible: boolean;
+function PtySession({ tool, token, cwd, platform, attachId, steal, visible, onPtyId, onExit, onTakeBack, onOpenFileRef }: {
+  tool: string; token: string; cwd?: string; platform?: string; attachId?: string; steal?: boolean; visible: boolean;
   onPtyId: (id: string) => void; onExit: () => void; onTakeBack: () => void;
   onOpenFileRef?: (path: string, line?: number) => void;
 }) {
@@ -101,6 +101,40 @@ function PtySession({ tool, token, cwd, attachId, steal, visible, onPtyId, onExi
       term.loadAddon(new WebglAddon()); // GPU renderer: crisp cells, like VS Code
     } catch { /* WebGL unavailable; DOM renderer still works */ }
     fit.fit();
+
+    // Ctrl+V: xterm would encode it as ^V for the pty, swallowing the paste.
+    // Decline to handle it so the browser's native paste reaches xterm's
+    // textarea instead (VS Code intercepts the same way). Ctrl+Shift+V
+    // already pastes natively.
+    term.attachCustomKeyEventHandler((e) =>
+      !(e.type === 'keydown' && e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'v'));
+
+    // image paste: no text for xterm to insert, so route by tool.
+    // claude reads the OS clipboard itself — and the browser's clipboard IS
+    // the server's clipboard (loopback only) — so its paste chord gives a
+    // native [Image #1]. Everything else gets the drag-and-drop flow: bytes
+    // to a temp file server-side, quoted path typed into the terminal.
+    const onPaste = (e: ClipboardEvent) => {
+      const cd = e.clipboardData;
+      if (!cd || cd.getData('text/plain') || !cd.files.length) return; // text: xterm's business
+      const file = cd.files[0];
+      if (!file.type.startsWith('image/')) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (tool === 'claude') {
+        const chord = (platform ?? 'win32') === 'win32' ? '\x1bv' : '\x16'; // Alt+V / Ctrl+V
+        if (ws?.readyState === 1) ws.send(JSON.stringify({ t: 'i', d: chord }));
+        return;
+      }
+      void file.arrayBuffer()
+        .then((buf) => fetch('/api/paste-image', { method: 'POST', headers: { 'Content-Type': file.type }, body: buf }))
+        .then((r) => r.json())
+        .then((d: { path?: string }) => {
+          if (d.path && ws?.readyState === 1) ws.send(JSON.stringify({ t: 'i', d: `"${d.path}" ` }));
+        })
+        .catch(() => { /* paste is best-effort */ });
+    };
+    host.addEventListener('paste', onPaste, true);
 
     // clickable file:line references -> open in the editor at that line
     const linkProvider = term.registerLinkProvider({
@@ -176,10 +210,11 @@ function PtySession({ tool, token, cwd, attachId, steal, visible, onPtyId, onExi
       ro.disconnect();
       dataSub?.dispose();
       linkProvider.dispose();
+      host.removeEventListener('paste', onPaste, true);
       term.dispose();
       termRef.current = null;
     };
-  }, [tool, token, cwd, attachId, steal]);
+  }, [tool, token, cwd, platform, attachId, steal]);
 
   // focus when this terminal's tab is revealed
   useEffect(() => {
@@ -351,6 +386,7 @@ export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFile
               tool={e.tool}
               token={config.token}
               cwd={cwd}
+              platform={config.platform}
               attachId={e.attachId}
               steal={e.steal}
               visible={active === e.key}
