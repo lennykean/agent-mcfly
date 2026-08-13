@@ -85,6 +85,7 @@ export function listPtys() {
     created: s.created,
     attached: !!s.ws,
     session: s.session ?? null, // { provider, id, pwd } once the hunter maps it
+    title: s.title || null, // live terminal title (OSC), the agent's own words
     screen: screenOf(s),
   }));
 }
@@ -261,9 +262,12 @@ export function attachPty(server, allowedHosts) {
       }
       const s = {
         id: crypto.randomBytes(8).toString('hex'), p, buffer: [], size: 0, ws: null,
-        tool, cwd, created: Date.now(), session: null,
+        tool, cwd, created: Date.now(), session: null, title: '',
         shadow: new ShadowTerminal({ cols: 100, rows: 30, scrollback: 20, allowProposedApi: true }),
       };
+      // agents announce themselves in the terminal title (OSC); the shadow
+      // parses it anyway, and the title is how a pty maps to its session
+      try { s.shadow.onTitleChange((t) => { s.title = t; }); } catch { /* preview only */ }
       sessions.set(s.id, s);
       saveLive();
       ws.send(ctl({ ptyId: s.id }));

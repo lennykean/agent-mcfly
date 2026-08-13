@@ -8,8 +8,10 @@ const PROVIDER_LABELS: Record<string, string> = { 'claude-code': 'claude', codex
 // Open-session flow: pwd -> agent type (detected from session history) ->
 // type-ahead over that project's sessions. Live terminals live in the
 // LIVE TERMINAL pane, not here.
-export function SessionPicker({ initialPwd, onPick, onOpenFolder, onClose }: {
+export function SessionPicker({ initialPwd, initialProvider, initialFilter, onPick, onOpenFolder, onClose }: {
   initialPwd: string;
+  initialProvider?: string; // pre-select this agent and load its sessions
+  initialFilter?: string; // pre-fill the filter (e.g. an ambiguous title match)
   onPick: (pwd: string, session: SessionMeta) => void;
   onOpenFolder?: (pwd: string) => void;
   onClose: () => void;
@@ -56,6 +58,19 @@ export function SessionPicker({ initialPwd, onPick, onOpenFolder, onClose }: {
     }).catch(() => {});
   }, [initialPwd]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (sessions) filterRef.current?.focus(); }, [sessions]);
+
+  // seeded open (follow-resolve): jump straight to the agent's sessions,
+  // pre-filtered to the ambiguous candidates
+  const seeded = useRef(false);
+  useEffect(() => {
+    if (seeded.current || !initialProvider || !providers) return;
+    if (providers.some((p) => p.provider === initialProvider && p.count > 0)) {
+      seeded.current = true;
+      loadSessions(initialProvider);
+      if (initialFilter) setFilter(initialFilter);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providers]);
 
   const shown = useMemo(() => {
     const q = filter.toLowerCase();

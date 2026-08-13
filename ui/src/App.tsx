@@ -21,6 +21,10 @@ import { Transport } from './components/Transport';
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
+// URLs carry the bare session id (basename, no extension); the full transcript
+// path re-derives from pwd + provider via the session list
+const shortSessionId = (id: string) => (id.split('/').pop() ?? id).replace(/\.[^.]+$/, '');
+
 function usePanelSize(key: string, initial: number, lo: number, hi: number) {
   const [size, setSize] = useState(() => {
     const saved = Number(localStorage.getItem(`mcfly.${key}`));
@@ -50,6 +54,7 @@ export default function App() {
   const [sideW, dragSide] = usePanelSize('sideW', 300, 180, 640);
   const [rightW, dragRight] = usePanelSize('chatW', 420, 260, 1000);
   const [editPct, dragEdit] = usePanelSize('editPct', 60, 15, 90);
+  const [agentsH, dragAgents] = usePanelSize('agentsH', 140, 56, 600);
   const [leftOpen, setLeftOpen] = useStoredBool('leftOpen', true);
   const [rightOpen, setRightOpen] = useStoredBool('rightOpen', true);
   const [bottomOpen, setBottomOpen] = useStoredBool('bottomOpen', true);
@@ -83,7 +88,7 @@ export default function App() {
         const list: SessionMeta[] = await (
           await fetch(`/api/sessions?pwd=${encodeURIComponent(uPwd)}&provider=${encodeURIComponent(provider)}`)
         ).json();
-        meta = Array.isArray(list) ? list.find((s) => s.id === sid) : undefined;
+        meta = Array.isArray(list) ? list.find((s) => s.id === sid || shortSessionId(s.id) === sid) : undefined;
       } catch { /* fall through to minimal meta */ }
       selectSession(meta ?? { id: sid, provider, label: sid.split('/').pop() ?? sid, cwd: uPwd, updated_at: 0, size: 0 });
     }
@@ -103,8 +108,32 @@ export default function App() {
     setUserTabs([]);
     setEditorTab('pinned');
     selectSession(s);
-    history.pushState(null, '', `?${new URLSearchParams({ pwd: newPwd, provider: s.provider, session: s.id })}`);
+    history.pushState(null, '', `?${new URLSearchParams({ pwd: newPwd, provider: s.provider, session: shortSessionId(s.id) })}`);
   }, [selectSession]);
+
+  // follow on a terminal whose session the title could not settle: session
+  // names fully contained in the title are the candidates — exactly one
+  // follows straight away, anything else asks via the picker (pre-filtered)
+  const [pickerSeed, setPickerSeed] = useState<{ pwd?: string; provider?: string; filter?: string }>();
+  const followResolve = useCallback(async (p: { title?: string | null; cwd: string }) => {
+    const dir = p.cwd || pwd || '';
+    const cands: { provider: string; s: SessionMeta }[] = [];
+    for (const provider of ['claude-code', 'codex']) {
+      try {
+        const list: SessionMeta[] = await (
+          await fetch(`/api/sessions?pwd=${encodeURIComponent(dir)}&provider=${provider}`)
+        ).json();
+        if (!Array.isArray(list) || !p.title) continue;
+        for (const s of list) {
+          if (s.label && s.label.length >= 8 && p.title.includes(s.label)) cands.push({ provider, s });
+        }
+      } catch { /* picker fallback */ }
+    }
+    if (cands.length === 1) { applyPick(dir, cands[0].s); return; }
+    setPickerSeed({ pwd: dir, provider: cands[0]?.provider, filter: cands[0]?.s.label });
+    setPickerOpen(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pwd, applyPick]);
 
   const { clearSession } = r;
   const openFolderOnly = useCallback((newPwd: string) => {
@@ -194,10 +223,24 @@ export default function App() {
 
 
   const folder = pwd?.replace(/[\\/]+$/, '').split(/[\\/]/).pop();
+
+  // title reads context-first: agent (when a session is open), then the
+  // project (~-relative when under home), then the app. Bare = just the app.
+  const [home, setHome] = useState<string>();
   useEffect(() => {
-    document.title = ['Agent McFly', folder, r.session && (r.session.label || r.session.id.slice(0, 8))]
-      .filter(Boolean).join(' - ');
-  }, [folder, r.session]);
+    fetch('/api/config').then((r) => r.json())
+      .then((d) => { if (typeof d.home === 'string') setHome(d.home); })
+      .catch(() => { /* title just shows the full path */ });
+  }, []);
+  useEffect(() => {
+    const tildePwd = pwd && home && pwd.toLowerCase().startsWith(home.toLowerCase())
+      ? `~${pwd.slice(home.length)}` : pwd;
+    document.title = [
+      r.session && (r.session.label || r.session.id.slice(0, 8)),
+      tildePwd,
+      'Agent McFly',
+    ].filter(Boolean).join(' - ');
+  }, [pwd, home, r.session]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -546,14 +589,32 @@ export default function App() {
         <button onClick={() => setPickerOpen(true)} title="Open a session">
           <span className="codicon codicon-folder-opened" /> open
         </button>
-        {r.session && <span className="sessionChip" title={r.session.id}>{r.session.label || r.session.id.slice(0, 8)}</span>}
-        {r.viewKey !== 'main' && (
-          <span className="crumb">
-            <button onClick={() => r.switchView('main')}>← main</button>
-            <span className="crumbName">{r.agents.find((a) => a.key === r.viewKey)?.label ?? r.viewKey}</span>
-            <button onClick={r.syncToMain} title="Seek to main timeline's current time">sync</button>
-          </span>
-        )}
+        {r.session && (() => {
+          // the chip is the agent hierarchy of the current view: root session
+          // down to whichever agent you are inside, however deep
+          const chain: typeof r.agents = [];
+          for (let k: string | null = r.viewKey; k; ) {
+            const n = r.agents.find((a) => a.key === k);
+            if (!n) break;
+            chain.unshift(n);
+            k = n.parentKey;
+          }
+          if (!chain.length) chain.push({ key: 'main', parentKey: null, label: r.session.label || r.session.id.slice(0, 8) });
+          return (
+            <span className="crumb">
+              {chain.map((n, i) => (
+                <span key={n.key} className="crumbStep">
+                  {i > 0 && <span className="crumbSep">›</span>}
+                  <span
+                    className={`sessionChip ${n.key === r.viewKey ? 'cur' : ''}`}
+                    title={n.label}
+                    onClick={() => n.key !== r.viewKey && r.switchView(n.key)}
+                  >{n.label}</span>
+                </span>
+              ))}
+            </span>
+          );
+        })()}
         <span className="titleRight">
           {r.playing && r.pointer >= r.head && <span className="liveBadge">● LIVE</span>}
           <button
@@ -577,6 +638,15 @@ export default function App() {
         {leftOpen && (
           <>
             <div className="sidebar">
+              {r.session && (
+                <>
+                  <div className="agentsSection" style={{ height: agentsH }}>
+                    <div className="sideHead">AGENTS</div>
+                    <AgentTree agents={r.agents} viewKey={r.viewKey} onSelect={openAgent} />
+                  </div>
+                  <Splitter dir="row" onDrag={dragAgents} />
+                </>
+              )}
               <div className="paneTabs">
                 <div className={`paneTab ${leftTab === 'tools' ? 'active' : ''}`} onClick={() => setLeftTab('tools')}>TOOL CALLS</div>
                 <div className={`paneTab ${leftTab === 'explorer' ? 'active' : ''}`} onClick={() => setLeftTab('explorer')}>EXPLORER</div>
@@ -687,8 +757,6 @@ export default function App() {
                 <div className={`paneTab ${rightTab === 'term' ? 'active' : ''}`} onClick={() => setRightTab('term')}>LIVE TERMINAL</div>
               </div>
               <div className={rightTab === 'chat' ? 'tabBody rightChat' : 'tabBody rightChat hiddenTab'}>
-                <div className="sideHead">AGENTS</div>
-                <AgentTree agents={r.agents} viewKey={r.viewKey} onSelect={openAgent} />
                 <ChatPane
                   steps={r.steps}
                   pointer={r.pointer}
@@ -712,6 +780,7 @@ export default function App() {
                     label: s.id.split('/').pop() ?? s.id,
                     cwd: s.pwd, updated_at: 0, size: 0,
                   })}
+                  onFollowResolve={(p) => void followResolve({ title: p.title, cwd: p.cwd || pwd || '' })}
                 />
               </div>
             </div>
@@ -722,7 +791,14 @@ export default function App() {
       <Transport r={r} />
 
       {pickerOpen && (
-        <SessionPicker initialPwd={pwd ?? ''} onPick={applyPick} onOpenFolder={openFolderOnly} onClose={() => setPickerOpen(false)} />
+        <SessionPicker
+          initialPwd={pickerSeed?.pwd ?? pwd ?? ''}
+          initialProvider={pickerSeed?.provider}
+          initialFilter={pickerSeed?.filter}
+          onPick={applyPick}
+          onOpenFolder={openFolderOnly}
+          onClose={() => { setPickerOpen(false); setPickerSeed(undefined); }}
+        />
       )}
     </div>
   );

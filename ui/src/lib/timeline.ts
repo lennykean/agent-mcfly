@@ -66,7 +66,10 @@ export interface TermBlock {
 
 export interface DataView {
   title: string;
-  table: NonNullable<ResultRender['table']>;
+  query: string; // the script that produced (or will produce) the table
+  table?: NonNullable<ResultRender['table']>;
+  raw?: string; // stdout+stderr when the result did not parse as a table
+  error?: boolean; // result arrived but is not tabular
   touchedAt: number;
 }
 
@@ -410,11 +413,18 @@ export function foldState(steps: Step[], pointer: number): ViewState {
         break;
       }
       case 'data': {
-        term.push({
-          command: s.call.command ?? r?.command ?? '', stdout: r?.stdout ?? '', stderr: r?.stderr ?? '',
-          interrupted: !!r?.interrupted, at: i,
-        });
-        if (r?.verb === 'data' && r.table) data = { title: s.call.title ?? 'table', table: r.table, touchedAt: i };
+        // run_table lives in the DATA tab only, never the terminal: the call
+        // renders its query immediately; the result fills in the table, or
+        // an error plus the raw output when it is not tabular
+        const table = r?.verb === 'data' && r.table ? r.table : undefined;
+        data = {
+          title: s.call.title ?? 'table',
+          query: s.call.command ?? r?.command ?? '',
+          table,
+          raw: r ? [r.stdout, r.stderr].filter(Boolean).join('\n') : undefined,
+          error: !!r && !table,
+          touchedAt: i,
+        };
         break;
       }
     }

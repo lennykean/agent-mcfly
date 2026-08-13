@@ -76,9 +76,12 @@ function listDir(dir, projName) {
 }
 
 // The cwd lives near the head; current Claude versions repeat custom titles
-// near the tail after a session is renamed.
+// near the tail after a session is renamed. Sessions without a custom title
+// fall back to a derived name: the stored summary, else the first real user
+// message — anything beats eight hex digits in a picker.
 export function scanHead(file) {
   const out = {};
+  let derived;
   let fd;
   try {
     fd = fs.openSync(file, 'r');
@@ -87,17 +90,31 @@ export function scanHead(file) {
       const buf = Buffer.alloc(Math.min(64 * 1024, size - start));
       const n = fs.readSync(fd, buf, 0, buf.length, start);
       for (const line of buf.toString('utf8', 0, n).split('\n')) {
-        if (!line.includes('"custom-title"') && (out.cwd || !line.includes('"cwd"'))) continue;
+        const wantName = !out.title && !derived
+          && (line.includes('"summary"') || line.includes('"type":"user"'));
+        if (!line.includes('"custom-title"') && (out.cwd || !line.includes('"cwd"')) && !wantName) continue;
         try {
           const o = JSON.parse(line);
           if (o.type === 'custom-title' && o.customTitle) out.title = o.customTitle;
           if (!out.cwd && typeof o.cwd === 'string') out.cwd = o.cwd;
+          if (!derived) {
+            if (o.type === 'summary' && typeof o.summary === 'string') derived = o.summary;
+            else if (o.type === 'user') {
+              const c = o.message?.content;
+              const text = typeof c === 'string' ? c
+                : Array.isArray(c) ? c.find((p) => p.type === 'text' && p.text)?.text : undefined;
+              const t = text?.trim();
+              // skip injected wrappers (command output, caveats, tag blobs)
+              if (t && !t.startsWith('<') && !t.startsWith('Caveat:')) derived = t;
+            }
+          }
         } catch { /* partial line at chunk edge */ }
       }
     }
   } catch { /* unreadable */ } finally {
     if (fd !== undefined) fs.closeSync(fd);
   }
+  if (!out.title && derived) out.title = derived.replace(/\s+/g, ' ').slice(0, 60);
   return out;
 }
 

@@ -52,10 +52,45 @@ const server = http.createServer((req, res) => {
     // same-origin; the Host header is the tell.
     if (!ALLOWED_HOSTS.has(req.headers.host ?? '')) return json(res, 403, { error: 'bad host' });
     if (url.pathname === '/api/config') {
-      return json(res, 200, { tools: [...detectTools(), '_'], token: TOKEN, pwd: process.cwd(), platform: process.platform });
+      return json(res, 200, { tools: [...detectTools(), '_'], token: TOKEN, pwd: process.cwd(), platform: process.platform, home: os.homedir() });
     }
-    // live terminal registry (agent tmux: list-sessions / map to transcript)
-    if (url.pathname === '/api/ptys') return json(res, 200, listPtys());
+    // live terminal registry (agent tmux: list-sessions / map to transcript);
+    // mapped sessions carry their transcript title so the picker reads human
+    if (url.pathname === '/api/ptys') {
+      const ptys = listPtys();
+      // ponytail: re-scans session heads every poll; cache if dirs grow large
+      for (const p of ptys) {
+        // the terminal title is the agent's own announcement of its session:
+        // exactly one transcript whose name the title contains -> map to it.
+        // Titles can duplicate, so several matches (none of them the current
+        // mapping) drop the mapping instead of guessing — the follow button
+        // then asks the human. Zero matches leaves things alone.
+        if (p.title && p.cwd) {
+          try {
+            const matches = [];
+            for (const [prov, loader] of Object.entries(PROVIDERS)) {
+              for (const s of loader.listForCwd(p.cwd)) {
+                if (s.label && s.label.length >= 8 && p.title.includes(s.label)) matches.push({ prov, s });
+              }
+            }
+            if (matches.length === 1 && p.session?.id !== matches[0].s.id) {
+              p.session = { provider: matches[0].prov, id: matches[0].s.id, pwd: p.cwd };
+              setPtySession(p.id, p.session);
+            } else if (matches.length > 1 && p.session && !matches.some((m) => m.s.id === p.session.id)) {
+              p.session = null;
+              setPtySession(p.id, null);
+            }
+          } catch { /* title mapping is best effort */ }
+        }
+        if (!p.session?.pwd) continue;
+        try {
+          const meta = PROVIDERS[p.session.provider]?.listForCwd(p.session.pwd)
+            ?.find((s) => s.id === p.session.id);
+          if (meta) p.session = { ...p.session, label: meta.label };
+        } catch { /* label is cosmetic */ }
+      }
+      return json(res, 200, ptys);
+    }
     // human review: session-scoped threaded comments; the human writes from
     // the UI, agents read and reply through the MCP
     if (url.pathname === '/api/reviews') {

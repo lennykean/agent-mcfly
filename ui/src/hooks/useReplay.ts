@@ -27,6 +27,8 @@ export function useReplay() {
   const [seekTick, setSeekTick] = useState(0);
 
   const busy = useRef(new WeakSet<Timeline>());
+  // a wall-clock landing for a timeline still loading when it was entered
+  const pendingAlign = useRef<{ key: string; ts: number } | null>(null);
 
   const tailOnce = useCallback(async (key: string) => {
     const tl = timelines.current.get(key);
@@ -56,6 +58,13 @@ export function useReplay() {
         if (data.cursor >= data.size || !data.messages.length) break;
       }
       if (initial) setTick((t) => t + 1);
+      // a time alignment deferred from switchView: the timeline was empty
+      // when the user descended into it — land at the intended moment now
+      if (initial && pendingAlign.current?.key === key && tl.steps.length) {
+        const ts = pendingAlign.current.ts;
+        pendingAlign.current = null;
+        setPointers((prev) => ({ ...prev, [key]: indexAtTime(tl.steps, ts) }));
+      }
       // a freshly loaded session starts AT the head IN play mode: pin the
       // pointer so incoming live events animate instead of snapping
       if (initial && key === 'main') {
@@ -187,31 +196,6 @@ export function useReplay() {
     setPlaying(true);
   }, [viewKey, head]);
 
-  const switchView = useCallback((key: string, childSessionId?: string) => {
-    if (!timelines.current.has(key)) {
-      if (!childSessionId || !session) return;
-      timelines.current.set(key, createTimeline(key, childSessionId, session.provider));
-      void tailOnce(key);
-    }
-    setAnimate(null);
-    setSeekTick((t) => t + 1);
-    setPlaying(false);
-    setViewKey(key);
-    // no pointer entry: new timelines open at their head
-  }, [session, tailOnce]);
-
-  // Seek the current (agent) view to the main timeline's current wall-clock time.
-  const syncToMain = useCallback(() => {
-    const main = timelines.current.get('main');
-    if (!main || viewKey === 'main') return;
-    const mainPtr = Math.min(pointers.main ?? 0, main.steps.length - 1);
-    const ts = main.steps[mainPtr]?.ts;
-    if (ts) jump(indexAtTime(steps, ts));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [viewKey, pointers, jump, tick]);
-
-  const view = useMemo(() => foldState(steps, pointer), [steps, pointer, tick]); // eslint-disable-line react-hooks/exhaustive-deps
-
   // All agents discovered across loaded timelines (full file, not pointer-limited).
   const agents = useMemo<AgentNode[]>(() => {
     const nodes: AgentNode[] = [{ key: 'main', parentKey: null, label: session?.label ?? 'main' }];
@@ -231,11 +215,63 @@ export function useReplay() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tick, session]);
 
+  const switchView = useCallback((key: string, childSessionId?: string) => {
+    if (!timelines.current.has(key)) {
+      if (!childSessionId || !session) return;
+      timelines.current.set(key, createTimeline(key, childSessionId, session.provider));
+      void tailOnce(key);
+    }
+    setAnimate(null);
+    setSeekTick((t) => t + 1);
+    // play state survives the switch: a view at its head just idles until
+    // steps arrive, and a live child animating in is exactly the point.
+    //
+    // Time alignment: descending while scrubbed back lands the target at the
+    // same wall-clock moment (clamped to its own timeline). A head-riding
+    // source means "now", so the target opens at its head. Ascending back
+    // out restores the outer view's own position untouched.
+    const jumpingOut = (() => {
+      for (let k: string | null = viewKey; k; ) {
+        const n = agents.find((a) => a.key === k);
+        if (!n) return false;
+        if (n.parentKey === key) return true;
+        k = n.parentKey;
+      }
+      return false;
+    })();
+    const curTl = timelines.current.get(viewKey);
+    const curHead = Math.max(0, (curTl?.steps.length ?? 1) - 1);
+    const curPtr = Math.min(pointers[viewKey] ?? curHead, curHead);
+    pendingAlign.current = null;
+    setPointers((prev) => {
+      const next = { ...prev };
+      // leaving a view at its head keeps it glued there: head means "the
+      // end", including everything that arrives while you are away
+      if (curPtr >= curHead) delete next[viewKey];
+      if (!jumpingOut) {
+        const ts = curPtr < curHead ? curTl?.steps[curPtr]?.ts : undefined;
+        const tgt = timelines.current.get(key);
+        if (ts && tgt?.steps.length) next[key] = indexAtTime(tgt.steps, ts);
+        else {
+          // a freshly created timeline has nothing to search yet: align it
+          // once its initial load lands
+          if (ts && tgt && !tgt.steps.length) pendingAlign.current = { key, ts };
+          delete next[key];
+        }
+      }
+      return next;
+    });
+    setViewKey(key);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session, tailOnce, viewKey, pointers, agents]);
+
+  const view = useMemo(() => foldState(steps, pointer), [steps, pointer, tick]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const animateIndex = animate?.key === viewKey ? animate.index : -1;
 
   return {
     session, selectSession, clearSession,
-    viewKey, switchView, syncToMain, agents,
+    viewKey, switchView, agents,
     steps, pointer, head, view, animateIndex, follow, seekTick,
     playing, togglePlay, speed, setSpeed,
     jump, stepBy, goLive,

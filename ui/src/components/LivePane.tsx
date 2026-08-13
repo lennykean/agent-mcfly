@@ -13,7 +13,7 @@ export interface LivePty {
   cwd: string;
   created: number;
   attached: boolean;
-  session: { provider: string; id: string; pwd: string } | null;
+  session: { provider: string; id: string; pwd: string; label?: string } | null;
   screen?: { text: string; cols: number; rows: number } | null;
 }
 
@@ -266,13 +266,14 @@ interface TermEntry {
 // terminal stays mounted while backgrounded; '+' opens the picker (attach an
 // existing PTY from the gallery, or start a new tool in the open folder).
 // Refresh detaches all (PTYs persist server-side; re-adopt via the gallery).
-export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFileRef, onFollowSession }: {
+export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFileRef, onFollowSession, onFollowResolve }: {
   cwd?: string;
   currentSession?: { provider: string; id: string } | null;
   onToolStart?: (tool: string) => void;
   onPtyId?: (id: string, tool: string, fresh: boolean) => void;
   onOpenFileRef?: (path: string, line?: number) => void;
   onFollowSession?: (session: { provider: string; id: string; pwd: string }) => void;
+  onFollowResolve?: (pty: { title?: string | null; cwd: string }) => void;
 }) {
   const [config, setConfig] = useState<Config | null>(null);
   const [error, setError] = useState<string>();
@@ -359,9 +360,9 @@ export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFile
     )));
   };
 
-  // PTYs already attached as tabs here shouldn't be offered in the gallery
-  const ownIds = new Set(terms.map((e) => e.ptyId).filter(Boolean));
-  const offered = ptys.filter((p) => !ownIds.has(p.id));
+  // every running PTY shows in the gallery — ones already open as tabs in
+  // this window included; clicking those just switches to their tab
+  const tabOf = (ptyId: string) => terms.find((e) => e.ptyId === ptyId);
 
   return (
     <div className="livePane">
@@ -383,7 +384,8 @@ export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFile
           <span className="codicon codicon-add" />
         </span>
         {active !== null && (() => {
-          const sess = sessionOf(terms.find((e) => e.key === active)?.ptyId);
+          const pty = ptys.find((x) => x.id === terms.find((e) => e.key === active)?.ptyId);
+          const sess = pty?.session ?? null;
           const same = isWatched(sess);
           return (
             <span className="liveTabActions">
@@ -392,6 +394,12 @@ export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFile
                   disabled={same}
                   onClick={() => onFollowSession(sess)}
                   title={same ? "You're already watching this terminal's session" : "Open this terminal's session in the replayer"}
+                >⏵ follow</button>
+              )}
+              {!sess && pty && onFollowResolve && (
+                <button
+                  onClick={() => onFollowResolve(pty)}
+                  title="Find this terminal's session — follows it when the title settles on one, asks when it doesn't"
                 >⏵ follow</button>
               )}
               <button onClick={() => removeTerm(active)} title="Detach: leave it running">⏏ detach</button>
@@ -431,15 +439,17 @@ export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFile
         <div className="livePicker">
           {error && <div className="pickerError">{error}</div>}
 
-          {offered.length > 0 && (
+          {ptys.length > 0 && (
             <>
               <div className="pickerTitle">attach a terminal</div>
               <div className="liveGallery">
-                {offered.map((p) => (
+                {ptys.map((p) => {
+                  const own = tabOf(p.id);
+                  return (
                   <div
                     key={p.id}
-                    className={`ptyTile ${p.attached ? 'inUse' : ''} ${isWatched(p.session) ? 'watching' : ''}`}
-                    onClick={() => (p.attached ? setConfirmSteal(p.id) : adopt(p, false))}
+                    className={`ptyTile ${p.attached && !own ? 'inUse' : ''} ${isWatched(p.session) ? 'watching' : ''}`}
+                    onClick={() => (own ? setActive(own.key) : p.attached ? setConfirmSteal(p.id) : adopt(p, false))}
                   >
                     <div className="tileHead">
                       {isWatched(p.session)
@@ -449,7 +459,9 @@ export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFile
                         {p.tool === '_' ? 'shell' : p.tool} · {p.cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop()}
                       </span>
                       {isWatched(p.session) && <span className="tileBadge watchBadge">watching</span>}
-                      <span className={`tileBadge ${p.attached ? 'busy' : ''}`}>{p.attached ? 'in use' : 'detached'}</span>
+                      <span className={`tileBadge ${p.attached && !own ? 'busy' : ''}`}>
+                        {own ? 'this window' : p.attached ? 'in use' : 'detached'}
+                      </span>
                       {!p.attached && (
                         <span
                           className="codicon codicon-close tileKill"
@@ -467,10 +479,12 @@ export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFile
                     ) : (
                       <div className="miniEmpty">no output yet</div>
                     )}
-                    <div className="tileMeta">
-                      {new Date(p.created).toLocaleTimeString()}
-                      {p.session && <span> ▸ {p.session.id.split('/').pop()}</span>}
-                    </div>
+                    {p.session && (
+                      <div className="tileSess" title={p.session.id}>
+                        ▸ {p.session.label ?? p.session.id.split('/').pop()}
+                      </div>
+                    )}
+                    <div className="tileMeta">{new Date(p.created).toLocaleString()}</div>
                     {confirmSteal === p.id && (
                       <div className="tileConfirm" onClick={(e) => e.stopPropagation()}>
                         live in another window — take the terminal?
@@ -481,7 +495,8 @@ export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFile
                       </div>
                     )}
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </>
           )}

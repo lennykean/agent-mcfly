@@ -1,6 +1,6 @@
 # Agent McFly
 
-Agent McFly is a browser workbench for Codex and Claude Code sessions. It replays finished sessions like a movie, and it follows live sessions while they run. You can start an agent in a McFly terminal, watch its session live, and talk to it in the same window. The workbench shows the chat, the tool calls, the file changes, and the terminal output. Every pane stays in step with one playhead.
+Agent McFly is a browser workbench for Codex and Claude Code sessions. It replays completed sessions step by step, and it follows live sessions while they run. You can start an agent in a McFly terminal, see its session live, and talk to the agent in the same window. The workbench shows the chat, the tool calls, the file changes, and the terminal output. All panes show the same step.
 
 ![The Agent McFly workbench during a replay](docs/hero.png)
 
@@ -20,15 +20,15 @@ The server starts on port 7777 and opens the browser.
 
 ## The workbench
 
-**Replay.** A session plays like a movie: the chat, the editor, and the terminal move together. You can scrub to any step, and every pane follows. Any message, tool call, or line of code is a click away from its moment in time. A tour guide toggle sets how activity behaves: the view moves to it, or its tab flashes and you stay put.
+**Replay.** The workbench plays a session step by step. The chat, the editor, and the terminal always show the same step. You can move the playhead to each step. You can click a message, a tool call, or a line of code to go to its step. The tour guide toggle controls the view. When the toggle is on, the view goes to each new item. When the toggle is off, the tab of the item flashes.
 
 ![A replay in motion, with the typing animation](docs/playback.gif)
 
-**Live sessions.** McFly follows a running agent while it works. You can also start the agent in a McFly terminal. Then one window shows the session and holds the terminal that drives it.
+**Live sessions.** McFly follows an agent while it works. You can also start the agent in a McFly terminal. Then one window shows the session and the terminal that controls it.
 
 ![A live claude terminal next to a replay](docs/terminal.png)
 
-**File history.** The editor shows each file as the agent saw it, not as it is now. Each file also has a timeline: every touch in the session, with per-line blame.
+**File history.** The editor shows each file with the content that the agent read or wrote at the current step. You can also open a timeline view for a file. The timeline view opens as a separate tab. It shows each change to the file from the session, with the source step for each line.
 
 ![The file timeline with the blame gutter and the pager](docs/timeline.png)
 
@@ -40,7 +40,7 @@ Configure the McFly MCP for local agents:
 mcfly mcp config
 ```
 
-This command writes `~/.mcfly/mcp.json`. When Codex and Claude Code are present, the command also adds the MCP to them.
+This command writes `~/.mcfly/mcp.json`. When Codex and Claude Code are installed, the command also adds the MCP to them.
 
 The MCP gives agents these tools:
 
@@ -50,17 +50,17 @@ The MCP gives agents these tools:
 | `highlight` | Opens a file in the workbench with the given lines highlighted. |
 | `waypoint` | Marks a line with a note. |
 | `waypoint_remove` | Removes waypoints from a file. |
-| `workspace_state` | Tells the agent what the user has open, looks at, and selected. |
+| `workspace_state` | Gives the agent the open files, the visible lines, and the selections of the user. |
 | `review_state` | Reads the open human reviews and their comment threads. |
 | `review_reply` | Replies to a review comment, and can mark it addressed. |
 
 ![A table from run_table in the DATA tab](docs/data.png)
 
-**Waypoints.** Agents mark the places that matter and leave notes on them. The wayfinder takes you to each note, and the notes stay correct after the code moves. When the code is gone, a snapshot shows it as it was.
+**Waypoints.** An agent can attach a note to a line of code. The wayfinder lists the notes. A note stays on its line after the file changes. If the line is deleted, a snapshot shows the line and its old context.
 
-![The wayfinder with a waypoint note above its line](docs/waypoints.png)
+![The wayfinder with a waypoint note under its line](docs/waypoints.png)
 
-**Human review.** You comment on lines like in a pull request: click a line number, or drag across a range. Agents read your threads and reply through the MCP. Each thread shows its state, from open to addressed to resolved. Reviews belong to one session, and they stay on disk as JSON.
+**Human review.** You can add a comment to a line, the same as in a pull-request review. Click a line number, or drag along the line numbers to select a range. Agents read the comment threads and reply through the MCP. Each thread has one of three states: open, addressed, or resolved. A review belongs to one session. The reviews stay on disk as JSON files.
 
 ![A review thread with an agent reply](docs/review.png)
 
