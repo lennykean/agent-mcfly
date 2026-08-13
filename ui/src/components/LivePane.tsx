@@ -221,12 +221,13 @@ interface TermEntry {
 // terminal stays mounted while backgrounded; '+' opens the picker (attach an
 // existing PTY from the gallery, or start a new tool in the open folder).
 // Refresh detaches all (PTYs persist server-side; re-adopt via the gallery).
-export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFileRef }: {
+export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFileRef, onFollowSession }: {
   cwd?: string;
   currentSession?: { provider: string; id: string } | null;
   onToolStart?: (tool: string) => void;
   onPtyId?: (id: string, tool: string, fresh: boolean) => void;
   onOpenFileRef?: (path: string, line?: number) => void;
+  onFollowSession?: (session: { provider: string; id: string; pwd: string }) => void;
 }) {
   const [config, setConfig] = useState<Config | null>(null);
   const [error, setError] = useState<string>();
@@ -323,12 +324,23 @@ export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFile
         <span className={`liveTab plus ${active === null ? 'active' : ''}`} title="New / attach" onClick={() => setActive(null)}>
           <span className="codicon codicon-add" />
         </span>
-        {active !== null && (
-          <span className="liveTabActions">
-            <button onClick={() => removeTerm(active)} title="Detach: leave it running">⏏ detach</button>
-            <button onClick={() => killTerm(active)} title="Kill the terminal">■ kill</button>
-          </span>
-        )}
+        {active !== null && (() => {
+          const sess = sessionOf(terms.find((e) => e.key === active)?.ptyId);
+          const same = isWatched(sess);
+          return (
+            <span className="liveTabActions">
+              {sess && onFollowSession && (
+                <button
+                  disabled={same}
+                  onClick={() => onFollowSession(sess)}
+                  title={same ? "You're already watching this terminal's session" : "Open this terminal's session in the replayer"}
+                >⏵ follow</button>
+              )}
+              <button onClick={() => removeTerm(active)} title="Detach: leave it running">⏏ detach</button>
+              <button onClick={() => killTerm(active)} title="Kill the terminal">■ kill</button>
+            </span>
+          );
+        })()}
       </div>
 
       {terms.map((e) => (

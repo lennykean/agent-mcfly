@@ -400,11 +400,9 @@ export default function App() {
                   <div className={`paneTab ${bottomTab === 'data' ? 'active' : ''}`} onClick={() => setBottomTab('data')}>
                     DATA
                   </div>
-                  {r.view.waypoints.length > 0 && (
-                    <div className={`paneTab wayfinderTab ${bottomTab === 'way' ? 'active' : ''}`} onClick={() => setBottomTab('way')}>
-                      WAYFINDER <span className="wfCount">{r.view.waypoints.length}</span>
-                    </div>
-                  )}
+                  <div className={`paneTab wayfinderTab ${bottomTab === 'way' ? 'active' : ''}`} onClick={() => setBottomTab('way')}>
+                    WAYFINDER{r.view.waypoints.length > 0 && <span className="wfCount">{r.view.waypoints.length}</span>}
+                  </div>
                   <div className={`paneTab ${bottomTab === 'tool' ? 'active' : ''}`} onClick={() => setBottomTab('tool')}>
                     TOOL CALL
                   </div>
@@ -455,6 +453,11 @@ export default function App() {
                   onToolStart={onToolStart}
                   onPtyId={onPtyStart}
                   onOpenFileRef={openFileRef}
+                  onFollowSession={(s) => applyPick(s.pwd || pwd || '', {
+                    id: s.id, provider: s.provider,
+                    label: s.id.split('/').pop() ?? s.id,
+                    cwd: s.pwd, updated_at: 0, size: 0,
+                  })}
                 />
               </div>
             </div>
