@@ -3,7 +3,9 @@
 // Serves ui/dist when it exists (production); in dev, run vite separately.
 import http from 'node:http';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import * as claudeCode from './loaders/claude-code.js';
 import * as codex from './loaders/codex.js';
@@ -31,10 +33,34 @@ const server = http.createServer((req, res) => {
     // same-origin; the Host header is the tell.
     if (!ALLOWED_HOSTS.has(req.headers.host ?? '')) return json(res, 403, { error: 'bad host' });
     if (url.pathname === '/api/config') {
-      return json(res, 200, { tools: [...detectTools(), '_'], token: TOKEN, pwd: process.cwd() });
+      return json(res, 200, { tools: [...detectTools(), '_'], token: TOKEN, pwd: process.cwd(), platform: process.platform });
     }
     // live terminal registry (agent tmux: list-sessions / map to transcript)
     if (url.pathname === '/api/ptys') return json(res, 200, listPtys());
+    // pasted images land here as bytes; the temp file's path gets typed into
+    // the terminal (the drag-and-drop flow every agent CLI already speaks)
+    if (url.pathname === '/api/paste-image' && req.method === 'POST') {
+      const chunks = [];
+      let size = 0;
+      req.on('data', (c) => {
+        size += c.length;
+        if (size > 10 * 1024 * 1024) req.destroy();
+        else chunks.push(c);
+      });
+      req.on('end', () => {
+        try {
+          const ext = ({
+            'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp',
+          })[req.headers['content-type']] ?? '.png';
+          const file = path.join(os.tmpdir(), `mcfly-paste-${Date.now()}${ext}`);
+          fs.writeFileSync(file, Buffer.concat(chunks));
+          json(res, 200, { path: file });
+        } catch {
+          json(res, 500, { error: 'write failed' });
+        }
+      });
+      return;
+    }
     if (url.pathname === '/api/pty-kill' && req.method === 'POST') {
       let body = '';
       req.on('data', (c) => { body += c; });
@@ -124,7 +150,16 @@ const server = http.createServer((req, res) => {
 });
 
 attachPty(server, ALLOWED_HOSTS);
-server.listen(PORT, '127.0.0.1', () => console.log(`Agent McFly API: http://localhost:${PORT}`));
+server.listen(PORT, '127.0.0.1', () => {
+  console.log(`Agent McFly API: http://localhost:${PORT}`);
+  if (process.env.MCFLY_OPEN === '1') {
+    const url = `http://localhost:${PORT}`;
+    const [cmd, args] = process.platform === 'win32'
+      ? ['cmd', ['/c', 'start', '', url]]
+      : process.platform === 'darwin' ? ['open', [url]] : ['xdg-open', [url]];
+    spawn(cmd, args, { detached: true, stdio: 'ignore' }).unref();
+  }
+});
 
 reapOrphans(); // children of servers that died without cleanup
 
