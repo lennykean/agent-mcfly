@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { isTableTool, tableCall, tableResult } from '../mcfly-data.js';
+import { highlightCall, highlightResult, isHighlightTool, isTableTool, isWaypointRemoveTool, isWaypointTool, tableCall, tableResult, waypointCall, waypointRemoveCall, waypointRemoveResult, waypointResult } from '../mcfly-data.js';
 
 const ROOT = path.resolve(os.homedir(), '.claude', 'projects');
 
@@ -336,6 +336,9 @@ export function bashReadResult(read, result, block) {
 
 function callRender(tool, input) {
   if (isTableTool(tool)) return tableCall(input);
+  if (isHighlightTool(tool)) return highlightCall(input);
+  if (isWaypointRemoveTool(tool)) return waypointRemoveCall(input);
+  if (isWaypointTool(tool)) return waypointCall(input);
   switch (tool) {
     case 'Read':
       return { verb: 'read_file', path: input.file_path, title: shortPath(input.file_path) };
@@ -371,6 +374,21 @@ function resultRender(tool, r, block, ctx) {
     return block.is_error
       ? { verb: 'exec', stdout: '', stderr: flatten(block.content) }
       : { verb: 'exec', stdout: flatten(block.content), stderr: '' };
+  }
+  if (isHighlightTool(tool)) {
+    const read = highlightResult(r) ?? highlightResult(flatten(block.content));
+    if (read) return read;
+    return { verb: 'exec', stdout: block.is_error ? '' : flatten(block.content), stderr: block.is_error ? flatten(block.content) : '' };
+  }
+  if (isWaypointRemoveTool(tool)) {
+    const rm = waypointRemoveResult(r) ?? waypointRemoveResult(flatten(block.content));
+    if (rm) return rm;
+    return { verb: 'exec', stdout: block.is_error ? '' : flatten(block.content), stderr: block.is_error ? flatten(block.content) : '' };
+  }
+  if (isWaypointTool(tool)) {
+    const wp = waypointResult(r) ?? waypointResult(flatten(block.content));
+    if (wp) return wp;
+    return { verb: 'exec', stdout: block.is_error ? '' : flatten(block.content), stderr: block.is_error ? flatten(block.content) : '' };
   }
   // search tools render as terminal commands; their readable output is the block text
   if (tool === 'Grep' || tool === 'Glob') {

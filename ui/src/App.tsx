@@ -8,8 +8,10 @@ import { Explorer } from './components/Explorer';
 import { FileTimeline } from './components/FileTimeline';
 import { LiveTerm } from './components/LivePane';
 import { SessionPicker } from './components/SessionPicker';
+import { Wayfinder } from './components/Wayfinder';
 import { Splitter } from './components/Splitter';
 import type { SessionMeta } from './types';
+import { resolveWaypoint, type WaypointEntry } from './lib/timeline';
 import { Terminal } from './components/Terminal';
 import { ToolDetail } from './components/ToolDetail';
 import { ToolLog } from './components/ToolLog';
@@ -51,7 +53,7 @@ export default function App() {
   const [bottomOpen, setBottomOpen] = useStoredBool('bottomOpen', true);
   const [leftTab, setLeftTab] = useStoredTab<'tools' | 'explorer'>('leftTab', 'tools');
   const [rightTab, setRightTab] = useStoredTab<'chat' | 'term'>('rightTab', 'chat');
-  const [bottomTab, setBottomTab] = useStoredTab<'term' | 'data' | 'tool'>('bottomTab', 'term');
+  const [bottomTab, setBottomTab] = useStoredTab<'term' | 'data' | 'tool' | 'way'>('bottomTab', 'term');
   const [editorTab, setEditorTab] = useState('pinned');
   const [userTabs, setUserTabs] = useState<UserTab[]>([]);
   // singleton by construction: the timeline is a projection of the one global
@@ -217,30 +219,92 @@ export default function App() {
   // the project pwd governs terminals and the explorer; session cwd is fallback
   const cwd = pwd ?? r.session?.cwd;
 
-  // open any absolute path as a read-only tab, current on-disk content
-  const openAbs = useCallback((abs: string) => {
+  // open any absolute path as a read-only tab, current on-disk content;
+  // an optional line scrolls/flashes there (nonce so re-clicks re-scroll),
+  // an optional waypoint renders its note card above the line
+  const openSeq = useRef(1);
+  const openAbs = useCallback((abs: string, line?: number, waypoint?: { line: number; note: string }) => {
     const m = abs.match(/^(.*)[\\/]([^\\/]+)$/);
     if (!m) return;
     const [, dir, name] = m;
     setEditorTab(abs);
     setUserTabs((tabs) => {
-      if (tabs.some((t) => t.path === abs)) return tabs;
+      const nonce = openSeq.current++;
+      if (tabs.some((t) => t.key === abs)) {
+        return tabs.map((t) => (t.key === abs ? { ...t, line, nonce, waypoint, waypointOpen: !!waypoint } : t));
+      }
       fetch(`/api/fs/read?root=${encodeURIComponent(dir)}&path=${encodeURIComponent(name)}`)
         .then((res) => res.json())
-        .then((d) => setUserTabs((cur) => cur.map((t) => (t.path === abs ? { ...t, ...d } : t))))
-        .catch(() => setUserTabs((cur) => cur.map((t) => (t.path === abs ? { ...t, error: 'failed to read' } : t))));
-      return [...tabs, { path: abs }];
+        .then((d) => setUserTabs((cur) => cur.map((t) => (t.key === abs ? { ...t, ...d } : t))))
+        .catch(() => setUserTabs((cur) => cur.map((t) => (t.key === abs ? { ...t, error: 'failed to read' } : t))));
+      return [...tabs, { key: abs, path: abs, line, nonce, waypoint, waypointOpen: !!waypoint }];
     });
   }, []);
+
+  const toggleWaypoint = useCallback((key: string) => {
+    setUserTabs((tabs) => tabs.map((t) => (t.key === key ? { ...t, waypointOpen: !t.waypointOpen } : t)));
+  }, []);
+
+  // the capture-time view of a waypoint; many snapshot tabs can coexist
+  const openSnapshot = useCallback((wp: WaypointEntry) => {
+    const key = `snapshot:${wp.path}:${wp.touchedAt}`;
+    setEditorTab(key);
+    setUserTabs((tabs) => (tabs.some((t) => t.key === key)
+      ? tabs
+      : [...tabs, {
+        key, path: wp.path,
+        snapshot: { line: wp.line, note: wp.note, before: wp.before, anchor: wp.anchor, after: wp.after },
+      }]));
+  }, []);
+
+  // resolve a waypoint against the file on disk NOW: a unique context match
+  // opens the file at the (possibly moved) line; anything else opens its snapshot
+  const openWaypoint = useCallback((wp: WaypointEntry) => {
+    const m = wp.path.match(/^(.*)[\\/]([^\\/]+)$/);
+    if (!m) { openSnapshot(wp); return; }
+    fetch(`/api/fs/read?root=${encodeURIComponent(m[1])}&path=${encodeURIComponent(m[2])}`)
+      .then((res) => res.json())
+      .then((d: { content?: string }) => {
+        const line = typeof d.content === 'string' ? resolveWaypoint(d.content, wp) : null;
+        if (line === null) openSnapshot(wp);
+        else openAbs(wp.path, line, { line, note: wp.note });
+      })
+      .catch(() => openSnapshot(wp));
+  }, [openAbs, openSnapshot]);
+
+  // clicking a resolved (purple) marker in a real file opens/toggles its card
+  const activateTabWaypoint = useCallback((key: string, line: number, note: string) => {
+    setUserTabs((tabs) => tabs.map((t) => (t.key === key
+      ? {
+        ...t, line, nonce: openSeq.current++,
+        waypoint: { line, note },
+        waypointOpen: !(t.waypoint?.line === line && t.waypointOpen),
+      }
+      : t)));
+  }, []);
+
+  // a waypoint step takes you to it — during playback, live follow, or scrub
+  const lastWaypointAt = r.view.waypoints.at(-1)?.touchedAt;
+  useEffect(() => {
+    const wp = r.view.waypoints.at(-1);
+    if (wp) openWaypoint(wp);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastWaypointAt]);
 
   const openFile = useCallback((rel: string) => {
     if (!cwd) return;
     openAbs(`${cwd.replace(/[\\/]+$/, '')}/${rel}`);
   }, [cwd, openAbs]);
 
-  const closeFile = useCallback((path: string) => {
-    setUserTabs((tabs) => tabs.filter((t) => t.path !== path));
-    setEditorTab((cur) => (cur === path ? 'pinned' : cur));
+  // terminal file:line links; relative paths resolve against the project cwd
+  const openFileRef = useCallback((p: string, line?: number) => {
+    const abs = /^[A-Za-z]:[\\/]|^[\\/]/.test(p) ? p : cwd ? `${cwd.replace(/[\\/]+$/, '')}/${p}` : null;
+    if (abs) openAbs(abs, line);
+  }, [cwd, openAbs]);
+
+  const closeFile = useCallback((key: string) => {
+    setUserTabs((tabs) => tabs.filter((t) => t.key !== key));
+    setEditorTab((cur) => (cur === key ? 'pinned' : cur));
   }, []);
 
   const currentTool = r.view.currentToolIndex >= 0
@@ -316,6 +380,10 @@ export default function App() {
               timelineBody={timelinePath && (
                 <FileTimeline steps={r.steps} pointer={r.pointer} path={timelinePath} speed={r.speed} onJump={r.jump} />
               )}
+              onToggleWaypoint={toggleWaypoint}
+              waypoints={r.view.waypoints}
+              onOpenSnapshot={openSnapshot}
+              onActivateWaypoint={activateTabWaypoint}
             />
           </div>
           {bottomOpen && (
@@ -332,6 +400,11 @@ export default function App() {
                   <div className={`paneTab ${bottomTab === 'data' ? 'active' : ''}`} onClick={() => setBottomTab('data')}>
                     DATA
                   </div>
+                  {r.view.waypoints.length > 0 && (
+                    <div className={`paneTab wayfinderTab ${bottomTab === 'way' ? 'active' : ''}`} onClick={() => setBottomTab('way')}>
+                      WAYFINDER <span className="wfCount">{r.view.waypoints.length}</span>
+                    </div>
+                  )}
                   <div className={`paneTab ${bottomTab === 'tool' ? 'active' : ''}`} onClick={() => setBottomTab('tool')}>
                     TOOL CALL
                   </div>
@@ -341,6 +414,9 @@ export default function App() {
                 </div>
                 <div className={bottomTab === 'data' ? 'tabBody' : 'tabBody hiddenTab'}>
                   <DataPane data={r.view.data} animate={r.view.data?.touchedAt === r.animateIndex} />
+                </div>
+                <div className={bottomTab === 'way' ? 'tabBody' : 'tabBody hiddenTab'}>
+                  <Wayfinder waypoints={r.view.waypoints} onSelect={openWaypoint} />
                 </div>
                 <div className={bottomTab === 'tool' ? 'tabBody' : 'tabBody hiddenTab'}>
                   <ToolDetail step={currentTool} />
@@ -377,6 +453,7 @@ export default function App() {
                   currentSession={r.session && { provider: r.session.provider, id: r.session.id }}
                   onToolStart={onToolStart}
                   onPtyId={onPtyStart}
+                  onOpenFileRef={openFileRef}
                 />
               </div>
             </div>

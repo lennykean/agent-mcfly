@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyPatch, invertHunks, fileChain } from '../ui/src/lib/timeline.ts';
+import { applyPatch, invertHunks, fileChain, foldState, resolveWaypoint } from '../ui/src/lib/timeline.ts';
 
 const tool = (index, verb, path, result) => ({
   kind: 'tool', tool: 'T', requestId: String(index), params: {},
@@ -101,6 +101,39 @@ test('fileChain: a write between a patch and a future read severs backfill', () 
   ];
   const { snapshots } = fileChain(steps, 'f');
   assert.equal(snapshots.get(0).content, undefined);
+});
+
+test('waypoints live from create to remove, rewindably', () => {
+  const wp = { path: 'C:\\repo\\f.js', line: 3, note: 'n', before: [], anchor: 'c', after: [] };
+  const steps = [
+    tool(0, 'other', undefined, { waypoint: wp }),
+    tool(1, 'exec', undefined, {}),
+    tool(2, 'other', undefined, { waypoint_remove: { path: 'C:/repo/f.js', line: 3 } }),
+  ];
+  assert.equal(foldState(steps, 0).waypoints.length, 1);
+  assert.equal(foldState(steps, 1).waypoints.length, 1);
+  assert.equal(foldState(steps, 2).waypoints.length, 0); // removed
+  assert.equal(foldState(steps, 1).waypoints.length, 1); // scrub back: it's back
+  // removal without a line clears every waypoint on the file
+  const steps2 = [
+    tool(0, 'other', undefined, { waypoint: wp }),
+    tool(1, 'other', undefined, { waypoint: { ...wp, line: 9 } }),
+    tool(2, 'other', undefined, { waypoint_remove: { path: 'C:\\repo\\f.js' } }),
+  ];
+  assert.equal(foldState(steps2, 1).waypoints.length, 2);
+  assert.equal(foldState(steps2, 2).waypoints.length, 0);
+});
+
+test('waypoints re-locate by context and detach rather than guess', () => {
+  const wp = { path: 'f', line: 3, note: 'n', before: ['a', 'b'], anchor: 'c', after: ['d'] };
+  // exact file: found at its recorded line
+  assert.equal(resolveWaypoint('a\nb\nc\nd', wp), 3);
+  // code moved down: found at the NEW line
+  assert.equal(resolveWaypoint('x\ny\na\nb\nc\nd', wp), 5);
+  // anchor gone: detached
+  assert.equal(resolveWaypoint('a\nb\nZ\nd', wp), null);
+  // ambiguous (two identical contexts): detached, never guess
+  assert.equal(resolveWaypoint('a\nb\nc\nd\na\nb\nc\nd', wp), null);
 });
 
 test('fileChain: windows paths fold case, posix paths do not', () => {

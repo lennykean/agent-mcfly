@@ -14,6 +14,17 @@ export interface SessionMeta {
 
 export type RenderVerb = 'read_file' | 'patch_file' | 'write_file' | 'exec' | 'data' | 'spawn_agent' | 'other';
 
+// A note anchored to a line by its surrounding context (a zero-change hunk):
+// re-locatable in the current file even after the code moves.
+export interface Waypoint {
+  path: string;
+  line: number; // 1-based line at capture time
+  note: string; // markdown
+  before: string[];
+  anchor: string;
+  after: string[];
+}
+
 export interface CallRender {
   verb: RenderVerb;
   title?: string;
@@ -37,6 +48,9 @@ export interface ResultRender {
   start_line?: number;
   total_lines?: number;
   region?: { start: number; end: number }; // 1-based lines of interest in content
+  highlights?: { start: number; end: number }[]; // persistent highlight bands (mcfly highlight tool)
+  waypoint?: Waypoint; // mcfly waypoint tool: context-anchored note
+  waypoint_remove?: { path: string; line?: number }; // lifts waypoints from this step on
   image_src?: string; // data URI for image reads
   hunks?: PatchHunk[];
   stdout?: string;

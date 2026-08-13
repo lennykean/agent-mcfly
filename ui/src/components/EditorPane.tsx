@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import hljs from 'highlight.js/lib/common';
 import powershell from 'highlight.js/lib/languages/powershell';
 import 'highlight.js/styles/vs2015.css';
-import { TYPE_CPS, type FileView } from '../lib/timeline';
+import { TYPE_CPS, normPath, resolveWaypoint, type FileView, type WaypointEntry } from '../lib/timeline';
+import { Md } from './ChatPane';
 
 hljs.registerLanguage('powershell', powershell);
 
@@ -53,10 +54,14 @@ function charWidth(): number {
 // to be typed live — in full color. A region band flashes and fades after.
 export interface BlameMark { text: string; title: string; step: number }
 
-export function CodeView({ file, animate, speed, flashOnly, blame }: {
+export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, marks }: {
   file: FileView; animate: boolean; speed: number;
   flashOnly?: boolean;
   blame?: { marks: (BlameMark | null)[]; compact?: boolean; onJump: (step: number) => void; onToggle?: () => void };
+  waypoint?: { line: number; note: string; open: boolean; onToggle: () => void };
+  // all waypoint markers for this file: resolved ones open their card here;
+  // stale ones are just something to GO TO — click opens the snapshot tab
+  marks?: { line: number; stale: boolean; onClick: () => void }[];
 }) {
   const r = file.render;
   const ref = useRef<HTMLDivElement>(null);
@@ -126,10 +131,14 @@ export function CodeView({ file, animate, speed, flashOnly, blame }: {
       if (caretY > el.scrollTop + el.clientHeight - 80) el.scrollTop = caretY - el.clientHeight + 80;
       else if (caretY < el.scrollTop) el.scrollTop = Math.max(0, caretY - 60);
     } else {
-      el.scrollTo({ top: region ? Math.max(0, (region.start - startLine) * LH - 60) : 0 });
+      // leave headroom above the target line for an open waypoint card
+      const headroom = waypoint?.open ? 190 : 60;
+      el.scrollTo({ top: region ? Math.max(0, (region.start - startLine) * LH - headroom) : 0 });
     }
+    // content is a dep: user tabs load asynchronously, and the region scroll
+    // must re-fire once the real content (and thus scrollHeight) exists
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [file.path, file.touchedAt, typedDone, caretY]);
+  }, [file.path, file.touchedAt, typedDone, caretY, content]);
 
   const regionTop = region ? (region.start - startLine) * LH : 0;
   const regionH = region ? (region.end - region.start + 1) * LH : 0;
@@ -167,7 +176,59 @@ export function CodeView({ file, animate, speed, flashOnly, blame }: {
             })}
           </div>
         )}
+        {(waypoint || marks?.length) ? (
+          <div className="wpTrough">
+            {Array.from({ length: total }, (_, i) => {
+              const line = startLine + i;
+              if (waypoint && line === waypoint.line) {
+                return (
+                  <div
+                    key={i}
+                    className="wpMark codicon codicon-location"
+                    title={waypoint.open ? 'Collapse note' : 'Show note'}
+                    onClick={waypoint.onToggle}
+                  />
+                );
+              }
+              const mark = marks?.find((m) => m.line === line);
+              if (mark) {
+                return (
+                  <div
+                    key={i}
+                    className={`wpMark codicon codicon-location${mark.stale ? ' wpStaleMark' : ''}`}
+                    title={mark.stale ? 'waypoint [stale] — opens the snapshot' : 'waypoint'}
+                    onClick={mark.onClick}
+                  />
+                );
+              }
+              return <div key={i} />;
+            })}
+          </div>
+        ) : null}
         <pre className="code hljs" dangerouslySetInnerHTML={{ __html: html }} />
+        {waypoint?.open && (() => {
+          const lineTop = (waypoint.line - startLine) * LH;
+          // near the top there's no room above the line: place the card below
+          const below = lineTop < 190;
+          return (
+            <div className="wpOverlayWrap" style={below ? { top: lineTop + LH + 6, transform: 'none' } : { top: lineTop - 4 }}>
+              <div className="wpCard">
+                <div className="wpCardHead">
+                  <span className="codicon codicon-location" /> waypoint
+                  <span className="wpCollapse codicon codicon-chevron-up" title="Collapse (reopen from the trough marker)" onClick={waypoint.onToggle} />
+                </div>
+                <Md text={waypoint.note} />
+              </div>
+            </div>
+          );
+        })()}
+        {r.highlights?.map((h, i) => (
+          <div
+            key={i}
+            className="hlBand"
+            style={{ top: (h.start - startLine) * LH, height: (h.end - h.start + 1) * LH }}
+          />
+        ))}
         {typing && <div className="regionTint" style={{ top: regionTop, height: regionH }} />}
         {typing && !typedDone && (
           <>
@@ -217,7 +278,17 @@ export function DiffView({ file, animate }: { file: FileView; animate: boolean }
   );
 }
 
-export interface UserTab { path: string; content?: string; image_src?: string; error?: string }
+export interface UserTab {
+  key: string; // normal tabs: the path; snapshot waypoint tabs: their own key (many allowed)
+  path: string; content?: string; image_src?: string; error?: string;
+  line?: number; // scroll/flash target (from terminal file:line links)
+  nonce?: number; // bumped per open so re-clicking re-scrolls
+  waypoint?: { line: number; note: string }; // wayfinder: card above the line
+  waypointOpen?: boolean;
+  // a waypoint whose context no longer exists in the real file: the captured
+  // chunk, shown as a snapshot of the code as it was
+  snapshot?: { line: number; note: string; before: string[]; anchor: string; after: string[] };
+}
 
 function FileBody({ file, animate, speed }: { file: FileView; animate: boolean; speed: number }) {
   return file.mode === 'diff'
@@ -231,7 +302,8 @@ function FileBody({ file, animate, speed }: { file: FileView; animate: boolean; 
 // every touch, cannot be closed); explorer files open as closable read-only tabs.
 export function EditorPane({
   pinned, animate, speed, userTabs, active, onSelect, onClose, onOpenCurrent,
-  timelinePath, onOpenTimeline, onCloseTimeline, timelineBody,
+  timelinePath, onOpenTimeline, onCloseTimeline, timelineBody, onToggleWaypoint,
+  waypoints, onOpenSnapshot, onActivateWaypoint,
 }: {
   pinned?: FileView; animate: boolean; speed: number;
   userTabs: UserTab[]; active: string; // 'pinned' | 'timeline' | user tab path
@@ -241,13 +313,34 @@ export function EditorPane({
   onOpenTimeline?: (path: string) => void;
   onCloseTimeline?: () => void;
   timelineBody?: React.ReactNode;
+  onToggleWaypoint?: (path: string) => void;
+  waypoints?: WaypointEntry[];
+  onOpenSnapshot?: (wp: WaypointEntry) => void;
+  onActivateWaypoint?: (key: string, line: number, note: string) => void;
 }) {
   const activeTabRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     activeTabRef.current?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }, [active]);
 
-  const userTab = active !== 'pinned' && active !== 'timeline' ? userTabs.find((t) => t.path === active) : undefined;
+  const userTab = active !== 'pinned' && active !== 'timeline' ? userTabs.find((t) => t.key === active) : undefined;
+
+  // waypoint markers for the real on-disk file being shown: re-resolve each
+  // against its content — matched ones live at their found line, stale ones
+  // sit at their recorded line purely as a way to GO TO their snapshot
+  const tabMarks = userTab && !userTab.snapshot && userTab.content !== undefined && waypoints?.length && onOpenSnapshot
+    ? waypoints
+      .filter((w) => normPath(w.path) === normPath(userTab.path))
+      .map((w) => {
+        const line = resolveWaypoint(userTab.content!, w);
+        // a stale pin whose recorded line is past EOF still needs somewhere
+        // to live: clamp into the file so it stays clickable
+        const pin = Math.max(1, Math.min(w.line, userTab.content!.split('\n').length));
+        return line === null
+          ? { line: pin, stale: true, onClick: () => onOpenSnapshot(w) }
+          : { line, stale: false, onClick: () => onActivateWaypoint?.(userTab.key, line, w.note) };
+      })
+    : undefined;
 
   const historyAction = (path: string) => onOpenTimeline && (
     <span
@@ -290,30 +383,80 @@ export function EditorPane({
           </div>
         )}
         {userTabs.map((t) => (
-          <div key={t.path}
-            ref={t.path === active ? activeTabRef : undefined}
-            className={`tab ${t.path === active ? 'active' : ''}`}
-            title={`${t.path} (read only)`}
-            onClick={() => onSelect(t.path)}>
-            {shortName(t.path)} <span className="roBadge">read only</span>
+          <div key={t.key}
+            ref={t.key === active ? activeTabRef : undefined}
+            className={`tab ${t.key === active ? 'active' : ''} ${t.snapshot ? 'snapshotTab' : ''}`}
+            title={t.snapshot ? `${t.path} — waypoint snapshot: the file as it was when the waypoint was dropped` : `${t.path} (read only)`}
+            onClick={() => onSelect(t.key)}>
+            {shortName(t.path)}{t.snapshot
+              ? ' [snapshot]'
+              : <> <span className="roBadge">read only</span></>}
+            {t.snapshot && onOpenCurrent && (
+              <span
+                className="codicon codicon-go-to-file tabAction"
+                title="Open the current on-disk version (read only)"
+                onClick={(e) => { e.stopPropagation(); onOpenCurrent(t.path); }}
+              />
+            )}
             {historyAction(t.path)}
-            <span className="tabClose" onClick={(e) => { e.stopPropagation(); onClose(t.path); }}>✕</span>
+            <span className="tabClose" onClick={(e) => { e.stopPropagation(); onClose(t.key); }}>✕</span>
           </div>
         ))}
       </div>
       {active === 'timeline' && timelinePath ? (
         timelineBody
       ) : userTab ? (
-        userTab.error ? (
+        userTab.snapshot ? (
+          // a virtual file: the chunk the waypoint captured, rendered exactly
+          // like a real one — line numbers from the capture position
+          <CodeView
+            key={userTab.key}
+            file={{
+              path: userTab.path,
+              mode: 'file',
+              render: {
+                verb: 'read_file',
+                content: [...userTab.snapshot.before, userTab.snapshot.anchor, ...userTab.snapshot.after].join('\n'),
+                start_line: userTab.snapshot.line - userTab.snapshot.before.length,
+                region: { start: userTab.snapshot.line, end: userTab.snapshot.line },
+              },
+              touchedAt: userTab.nonce ?? 0,
+            }}
+            animate
+            speed={speed}
+            waypoint={onToggleWaypoint ? {
+              line: userTab.snapshot.line,
+              note: userTab.snapshot.note,
+              open: userTab.waypointOpen ?? true,
+              onToggle: () => onToggleWaypoint(userTab.key),
+            } : undefined}
+          />
+        ) : userTab.error ? (
           <div className="emptyHint">{userTab.error}</div>
         ) : userTab.image_src ? (
           <div className="editorBody imageView"><img src={userTab.image_src} alt={userTab.path} /></div>
         ) : (
           <CodeView
             key={userTab.path}
-            file={{ path: userTab.path, mode: 'file', render: { verb: 'read_file', content: userTab.content ?? '' }, touchedAt: 0 }}
-            animate={false}
+            file={{
+              path: userTab.path,
+              mode: 'file',
+              render: {
+                verb: 'read_file',
+                content: userTab.content ?? '',
+                ...(userTab.line ? { region: { start: userTab.line, end: userTab.line } } : {}),
+              },
+              touchedAt: userTab.nonce ?? 0,
+            }}
+            animate={!!userTab.line}
             speed={speed}
+            waypoint={userTab.waypoint && onToggleWaypoint ? {
+              line: userTab.waypoint.line,
+              note: userTab.waypoint.note,
+              open: userTab.waypointOpen ?? true,
+              onToggle: () => onToggleWaypoint(userTab.key),
+            } : undefined}
+            marks={tabMarks}
           />
         )
       ) : pinned ? (

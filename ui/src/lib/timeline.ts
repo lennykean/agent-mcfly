@@ -1,4 +1,4 @@
-import type { Message, RenderVerb, ResultRender, Step, Timeline } from '../types';
+import type { Message, RenderVerb, ResultRender, Step, Timeline, Waypoint } from '../types';
 
 export function createTimeline(key: string, sessionId: string, provider: string): Timeline {
   return { key, sessionId, provider, steps: [], cursor: 0, mtime: 0, pending: new Map() };
@@ -70,11 +70,14 @@ export interface DataView {
   touchedAt: number;
 }
 
+export interface WaypointEntry extends Waypoint { touchedAt: number; ts?: number }
+
 export interface ViewState {
   tabs: FileView[];
   activePath?: string;
   term: TermBlocks;
   data?: DataView;
+  waypoints: WaypointEntry[];
   currentToolIndex: number; // last tool step at or before pointer, -1 if none
 }
 
@@ -237,7 +240,7 @@ const TOUCH_VERBS = new Set<RenderVerb>(['read_file', 'patch_file', 'write_file'
 // paths meet here from multiple sources (transcripts, explorer) with mixed
 // separators and drive-letter casing; fold case only for Windows-style paths —
 // on POSIX, Foo.ts and foo.ts are different files
-const normPath = (p: string) =>
+export const normPath = (p: string) =>
   (/^[a-zA-Z]:[\\/]|\\/.test(p) ? p.replace(/\//g, '\\').toLowerCase() : p);
 
 export function fileChain(steps: Step[], path: string): { touches: FileTouch[]; snapshots: Map<number, FileSnapshot> } {
@@ -337,12 +340,25 @@ export function foldState(steps: Step[], pointer: number): ViewState {
   const byPath = new Map<string, FileView>();
   const term: TermBlock[] = [];
   let data: DataView | undefined;
+  const waypoints: WaypointEntry[] = [];
   let currentToolIndex = -1;
   for (let i = 0; i <= pointer && i < steps.length; i++) {
     const s = steps[i];
     if (s.kind !== 'tool') continue;
     currentToolIndex = i;
     const r = s.result;
+    if (r?.waypoint) waypoints.push({ ...r.waypoint, touchedAt: i, ts: s.ts });
+    if (r?.waypoint_remove) {
+      // a waypoint lives from its create step to its remove step; folding to
+      // the pointer makes that rewindable — scrub back and it reappears
+      const rm = r.waypoint_remove;
+      const want = normPath(rm.path);
+      for (let w = waypoints.length - 1; w >= 0; w--) {
+        if (normPath(waypoints[w].path) === want && (rm.line === undefined || waypoints[w].line === rm.line)) {
+          waypoints.splice(w, 1);
+        }
+      }
+    }
     switch (s.call.verb) {
       case 'read_file': {
         // image results carry no path of their own; the call side has it
@@ -407,7 +423,22 @@ export function foldState(steps: Step[], pointer: number): ViewState {
   let activePath: string | undefined;
   let latest = -1;
   for (const t of tabs) if (t.touchedAt > latest) { latest = t.touchedAt; activePath = t.path; }
-  return { tabs, activePath, term, data, currentToolIndex };
+  return { tabs, activePath, term, data, waypoints, currentToolIndex };
+}
+
+// Re-locate a waypoint in (possibly changed) file content: the anchor line
+// plus its full context must match at exactly one position. Anything less is
+// detached — never guess.
+export function resolveWaypoint(content: string, wp: Waypoint): number | null {
+  const lines = content.replace(/\r\n/g, '\n').split('\n');
+  const matches: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i] !== wp.anchor) continue;
+    const before = wp.before.every((b, j) => lines[i - wp.before.length + j] === b);
+    const after = wp.after.every((a, j) => lines[i + 1 + j] === a);
+    if (before && after) matches.push(i + 1);
+  }
+  return matches.length === 1 ? matches[0] : null;
 }
 
 // Edit typing rate at 1x playback, scaled by playback speed. Deliberately

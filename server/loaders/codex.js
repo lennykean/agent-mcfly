@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { isTableTool, tableCall, tableResult } from '../mcfly-data.js';
+import { highlightCall, highlightResult, isHighlightTool, isTableTool, isWaypointRemoveTool, isWaypointTool, tableCall, tableResult, waypointCall, waypointRemoveCall, waypointRemoveResult, waypointResult } from '../mcfly-data.js';
 
 const ROOT = path.join(os.homedir(), '.codex', 'sessions');
 const INDEX = path.join(os.homedir(), '.codex', 'session_index.jsonl');
@@ -325,6 +325,9 @@ export function callRender(name, input) {
 
 function directRenders(name, input, source = input) {
   if (isTableTool(name)) return [tableCall(input)];
+  if (isHighlightTool(name)) return [highlightCall(input)];
+  if (isWaypointRemoveTool(name)) return [waypointRemoveCall(input)];
+  if (isWaypointTool(name)) return [waypointCall(input)];
   if (DIRECT_SHELL_NAMES.has(name) || (name === 'exec' && isCommandJson(input))) {
     const command = commandOf(input);
     const read = !command.includes('${') && fileReadRender(command, input);
@@ -377,6 +380,15 @@ export function resultRender(meta, text, output) {
   if (!meta) return { verb: 'other' };
   if (meta.render?.verb === 'data') {
     return tableResult(output) ?? tableResult(text) ?? { verb: 'exec', stdout: execPayload(text), stderr: '' };
+  }
+  if (isHighlightTool(meta.name)) {
+    return highlightResult(output) ?? highlightResult(text) ?? { verb: 'exec', stdout: execPayload(text), stderr: '' };
+  }
+  if (isWaypointRemoveTool(meta.name)) {
+    return waypointRemoveResult(output) ?? waypointRemoveResult(text) ?? { verb: 'exec', stdout: execPayload(text), stderr: '' };
+  }
+  if (isWaypointTool(meta.name)) {
+    return waypointResult(output) ?? waypointResult(text) ?? { verb: 'exec', stdout: execPayload(text), stderr: '' };
   }
   // Edits render from the result side so the timeline applies them only after completion.
   if (meta.name === 'apply_patch' || nestedToolNames(meta.input).includes('apply_patch')) {

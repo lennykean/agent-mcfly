@@ -48,13 +48,26 @@ function MiniScreen({ screen }: { screen: { text: string; cols: number; rows: nu
   );
 }
 
+// file references in terminal output: absolute or separator-containing paths,
+// or bare filenames when a :line follows; optional trailing :line(:col)
+const FILE_REF = /(?:[A-Za-z]:[\\/][\w.\\/-]+|[\\/]?[\w.-]+(?:[\\/][\w.-]+)+|[\w-]+\.[A-Za-z]\w{0,7}(?=:\d))(?::\d+(?::\d+)?)?/g;
+
+function parseFileRef(text: string): { path: string; line?: number } | null {
+  const m = text.match(/^(.*?)(?::(\d+)(?::\d+)?)?$/);
+  if (!m || !m[1]) return null;
+  // require an extension-ish tail or a separator so prose doesn't linkify
+  if (!/[\\/]/.test(m[1]) && !/\.\w+$/.test(m[1])) return null;
+  return { path: m[1], line: m[2] ? Number(m[2]) : undefined };
+}
+
 // A live PTY session: xterm.js <-> websocket <-> node-pty on the server.
 // Control frames from the server are \x00-prefixed JSON; everything else is
 // terminal data. 'taken' = another window stole the terminal (tmux attach -d).
 // Stays mounted while hidden so backgrounded terminals keep their sockets.
-function PtySession({ tool, token, cwd, attachId, steal, visible, onPtyId, onExit, onTakeBack }: {
+function PtySession({ tool, token, cwd, attachId, steal, visible, onPtyId, onExit, onTakeBack, onOpenFileRef }: {
   tool: string; token: string; cwd?: string; attachId?: string; steal?: boolean; visible: boolean;
   onPtyId: (id: string) => void; onExit: () => void; onTakeBack: () => void;
+  onOpenFileRef?: (path: string, line?: number) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Xterm | null>(null);
@@ -63,6 +76,8 @@ function PtySession({ tool, token, cwd, attachId, steal, visible, onPtyId, onExi
   onPtyIdRef.current = onPtyId;
   const onExitRef = useRef(onExit);
   onExitRef.current = onExit;
+  const onOpenFileRefRef = useRef(onOpenFileRef);
+  onOpenFileRefRef.current = onOpenFileRef;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -86,6 +101,24 @@ function PtySession({ tool, token, cwd, attachId, steal, visible, onPtyId, onExi
       term.loadAddon(new WebglAddon()); // GPU renderer: crisp cells, like VS Code
     } catch { /* WebGL unavailable; DOM renderer still works */ }
     fit.fit();
+
+    // clickable file:line references -> open in the editor at that line
+    const linkProvider = term.registerLinkProvider({
+      provideLinks(y, callback) {
+        const text = term.buffer.active.getLine(y - 1)?.translateToString(true) ?? '';
+        const links = [];
+        for (const m of text.matchAll(FILE_REF)) {
+          const ref = parseFileRef(m[0]);
+          if (!ref) continue;
+          links.push({
+            range: { start: { x: m.index + 1, y }, end: { x: m.index + m[0].length, y } },
+            text: m[0],
+            activate: () => onOpenFileRefRef.current?.(ref.path, ref.line),
+          });
+        }
+        callback(links.length ? links : undefined);
+      },
+    });
 
     let ws: WebSocket | null = null;
     let dataSub: { dispose(): void } | null = null;
@@ -142,6 +175,7 @@ function PtySession({ tool, token, cwd, attachId, steal, visible, onPtyId, onExi
       }
       ro.disconnect();
       dataSub?.dispose();
+      linkProvider.dispose();
       term.dispose();
       termRef.current = null;
     };
@@ -187,11 +221,12 @@ interface TermEntry {
 // terminal stays mounted while backgrounded; '+' opens the picker (attach an
 // existing PTY from the gallery, or start a new tool in the open folder).
 // Refresh detaches all (PTYs persist server-side; re-adopt via the gallery).
-export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId }: {
+export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFileRef }: {
   cwd?: string;
   currentSession?: { provider: string; id: string } | null;
   onToolStart?: (tool: string) => void;
   onPtyId?: (id: string, tool: string, fresh: boolean) => void;
+  onOpenFileRef?: (path: string, line?: number) => void;
 }) {
   const [config, setConfig] = useState<Config | null>(null);
   const [error, setError] = useState<string>();
@@ -315,6 +350,7 @@ export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId }: {
               }}
               onExit={() => removeTerm(e.key)}
               onTakeBack={() => takeBack(e.key)}
+              onOpenFileRef={onOpenFileRef}
             />
           )}
         </div>

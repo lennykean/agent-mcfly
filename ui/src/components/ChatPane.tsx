@@ -18,7 +18,7 @@ function Inline({ text }: { text: string }) {
   );
 }
 
-function Md({ text }: { text: string }) {
+export function Md({ text }: { text: string }) {
   const parts = text.split(/```(?:\w*\n)?/);
   return (
     <>

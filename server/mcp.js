@@ -4,11 +4,11 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
-import { DATA_MARKER, parseTsv } from './mcfly-data.js';
+import { DATA_MARKER, parseLineSpec, parseTsv } from './mcfly-data.js';
 
 const exec = promisify(execFile);
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url))).version;
-const INSTRUCTIONS = 'Use run_table for shell commands whose stdout is tabular data. The script must emit strict TSV: one unique, non-empty header row, at least two columns, at least one data row, and the same number of tab-separated cells on every row. Do not emit decoration or commentary to stdout; send diagnostics to stderr.';
+const INSTRUCTIONS = 'Use run_table for shell commands whose stdout is tabular data. The script must emit strict TSV: one unique, non-empty header row, at least two columns, at least one data row, and the same number of tab-separated cells on every row. Do not emit decoration or commentary to stdout; send diagnostics to stderr. Use highlight instead of a plain file read whenever you want to point the user at specific lines: it renders the file in the McFly viewer with those lines highlighted. Use waypoint to leave a durable note anchored to a specific line (a finding, explanation, or TODO): waypoints collect in the McFly Wayfinder tab and stay findable even after the file changes. Use waypoint_remove when a waypoint is resolved or obsolete.';
 const TOOL = {
   name: 'run_table',
   title: 'Run tabular shell command',
@@ -38,6 +38,158 @@ const TOOL = {
   },
   annotations: { destructiveHint: true, openWorldHint: true },
 };
+
+const HIGHLIGHT_TOOL = {
+  name: 'highlight',
+  title: 'Read a file with highlighted lines',
+  description: 'Read a file and render it in the McFly viewer with one or more lines highlighted. Use instead of a plain read when pointing the user at specific lines. lines is a comma-separated list of line numbers and ranges, e.g. "12,40-45".',
+  inputSchema: {
+    type: 'object', additionalProperties: false, required: ['path', 'lines'],
+    properties: {
+      path: { type: 'string', description: 'File path, absolute or relative to cwd.' },
+      lines: { type: 'string', description: 'Lines to highlight: comma-separated numbers and ranges, e.g. "12,40-45".' },
+      cwd: { type: 'string', description: 'Base directory for a relative path. Defaults to the MCP process working directory.' },
+    },
+  },
+  outputSchema: {
+    type: 'object', additionalProperties: false,
+    required: ['schema', 'kind', 'path', 'content', 'highlights'],
+    properties: {
+      schema: { const: 'mcfly.data.v1' }, kind: { const: 'file' }, path: { type: 'string' },
+      content: { type: 'string' },
+      highlights: {
+        type: 'array', minItems: 1,
+        items: {
+          type: 'object', additionalProperties: false, required: ['start', 'end'],
+          properties: { start: { type: 'integer', minimum: 1 }, end: { type: 'integer', minimum: 1 } },
+        },
+      },
+    },
+  },
+  annotations: { readOnlyHint: true },
+};
+
+const WAYPOINT_TOOL = {
+  name: 'waypoint',
+  title: 'Drop a waypoint on a line',
+  description: 'Mark a line of a file with a note. The waypoint captures the line and surrounding context so McFly can find it again even after the file changes, and shows the note above the line in the Wayfinder tab. Use it to leave findings, explanations, or TODOs anchored to code.',
+  inputSchema: {
+    type: 'object', additionalProperties: false, required: ['path', 'line', 'note'],
+    properties: {
+      path: { type: 'string', description: 'File path, absolute or relative to cwd.' },
+      line: { type: 'integer', minimum: 1, description: '1-based line to anchor the waypoint to.' },
+      note: { type: 'string', description: 'Markdown note shown above the line.' },
+      cwd: { type: 'string', description: 'Base directory for a relative path. Defaults to the MCP process working directory.' },
+    },
+  },
+  outputSchema: {
+    type: 'object', additionalProperties: false,
+    required: ['schema', 'kind', 'path', 'line', 'note', 'before', 'anchor', 'after'],
+    properties: {
+      schema: { const: 'mcfly.data.v1' }, kind: { const: 'waypoint' },
+      path: { type: 'string' }, line: { type: 'integer' }, note: { type: 'string' },
+      before: { type: 'array', items: { type: 'string' } },
+      anchor: { type: 'string' },
+      after: { type: 'array', items: { type: 'string' } },
+    },
+  },
+  annotations: { readOnlyHint: true },
+};
+
+const WAYPOINT_REMOVE_TOOL = {
+  name: 'waypoint_remove',
+  title: 'Remove waypoints',
+  description: 'Remove waypoints previously dropped on a file. With line, removes the waypoint anchored at that (original) line; without, removes all waypoints on the file.',
+  inputSchema: {
+    type: 'object', additionalProperties: false, required: ['path'],
+    properties: {
+      path: { type: 'string', description: 'File path the waypoint was dropped on.' },
+      line: { type: 'integer', minimum: 1, description: 'The line the waypoint was originally anchored to. Omit to remove all waypoints on the file.' },
+      cwd: { type: 'string', description: 'Base directory for a relative path.' },
+    },
+  },
+  outputSchema: {
+    type: 'object', additionalProperties: false, required: ['schema', 'kind', 'path'],
+    properties: {
+      schema: { const: 'mcfly.data.v1' }, kind: { const: 'waypoint_remove' },
+      path: { type: 'string' }, line: { type: 'integer' },
+    },
+  },
+  annotations: { readOnlyHint: true },
+};
+
+function runWaypointRemove(args = {}) {
+  if (typeof args.path !== 'string' || !args.path.trim()) {
+    return { content: [{ type: 'text', text: 'path is required' }], isError: true };
+  }
+  const line = args.line === undefined ? undefined : Number(args.line);
+  if (line !== undefined && (!Number.isInteger(line) || line < 1)) {
+    return { content: [{ type: 'text', text: 'line must be a positive integer' }], isError: true };
+  }
+  const file = path.resolve(args.cwd ?? process.cwd(), args.path);
+  const result = { schema: 'mcfly.data.v1', kind: 'waypoint_remove', path: file, ...(line ? { line } : {}) };
+  return { content: [{ type: 'text', text: `${DATA_MARKER}\n${JSON.stringify(result)}` }], structuredContent: result };
+}
+
+const WAYPOINT_CONTEXT = 3;
+
+function runWaypoint(args = {}) {
+  if (typeof args.path !== 'string' || !args.path.trim()) {
+    return { content: [{ type: 'text', text: 'path is required' }], isError: true };
+  }
+  const line = Number(args.line);
+  if (!Number.isInteger(line) || line < 1) {
+    return { content: [{ type: 'text', text: 'line must be a positive integer' }], isError: true };
+  }
+  if (typeof args.note !== 'string' || !args.note.trim()) {
+    return { content: [{ type: 'text', text: 'note is required' }], isError: true };
+  }
+  const file = path.resolve(args.cwd ?? process.cwd(), args.path);
+  let lines;
+  try {
+    lines = fs.readFileSync(file, 'utf8').split(/\r?\n/);
+  } catch (error) {
+    return { content: [{ type: 'text', text: `cannot read ${file}: ${error.message}` }], isError: true };
+  }
+  if (line > lines.length) {
+    return { content: [{ type: 'text', text: `line ${line} is past the end of the file (${lines.length} lines)` }], isError: true };
+  }
+  const result = {
+    schema: 'mcfly.data.v1', kind: 'waypoint', path: file, line, note: args.note,
+    before: lines.slice(Math.max(0, line - 1 - WAYPOINT_CONTEXT), line - 1),
+    anchor: lines[line - 1],
+    after: lines.slice(line, line + WAYPOINT_CONTEXT),
+  };
+  return { content: [{ type: 'text', text: `${DATA_MARKER}\n${JSON.stringify(result)}` }], structuredContent: result };
+}
+
+const MAX_HIGHLIGHT_BYTES = 2 * 1024 * 1024;
+
+function runHighlight(args = {}) {
+  if (typeof args.path !== 'string' || !args.path.trim()) {
+    return { content: [{ type: 'text', text: 'path is required' }], isError: true };
+  }
+  const highlights = parseLineSpec(args.lines);
+  if (!highlights) {
+    return { content: [{ type: 'text', text: 'lines must be numbers and ranges like "12,40-45"' }], isError: true };
+  }
+  const file = path.resolve(args.cwd ?? process.cwd(), args.path);
+  let content;
+  try {
+    if (fs.statSync(file).size > MAX_HIGHLIGHT_BYTES) {
+      return { content: [{ type: 'text', text: `file too large to render: ${file}` }], isError: true };
+    }
+    content = fs.readFileSync(file, 'utf8');
+  } catch (error) {
+    return { content: [{ type: 'text', text: `cannot read ${file}: ${error.message}` }], isError: true };
+  }
+  const total = content.split(/\r?\n/).length;
+  if (highlights.at(-1).end > total) {
+    return { content: [{ type: 'text', text: `line ${highlights.at(-1).end} is past the end of the file (${total} lines)` }], isError: true };
+  }
+  const result = { schema: 'mcfly.data.v1', kind: 'file', path: file, content, highlights };
+  return { content: [{ type: 'text', text: `${DATA_MARKER}\n${JSON.stringify(result)}` }], structuredContent: result };
+}
 
 async function runTable(args = {}) {
   if (typeof args.script !== 'string' || !args.script.trim()) {
@@ -85,10 +237,13 @@ async function handle(request) {
         capabilities: { tools: {} }, serverInfo: { name: 'mcfly', version: VERSION }, instructions: INSTRUCTIONS,
       };
     case 'ping': return {};
-    case 'tools/list': return { tools: [TOOL] };
+    case 'tools/list': return { tools: [TOOL, HIGHLIGHT_TOOL, WAYPOINT_TOOL, WAYPOINT_REMOVE_TOOL] };
     case 'tools/call':
-      if (request.params?.name !== TOOL.name) throw new Error(`unknown tool: ${request.params?.name}`);
-      return runTable(request.params.arguments);
+      if (request.params?.name === TOOL.name) return runTable(request.params.arguments);
+      if (request.params?.name === HIGHLIGHT_TOOL.name) return runHighlight(request.params.arguments);
+      if (request.params?.name === WAYPOINT_TOOL.name) return runWaypoint(request.params.arguments);
+      if (request.params?.name === WAYPOINT_REMOVE_TOOL.name) return runWaypointRemove(request.params.arguments);
+      throw new Error(`unknown tool: ${request.params?.name}`);
     default: throw Object.assign(new Error(`method not found: ${request.method}`), { code: -32601 });
   }
 }
