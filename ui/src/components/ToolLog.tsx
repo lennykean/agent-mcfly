@@ -7,11 +7,10 @@ const ICONS: Record<string, string> = {
 
 // History rows only — params/results live in the bottom TOOL CALL tab.
 const Row = memo(function Row({
-  step, index, future, current, onJump,
+  step, index, current, onJump,
 }: {
   step: Step & { kind: 'tool' };
   index: number;
-  future: boolean;
   current: boolean;
   onJump: (i: number) => void;
 }) {
@@ -19,7 +18,6 @@ const Row = memo(function Row({
     <div
       className={[
         'logRow',
-        future ? 'future' : '',
         current ? 'current' : '',
         step.isError ? 'error' : '',
       ].join(' ')}
@@ -70,11 +68,12 @@ export function ToolLog({
   return (
     <div className="toolLog" ref={listRef}>
       {steps.map((step, i) => {
-        if (step.kind !== 'tool') return null;
+        // the log folds to the playhead like every other pane: no future rows
+        if (step.kind !== 'tool' || i > pointer) return null;
         const isCurrent = i === currentToolIndex;
         return (
           <div key={i} ref={isCurrent ? currentRef : undefined}>
-            <Row step={step} index={i} future={i > pointer} current={isCurrent} onJump={onJump} />
+            <Row step={step} index={i} current={isCurrent} onJump={onJump} />
           </div>
         );
       })}

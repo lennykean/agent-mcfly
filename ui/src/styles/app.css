@@ -177,7 +177,6 @@ pre, code { font-family: var(--font-mono); }
 .toolLog { flex: 1; overflow-y: auto; font-size: 12px; font-family: var(--font-mono); }
 .logRow { display: flex; gap: 5px; align-items: center; padding: 2px 8px; cursor: pointer; white-space: nowrap; overflow: hidden; color: var(--fg-dim); }
 .logRow:hover { background: #2a2d2e; }
-.logRow.future { opacity: 0.35; }
 .logRow.current { background: var(--accent-bg); color: #fff; opacity: 1; }
 .logRow.error .logTool { color: var(--red); }
 .logIcon { flex: 0 0 auto; font-size: 13px !important; color: var(--fg-faint); }
