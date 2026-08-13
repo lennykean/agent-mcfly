@@ -249,6 +249,10 @@ export function attachPty(server, allowedHosts) {
           rows: 30,
           cwd,
           env: sanitizedEnv(),
+          // modern conpty (ships in the prebuilds), not the in-box conhost:
+          // the old one eats TUI scrollback and mouse passthrough, so wheel
+          // scrolling in claude/codex sessions is dead without this
+          ...(WIN ? { useConptyDll: true } : {}),
         });
       } catch (e) {
         ws.send(`\r\nfailed to start ${SHELL}: ${e.message}\r\n`);
