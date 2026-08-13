@@ -20,13 +20,23 @@ function Dir({ root, rel, name, depth, onOpen }: {
   const [open, setOpen] = useState(depth === 0);
   const [entries, setEntries] = useState<Entry[] | null>(null);
 
+  // an open directory stays fresh: re-list on an interval so files created
+  // or deleted by live agents appear without a reload; keep identity when
+  // nothing changed so the subtree does not re-render
   useEffect(() => {
-    if (!open || entries) return;
-    fetch(`/api/fs/list?root=${encodeURIComponent(root)}&path=${encodeURIComponent(rel)}`)
-      .then((r) => r.json())
-      .then((d) => setEntries(Array.isArray(d) ? d : []))
-      .catch(() => setEntries([]));
-  }, [open, entries, root, rel]);
+    if (!open) return;
+    const load = () =>
+      fetch(`/api/fs/list?root=${encodeURIComponent(root)}&path=${encodeURIComponent(rel)}`)
+        .then((r) => r.json())
+        .then((d) => {
+          const next: Entry[] = Array.isArray(d) ? d : [];
+          setEntries((cur) => (JSON.stringify(cur) === JSON.stringify(next) ? cur : next));
+        })
+        .catch(() => setEntries((cur) => cur ?? []));
+    void load();
+    const id = setInterval(load, 5000);
+    return () => clearInterval(id);
+  }, [open, root, rel]);
 
   return (
     <div>
