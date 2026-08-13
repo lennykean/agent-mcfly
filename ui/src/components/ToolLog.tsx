@@ -39,14 +39,15 @@ export function ToolLog({
   const currentRef = useRef<HTMLDivElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const wasVisible = useRef(false);
-  const engaged = useRef(true); // false after a manual scroll, until time travel/reveal
-  const programmatic = useRef(false);
+  const engaged = useRef(true);
 
-  // a manual scroll disengages following; our own scrollIntoView must not
+  // terminal-style stickiness, derived from position alone: at the bottom
+  // means follow, anywhere else means stay put. Our own scrollIntoView ends
+  // near the bottom (future rows are folded away), so it keeps itself engaged
   useEffect(() => {
     const el = listRef.current;
     if (!el) return;
-    const onScroll = () => { if (!programmatic.current) engaged.current = false; };
+    const onScroll = () => { engaged.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40; };
     el.addEventListener('scroll', onScroll, { passive: true });
     return () => el.removeEventListener('scroll', onScroll);
   }, []);
@@ -59,9 +60,7 @@ export function ToolLog({
       wasVisible.current = visible;
       return;
     }
-    programmatic.current = true;
     currentRef.current?.scrollIntoView({ block: wasVisible.current ? 'nearest' : 'center' });
-    setTimeout(() => { programmatic.current = false; }, 150);
     wasVisible.current = visible;
   }, [currentToolIndex, visible, seekTick]);
 

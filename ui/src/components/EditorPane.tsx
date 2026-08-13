@@ -55,11 +55,13 @@ function charWidth(): number {
 // to be typed live — in full color. A region band flashes and fades after.
 export interface BlameMark { text: string; title: string; step: number }
 
-export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, marks, onCompose, composer, reviewMarks, thread }: {
+export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, marks, onCompose, composer, reviewMarks, thread, scrollTo }: {
   file: FileView; animate: boolean; speed: number;
   flashOnly?: boolean;
   blame?: { marks: (BlameMark | null)[]; compact?: boolean; onJump: (step: number) => void; onToggle?: () => void };
   waypoint?: { line: number; note: string; open: boolean; onToggle: () => void };
+  // tour-driven scroll target; human expand/collapse must never move the view
+  scrollTo?: { line: number; nonce: number };
   // all waypoint markers for this file: resolved ones open their card here;
   // stale ones are just something to GO TO — click opens the snapshot tab
   marks?: { line: number; stale: boolean; onClick: () => void }[];
@@ -148,24 +150,31 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
   const regionBottomY = region ? (Math.min(total, region.end - startLine + 1)) * LH : 0;
 
   // scroll: follow the typing point; when done, stay put (a jump reads as pop-in)
+  const appliedScroll = useRef<number>(undefined);
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
+    // a pending tour target outranks everything once typing settles: the
+    // tour must land with its card in view. Applied once per nonce, so a
+    // human toggling a card never moves the view.
+    if (scrollTo && scrollTo.nonce !== appliedScroll.current && (!typing || typedDone)) {
+      appliedScroll.current = scrollTo.nonce;
+      el.scrollTo({ top: Math.max(0, (scrollTo.line - startLine) * LH - 60) });
+      return;
+    }
     if (typing) {
       if (typedDone) return;
       if (caretY > el.scrollTop + el.clientHeight - 80) el.scrollTop = caretY - el.clientHeight + 80;
       else if (caretY < el.scrollTop) el.scrollTop = Math.max(0, caretY - 60);
     } else {
       const headroom = 60;
-      // an open waypoint or review thread outranks the region as the target:
-      // the tour must land with the card in view, wherever the region was
-      const target = thread?.line ?? (waypoint?.open ? waypoint.line : undefined) ?? region?.start;
+      const target = region?.start;
       el.scrollTo({ top: target !== undefined ? Math.max(0, (target - startLine) * LH - headroom) : 0 });
     }
     // content is a dep: user tabs load asynchronously, and the region scroll
     // must re-fire once the real content (and thus scrollHeight) exists
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [file.path, file.touchedAt, typedDone, caretY, content, thread?.line, waypoint?.open, waypoint?.line]);
+  }, [file.path, file.touchedAt, typedDone, caretY, content, scrollTo?.nonce]);
 
   const regionTop = region ? (region.start - startLine) * LH : 0;
   const regionH = region ? (region.end - region.start + 1) * LH : 0;
@@ -412,19 +421,20 @@ function ThreadCard({ comment, stale, onReply, onResolve, onViewOriginal, onClos
   );
 }
 
-function FileBody({ file, animate, speed, onCompose, composer, waypoint, reviewMarks, thread }: {
+function FileBody({ file, animate, speed, onCompose, composer, waypoint, reviewMarks, thread, scrollTo }: {
   file: FileView; animate: boolean; speed: number;
   onCompose?: (line: number, lineEnd: number) => void;
   composer?: { line: number; lineEnd: number; onSubmit: (body: string) => void; onCancel: () => void };
   waypoint?: { line: number; note: string; open: boolean; onToggle: () => void };
   reviewMarks?: ComponentProps<typeof CodeView>['reviewMarks'];
   thread?: ComponentProps<typeof CodeView>['thread'];
+  scrollTo?: { line: number; nonce: number };
 }) {
   return file.mode === 'diff'
     ? <DiffView key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} />
     : file.mode === 'image'
       ? <ImageView key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} />
-      : <CodeView key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} speed={speed} onCompose={onCompose} composer={composer} waypoint={waypoint} reviewMarks={reviewMarks} thread={thread} />;
+      : <CodeView key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} speed={speed} onCompose={onCompose} composer={composer} waypoint={waypoint} reviewMarks={reviewMarks} thread={thread} scrollTo={scrollTo} />;
 }
 
 // context capture for a review comment: the anchor line and its surroundings,
@@ -557,6 +567,20 @@ export function EditorPane({
     if (found === null) return undefined;
     return { line: (pinned.render.start_line ?? 1) - 1 + found, note: w.note, open: pinnedWpOpen, onToggle: () => setPinnedWpOpen((o) => !o) };
   })();
+
+  // tour signals set the scroll target; nothing else does. A human toggling
+  // a card open or closed keeps the view exactly where it is.
+  const [scrollTo, setScrollTo] = useState<{ line: number; nonce: number }>();
+  const scrollSeq = useRef(1);
+  useEffect(() => {
+    const t = [...pinnedReview, ...tabReview].find((x) => x.comment.id === focusThreadId);
+    if (t) setScrollTo({ line: t.line, nonce: scrollSeq.current++ });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusThreadId]);
+  useEffect(() => {
+    if (pinnedWaypoint) setScrollTo({ line: pinnedWaypoint.line, nonce: scrollSeq.current++ });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [lastWpAt]);
 
   // waypoint markers for the real on-disk file being shown: re-resolve each
   // against its content — matched ones live at their found line, stale ones
@@ -708,6 +732,7 @@ export function EditorPane({
               onViewOriginal: () => onReviewViewOriginal(openThread.comment),
               onClose: () => setOpenThreadId(undefined),
             } : undefined}
+            scrollTo={scrollTo}
           />
         )
       ) : pinned ? (
@@ -732,6 +757,7 @@ export function EditorPane({
             onViewOriginal: () => onReviewViewOriginal(pinnedThread.comment),
             onClose: () => setOpenThreadId(undefined),
           } : undefined}
+          scrollTo={scrollTo}
         />
       ) : (
         <div className="emptyHint">files the agent reads will open here</div>

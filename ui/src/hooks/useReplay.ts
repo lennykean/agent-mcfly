@@ -49,10 +49,13 @@ export function useReplay() {
         tl.cursor = data.cursor;
         if (data.messages.length) {
           appendMessages(tl, data.messages);
-          setTick((t) => t + 1);
+          // the initial drain paints ONCE at the true head, after the loop:
+          // per-chunk paints read as a visible fast-forward through history
+          if (!initial) setTick((t) => t + 1);
         }
         if (data.cursor >= data.size || !data.messages.length) break;
       }
+      if (initial) setTick((t) => t + 1);
       // a freshly loaded session starts AT the head IN play mode: pin the
       // pointer so incoming live events animate instead of snapping
       if (initial && key === 'main') {
