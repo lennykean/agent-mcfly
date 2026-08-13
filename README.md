@@ -20,7 +20,7 @@ The server starts on port 7777 and opens the browser.
 
 ## The workbench
 
-**Replay.** A session plays like a movie: the chat, the editor, and the terminal move together. You can scrub to any step, and every pane follows. Any message, tool call, or line of code is a click away from its moment in time.
+**Replay.** A session plays like a movie: the chat, the editor, and the terminal move together. You can scrub to any step, and every pane follows. Any message, tool call, or line of code is a click away from its moment in time. A tour guide toggle sets how activity behaves: the view moves to it, or its tab flashes and you stay put.
 
 ![A replay in motion, with the typing animation](docs/playback.gif)
 
@@ -51,12 +51,18 @@ The MCP gives agents these tools:
 | `waypoint` | Marks a line with a note. |
 | `waypoint_remove` | Removes waypoints from a file. |
 | `workspace_state` | Tells the agent what the user has open, looks at, and selected. |
+| `review_state` | Reads the open human reviews and their comment threads. |
+| `review_reply` | Replies to a review comment, and can mark it addressed. |
 
 ![A table from run_table in the DATA tab](docs/data.png)
 
 **Waypoints.** Agents mark the places that matter and leave notes on them. The wayfinder takes you to each note, and the notes stay correct after the code moves. When the code is gone, a snapshot shows it as it was.
 
 ![The wayfinder with a waypoint note above its line](docs/waypoints.png)
+
+**Human review.** You comment on lines like in a pull request: click a line number, or drag across a range. Agents read your threads and reply through the MCP. Each thread shows its state, from open to addressed to resolved. Reviews belong to one session, and they stay on disk as JSON.
+
+![A review thread with an agent reply](docs/review.png)
 
 ## Run from source
 
