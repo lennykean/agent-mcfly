@@ -347,7 +347,22 @@ export function foldState(steps: Step[], pointer: number): ViewState {
     if (s.kind !== 'tool') continue;
     currentToolIndex = i;
     const r = s.result;
-    if (r?.waypoint) waypoints.push({ ...r.waypoint, touchedAt: i, ts: s.ts });
+    if (r?.waypoint) {
+      const w = r.waypoint;
+      waypoints.push({ ...w, touchedAt: i, ts: s.ts });
+      // dropping a waypoint is a touch: the live view turns to the marked
+      // file. A content-carrying waypoint is a full read of the file as the
+      // agent marked it; older envelopes fall back to a bare re-touch
+      if (w.content !== undefined) {
+        byPath.set(w.path, {
+          path: w.path, mode: 'file', touchedAt: i,
+          render: { verb: 'read_file', content: w.content, region: { start: w.line, end: w.line } },
+        });
+      } else {
+        const want = normPath(w.path);
+        for (const fv of byPath.values()) if (normPath(fv.path) === want) { fv.touchedAt = i; break; }
+      }
+    }
     if (r?.waypoint_remove) {
       // a waypoint lives from its create step to its remove step; folding to
       // the pointer makes that rewindable — scrub back and it reappears
@@ -430,12 +445,17 @@ export function foldState(steps: Step[], pointer: number): ViewState {
 // plus its full context must match at exactly one position. Anything less is
 // detached — never guess.
 export function resolveWaypoint(content: string, wp: Waypoint): number | null {
+  // review comments arrive over plain HTTP: context may come malformed
+  // (strings instead of line arrays). Normalize instead of crashing the page.
+  const ctx = (x: unknown): string[] => (Array.isArray(x) ? x : typeof x === 'string' ? x.replace(/\r\n/g, '\n').split('\n') : []);
+  const wpBefore = ctx(wp.before);
+  const wpAfter = ctx(wp.after);
   const lines = content.replace(/\r\n/g, '\n').split('\n');
   const matches: number[] = [];
   for (let i = 0; i < lines.length; i++) {
     if (lines[i] !== wp.anchor) continue;
-    const before = wp.before.every((b, j) => lines[i - wp.before.length + j] === b);
-    const after = wp.after.every((a, j) => lines[i + 1 + j] === a);
+    const before = wpBefore.every((b, j) => lines[i - wpBefore.length + j] === b);
+    const after = wpAfter.every((a, j) => lines[i + 1 + j] === a);
     if (before && after) matches.push(i + 1);
   }
   return matches.length === 1 ? matches[0] : null;

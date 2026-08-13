@@ -98,6 +98,9 @@ export function waypointResult(value) {
       before: Array.isArray(result.before) ? result.before : [],
       anchor: result.anchor,
       after: Array.isArray(result.after) ? result.after : [],
+      // the file as the agent marked it, when the envelope carries it: the
+      // live view shows the waypoint in session content, not the disk file
+      ...(typeof result.content === 'string' ? { content: result.content } : {}),
     },
   };
 }

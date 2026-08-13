@@ -66,6 +66,7 @@ const wp = (line, note) => ({
   before: v2lines.slice(Math.max(0, line - 4), line - 1),
   anchor: v2lines[line - 1],
   after: v2lines.slice(line, line + 3),
+  content: V2,
 });
 const wp1 = wp(16, '**Retry policy.** Client errors (4xx) return to the caller unchanged — only 5xx and network failures retry. Retrying a 404 four times just makes the outage slower.');
 const wp2 = wp(21, '**Backoff.** Exponential with 0-100ms of jitter so a fleet of clients does not stampede the server in lockstep. Attempt 0 retries immediately by design.');
