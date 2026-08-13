@@ -29,13 +29,21 @@ export function Md({ text }: { text: string }) {
   );
 }
 
-const Bubble = memo(function Bubble({ step, onOpenAgent }: { step: Step; onOpenAgent: (key: string) => void }) {
+// upper-right rewind on every message: jump the whole session to that moment
+const JumpBtn = ({ onClick }: { onClick: () => void }) => (
+  <span className="msgJump codicon codicon-history" title="Rewind to this point" onClick={onClick} />
+);
+
+const Bubble = memo(function Bubble({ step, onJump, onOpenAgent }: {
+  step: Step; onJump: () => void; onOpenAgent: (key: string) => void;
+}) {
   if (step.kind === 'tool') {
     // only spawn_agent tools surface in chat; the rest live in the tool log
     if (step.call.verb !== 'spawn_agent') return null;
     const r = step.result;
     return (
       <div className="msg agentcard">
+        <JumpBtn onClick={onJump} />
         <div><span className="codicon codicon-hubot agentIcon" /> <strong>{step.call.agent_type ?? r?.agent_type ?? 'agent'}</strong> — {step.call.title}</div>
         {r?.summary && <div className="agentSummary">{r.summary.slice(0, 300)}</div>}
         {r?.child_session_id && (
@@ -47,6 +55,7 @@ const Bubble = memo(function Bubble({ step, onOpenAgent }: { step: Step; onOpenA
   if (step.kind === 'thinking') {
     return (
       <details className="msg thinking">
+        <JumpBtn onClick={onJump} />
         <summary>thinking…</summary>
         <Md text={step.text} />
       </details>
@@ -54,16 +63,17 @@ const Bubble = memo(function Bubble({ step, onOpenAgent }: { step: Step; onOpenA
   }
   return (
     <div className={`msg ${step.kind}`}>
+      <JumpBtn onClick={onJump} />
       <Md text={step.text} />
     </div>
   );
 });
 
 export function ChatPane({
-  steps, pointer, animateIndex, seekTick, onOpenAgent, visible = true,
+  steps, pointer, animateIndex, seekTick, onJump, onOpenAgent, visible = true,
 }: {
   steps: Step[]; pointer: number; animateIndex: number; seekTick: number;
-  onOpenAgent: (key: string) => void; visible?: boolean;
+  onJump: (i: number) => void; onOpenAgent: (key: string) => void; visible?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
 
@@ -90,7 +100,7 @@ export function ChatPane({
               </div>
             );
           }
-          return <Bubble key={i} step={step} onOpenAgent={onOpenAgent} />;
+          return <Bubble key={i} step={step} onJump={() => onJump(i)} onOpenAgent={onOpenAgent} />;
         })}
       </div>
     </div>

@@ -395,7 +395,7 @@ export default function App() {
               <div className="bottomPane">
                 <div className="paneTabs">
                   <div className={`paneTab ${bottomTab === 'term' ? 'active' : ''}`} onClick={() => setBottomTab('term')}>
-                    TOOL TERMINAL <span className="roBadge">read only</span>
+                    AGENT TERMINAL <span className="roBadge">read only</span>
                   </div>
                   <div className={`paneTab ${bottomTab === 'data' ? 'active' : ''}`} onClick={() => setBottomTab('data')}>
                     DATA
@@ -442,6 +442,7 @@ export default function App() {
                   pointer={r.pointer}
                   animateIndex={r.animateIndex}
                   seekTick={r.seekTick}
+                  onJump={r.jump}
                   onOpenAgent={openAgent}
                   visible={rightTab === 'chat'}
                 />

@@ -249,6 +249,12 @@ pre.code.hljs { padding: 0; background: transparent; }
 /* trough lane + note card in a CodeView */
 .wpTrough { flex: 0 0 18px; position: sticky; left: 50px; background: var(--bg-panel-alt); z-index: 1; user-select: none; }
 .wpTrough div { height: 18px; }
+/* chat rewind: hover a message, jump the session to that moment */
+.msg { position: relative; }
+.msgJump { position: absolute; top: 5px; right: 7px; font-size: 12px !important; color: var(--fg-dim); cursor: pointer; opacity: 0; transition: opacity 0.12s; }
+.msg:hover .msgJump { opacity: 1; }
+.msgJump:hover { color: #fff; }
+
 .wpMark { color: var(--purple); font-size: 13px !important; line-height: 18px !important; cursor: pointer; }
 .wpMark:hover { color: #fff; }
 /* a stale waypoint on the real file: just something to go to (its snapshot) */
