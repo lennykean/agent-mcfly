@@ -145,7 +145,7 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
   const maskBH = regionBottomY - (caretY + LH);
 
   return (
-    <div className="editorBody" ref={ref}>
+    <div className="editorBody" ref={ref} data-path={file.path} data-start-line={startLine}>
       <div className="codewrap" style={{ minHeight: total * LH }}>
         <div className="gutter">
           {Array.from({ length: total }, (_, i) => <div key={i}>{startLine + i}</div>)}

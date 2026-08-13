@@ -9,7 +9,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import * as claudeCode from './loaders/claude-code.js';
 import * as codex from './loaders/codex.js';
-import { attachPty, detectTools, killAllPtys, killPty, listPtys, reapOrphans, setPtySession, TOKEN } from './pty.js';
+import { alive, attachPty, detectTools, killAllPtys, killPty, listPtys, reapOrphans, setPtySession, TOKEN } from './pty.js';
 
 const PROVIDERS = { 'claude-code': claudeCode, codex };
 const PORT = process.env.PORT || 7777;
@@ -26,6 +26,24 @@ function json(res, code, obj) {
 
 const ALLOWED_HOSTS = new Set([`localhost:${PORT}`, `127.0.0.1:${PORT}`, `[::1]:${PORT}`]);
 
+// what the user has open/focused/selected, reported by the UI; agents query
+// it through the mcfly MCP's workspace_state tool
+const wsSnapshot = {};
+const wsRing = [];
+const WS_RING_CAP = 500;
+
+// registry so the (separate) MCP process can find running servers
+const SERVERS_FILE = path.join(os.homedir(), '.mcfly', 'servers.json');
+function updateServersFile(mutate) {
+  try {
+    fs.mkdirSync(path.dirname(SERVERS_FILE), { recursive: true });
+    let all = [];
+    try { all = JSON.parse(fs.readFileSync(SERVERS_FILE, 'utf8')); } catch { /* fresh */ }
+    all = all.filter((s) => s.pid !== process.pid && alive(s.pid));
+    fs.writeFileSync(SERVERS_FILE, JSON.stringify(mutate(all)));
+  } catch { /* best effort */ }
+}
+
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://localhost');
   try {
@@ -37,6 +55,35 @@ const server = http.createServer((req, res) => {
     }
     // live terminal registry (agent tmux: list-sessions / map to transcript)
     if (url.pathname === '/api/ptys') return json(res, 200, listPtys());
+    // workspace state: the UI reports what the user has open/focused/selected;
+    // the mcfly MCP queries it so agents can see what the user is pointing at
+    if (url.pathname === '/api/workspace-events' && req.method === 'POST') {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        try {
+          const { snapshot, events } = JSON.parse(body);
+          if (snapshot && typeof snapshot === 'object') Object.assign(wsSnapshot, snapshot, { updated: Date.now() });
+          if (Array.isArray(events)) {
+            for (const e of events) wsRing.push(e);
+            while (wsRing.length > WS_RING_CAP) wsRing.shift();
+          }
+          json(res, 200, { ok: true });
+        } catch { json(res, 400, { error: 'bad body' }); }
+      });
+      return;
+    }
+    if (url.pathname === '/api/workspace-state') {
+      const history = Math.min(Number(url.searchParams.get('history')) || 0, WS_RING_CAP);
+      const kinds = url.searchParams.get('kinds')?.split(',').filter(Boolean);
+      const since = Number(url.searchParams.get('since_seconds')) || 0;
+      let events = wsRing;
+      if (kinds?.length) events = events.filter((e) => kinds.includes(e.kind));
+      if (since) events = events.filter((e) => e.ts >= Date.now() - since * 1000);
+      if (history) events = events.slice(-history);
+      else if (!kinds?.length && !since) events = [];
+      return json(res, 200, { snapshot: wsSnapshot, events });
+    }
     // pasted images land here as bytes; the temp file's path gets typed into
     // the terminal (the drag-and-drop flow every agent CLI already speaks)
     if (url.pathname === '/api/paste-image' && req.method === 'POST') {
@@ -152,6 +199,7 @@ const server = http.createServer((req, res) => {
 attachPty(server, ALLOWED_HOSTS);
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`Agent McFly API: http://localhost:${PORT}`);
+  updateServersFile((all) => [...all, { pid: process.pid, port: Number(PORT), pwd: process.cwd(), started: Date.now() }]);
   if (process.env.MCFLY_OPEN === '1') {
     const url = `http://localhost:${PORT}`;
     const [cmd, args] = process.platform === 'win32'
@@ -165,6 +213,7 @@ reapOrphans(); // children of servers that died without cleanup
 
 const shutdown = () => {
   killAllPtys();
+  updateServersFile((all) => all);
   server.close();
 };
 process.once('SIGINT', shutdown);

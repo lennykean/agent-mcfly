@@ -8,7 +8,7 @@ import { DATA_MARKER, parseLineSpec, parseTsv } from './mcfly-data.js';
 
 const exec = promisify(execFile);
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url))).version;
-const INSTRUCTIONS = 'Use run_table for shell commands whose stdout is tabular data. The script must emit strict TSV: one unique, non-empty header row, at least two columns, at least one data row, and the same number of tab-separated cells on every row. Do not emit decoration or commentary to stdout; send diagnostics to stderr. Use highlight instead of a plain file read whenever you want to point the user at specific lines: it renders the file in the McFly viewer with those lines highlighted. Use waypoint to leave a durable note anchored to a specific line (a finding, explanation, or TODO): waypoints collect in the McFly Wayfinder tab and stay findable even after the file changes. Use waypoint_remove when a waypoint is resolved or obsolete.';
+const INSTRUCTIONS = 'Use run_table for shell commands whose stdout is tabular data. The script must emit strict TSV: one unique, non-empty header row, at least two columns, at least one data row, and the same number of tab-separated cells on every row. Do not emit decoration or commentary to stdout; send diagnostics to stderr. Use highlight instead of a plain file read whenever you want to point the user at specific lines: it renders the file in the McFly viewer with those lines highlighted. Use waypoint to leave a durable note anchored to a specific line (a finding, explanation, or TODO): waypoints collect in the McFly Wayfinder tab and stay findable even after the file changes. Use waypoint_remove when a waypoint is resolved or obsolete. Use workspace_state whenever the user references something you cannot see — "this", "here", "that file", "what I highlighted", "where I am" — or to orient yourself in what they are looking at: it returns their open files, visible lines, playhead, panels, terminals, and recent selections and time-travel jumps.';
 const TOOL = {
   name: 'run_table',
   title: 'Run tabular shell command',
@@ -95,6 +95,55 @@ const WAYPOINT_TOOL = {
   },
   annotations: { readOnlyHint: true },
 };
+
+const WORKSPACE_STATE_TOOL = {
+  name: 'workspace_state',
+  title: "See the user's McFly workspace",
+  description: "What the user has open, focused, and selected in McFly right now — open files and their flavor (pinned/read-only/snapshot/timeline), visible lines, playhead position, panels, live terminals — plus recent history: text selections, time-travel jumps, files opened. Call it whenever the user references something you cannot see: 'this', 'here', 'that file', 'what I highlighted', 'where I am'.",
+  inputSchema: {
+    type: 'object', additionalProperties: false,
+    properties: {
+      history: { type: 'integer', minimum: 1, maximum: 500, description: 'Return up to N recent events (newest last).' },
+      kinds: { type: 'array', items: { type: 'string' }, description: 'Filter events by kind: select, seek, file_open, file_close, tab_focus, pane_switch, terminal_focus, session_open.' },
+      since_seconds: { type: 'integer', minimum: 1, description: 'Only events from the last N seconds.' },
+      cwd: { type: 'string', description: 'Project directory, to pick the right McFly server when several run. Defaults to the process cwd.' },
+    },
+  },
+  outputSchema: {
+    type: 'object', required: ['schema', 'kind'],
+    properties: { schema: { const: 'mcfly.data.v1' }, kind: { const: 'workspace_state' } },
+  },
+  annotations: { readOnlyHint: true },
+};
+
+function liveServers() {
+  try {
+    const all = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.mcfly', 'servers.json'), 'utf8'));
+    return all.filter((s) => { try { process.kill(s.pid, 0); return true; } catch { return false; } });
+  } catch { return []; }
+}
+
+async function runWorkspaceState(args = {}) {
+  const servers = liveServers();
+  if (!servers.length) {
+    return { content: [{ type: 'text', text: 'no running mcfly server found' }], isError: true };
+  }
+  const cwd = path.resolve(args.cwd ?? process.cwd()).toLowerCase();
+  const pick = servers.find((s) => cwd.startsWith(String(s.pwd).toLowerCase()))
+    ?? servers.sort((a, b) => b.started - a.started)[0];
+  const qs = new URLSearchParams();
+  if (args.history) qs.set('history', String(args.history));
+  if (Array.isArray(args.kinds) && args.kinds.length) qs.set('kinds', args.kinds.join(','));
+  if (args.since_seconds) qs.set('since_seconds', String(args.since_seconds));
+  try {
+    const res = await fetch(`http://127.0.0.1:${pick.port}/api/workspace-state?${qs}`);
+    const data = await res.json();
+    const result = { schema: 'mcfly.data.v1', kind: 'workspace_state', server: { port: pick.port, pwd: pick.pwd }, ...data };
+    return { content: [{ type: 'text', text: `${DATA_MARKER}\n${JSON.stringify(result)}` }], structuredContent: result };
+  } catch (error) {
+    return { content: [{ type: 'text', text: `mcfly server on port ${pick.port} did not answer: ${error.message}` }], isError: true };
+  }
+}
 
 const WAYPOINT_REMOVE_TOOL = {
   name: 'waypoint_remove',
@@ -237,12 +286,13 @@ async function handle(request) {
         capabilities: { tools: {} }, serverInfo: { name: 'mcfly', version: VERSION }, instructions: INSTRUCTIONS,
       };
     case 'ping': return {};
-    case 'tools/list': return { tools: [TOOL, HIGHLIGHT_TOOL, WAYPOINT_TOOL, WAYPOINT_REMOVE_TOOL] };
+    case 'tools/list': return { tools: [TOOL, HIGHLIGHT_TOOL, WAYPOINT_TOOL, WAYPOINT_REMOVE_TOOL, WORKSPACE_STATE_TOOL] };
     case 'tools/call':
       if (request.params?.name === TOOL.name) return runTable(request.params.arguments);
       if (request.params?.name === HIGHLIGHT_TOOL.name) return runHighlight(request.params.arguments);
       if (request.params?.name === WAYPOINT_TOOL.name) return runWaypoint(request.params.arguments);
       if (request.params?.name === WAYPOINT_REMOVE_TOOL.name) return runWaypointRemove(request.params.arguments);
+      if (request.params?.name === WORKSPACE_STATE_TOOL.name) return runWorkspaceState(request.params.arguments);
       throw new Error(`unknown tool: ${request.params?.name}`);
     default: throw Object.assign(new Error(`method not found: ${request.method}`), { code: -32601 });
   }

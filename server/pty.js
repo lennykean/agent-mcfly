@@ -121,7 +121,7 @@ function saveLive() {
   } catch { /* best effort */ }
 }
 
-const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+export const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
 function processName(pid) {
   try {

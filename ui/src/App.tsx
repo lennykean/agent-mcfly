@@ -12,6 +12,7 @@ import { Wayfinder } from './components/Wayfinder';
 import { Splitter } from './components/Splitter';
 import type { SessionMeta } from './types';
 import { resolveWaypoint, type WaypointEntry } from './lib/timeline';
+import { emit, updateSnapshot, watchSelections } from './lib/workspace';
 import { Terminal } from './components/Terminal';
 import { ToolDetail } from './components/ToolDetail';
 import { ToolLog } from './components/ToolLog';
@@ -194,6 +195,63 @@ export default function App() {
 
   const { switchView } = r;
   const openAgent = useCallback((key: string) => switchView(key, key), [switchView]);
+
+  // ---- workspace reporting: what the user has open/focused/selected, so
+  // agents can query it via the workspace_state MCP tool ----
+  useEffect(() => { watchSelections(); }, []);
+  useEffect(() => {
+    updateSnapshot({
+      session: r.session ? { provider: r.session.provider, id: r.session.id } : null,
+      playhead: { pointer: r.pointer, head: r.head, playing: r.playing, speed: r.speed },
+      editor: {
+        active: editorTab,
+        pinned: r.view.activePath ?? null,
+        timeline: timelinePath ?? null,
+        tabs: userTabs.map((t) => ({ path: t.path, flavor: t.snapshot ? 'snapshot' : 'read-only' })),
+      },
+      panels: { left: leftTab, right: rightTab, bottom: bottomOpen ? bottomTab : null },
+    });
+  }, [r.session, r.pointer, r.head, r.playing, r.speed, r.view.activePath, editorTab, timelinePath, userTabs, leftTab, rightTab, bottomTab, bottomOpen]);
+
+  const prevTabKeys = useRef<string[]>([]);
+  useEffect(() => {
+    const cur = userTabs.map((t) => t.key);
+    for (const t of userTabs) {
+      if (!prevTabKeys.current.includes(t.key)) {
+        emit({ kind: 'file_open', path: t.path, flavor: t.snapshot ? 'snapshot' : 'read-only' });
+      }
+    }
+    for (const k of prevTabKeys.current) if (!cur.includes(k)) emit({ kind: 'file_close', key: k });
+    prevTabKeys.current = cur;
+  }, [userTabs]);
+  useEffect(() => { emit({ kind: 'tab_focus', tab: editorTab }); }, [editorTab]);
+  useEffect(() => {
+    if (timelinePath) emit({ kind: 'file_open', path: timelinePath, flavor: 'timeline' });
+  }, [timelinePath]);
+  useEffect(() => { emit({ kind: 'pane_switch', bottom: bottomTab }); }, [bottomTab]);
+  useEffect(() => { emit({ kind: 'pane_switch', right: rightTab }); }, [rightTab]);
+  const wsSessionId = r.session?.id;
+  useEffect(() => {
+    if (r.session) emit({ kind: 'session_open', provider: r.session.provider, id: r.session.id });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wsSessionId]);
+
+  // seeks: only NON-contiguous playhead movement is signal — playback humming
+  // forward stays silent; a scrub/jump burst coalesces into one from->to
+  const trailPointer = useRef(r.pointer);
+  const pendingSeek = useRef<{ from: number; timer: number } | null>(null);
+  useEffect(() => {
+    if (r.seekTick === 0) return;
+    if (pendingSeek.current) clearTimeout(pendingSeek.current.timer);
+    const from = pendingSeek.current?.from ?? trailPointer.current;
+    const timer = window.setTimeout(() => {
+      emit({ kind: 'seek', from, to: trailPointer.current });
+      pendingSeek.current = null;
+    }, 800);
+    pendingSeek.current = { from, timer };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [r.seekTick]);
+  useEffect(() => { trailPointer.current = r.pointer; }, [r.pointer]);
 
   const animStep = r.animateIndex >= 0 ? r.steps[r.animateIndex] : undefined;
   const animatedPath =

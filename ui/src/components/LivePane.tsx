@@ -3,6 +3,7 @@ import { Terminal as Xterm, type FontWeight } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
+import { emitTerminalSelection, updateSnapshot } from '../lib/workspace';
 
 interface Config { tools: string[]; token: string; platform?: string }
 
@@ -136,6 +137,13 @@ function PtySession({ tool, token, cwd, platform, attachId, steal, visible, onPt
     };
     host.addEventListener('paste', onPaste, true);
 
+    // report terminal selections for workspace_state (debounced)
+    let selTimer: number | undefined;
+    const selSub = term.onSelectionChange(() => {
+      clearTimeout(selTimer);
+      selTimer = window.setTimeout(() => emitTerminalSelection(tool, term.getSelection()), 600);
+    });
+
     // clickable file:line references -> open in the editor at that line
     const linkProvider = term.registerLinkProvider({
       provideLinks(y, callback) {
@@ -211,6 +219,8 @@ function PtySession({ tool, token, cwd, platform, attachId, steal, visible, onPt
       dataSub?.dispose();
       linkProvider.dispose();
       host.removeEventListener('paste', onPaste, true);
+      clearTimeout(selTimer);
+      selSub.dispose();
       term.dispose();
       termRef.current = null;
     };
@@ -293,6 +303,19 @@ export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFile
   }, [active]);
 
   const sessionOf = (ptyId?: string) => ptys.find((p) => p.id === ptyId)?.session ?? null;
+
+  // workspace_state: which terminals exist, which is focused, whose session
+  useEffect(() => {
+    updateSnapshot({
+      terminals: terms.map((e) => ({
+        tool: e.tool,
+        ptyId: e.ptyId ?? null,
+        active: active === e.key,
+        session: sessionOf(e.ptyId),
+      })),
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [terms, active, ptys]);
   const isWatched = (session: LivePty['session']) =>
     !!session && !!currentSession
     && session.provider === currentSession.provider && session.id === currentSession.id;
