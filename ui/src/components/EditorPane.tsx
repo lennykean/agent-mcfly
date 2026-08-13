@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ComponentProps } from 'react';
 import hljs from 'highlight.js/lib/common';
 import powershell from 'highlight.js/lib/languages/powershell';
 import 'highlight.js/styles/vs2015.css';
 import { TYPE_CPS, normPath, resolveWaypoint, type FileView, type WaypointEntry } from '../lib/timeline';
 import { Md } from './ChatPane';
+import type { Review, ReviewComment } from '../types';
 
 hljs.registerLanguage('powershell', powershell);
 
@@ -54,7 +55,7 @@ function charWidth(): number {
 // to be typed live — in full color. A region band flashes and fades after.
 export interface BlameMark { text: string; title: string; step: number }
 
-export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, marks }: {
+export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, marks, onCompose, composer, reviewMarks, thread }: {
   file: FileView; animate: boolean; speed: number;
   flashOnly?: boolean;
   blame?: { marks: (BlameMark | null)[]; compact?: boolean; onJump: (step: number) => void; onToggle?: () => void };
@@ -62,6 +63,15 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
   // all waypoint markers for this file: resolved ones open their card here;
   // stale ones are just something to GO TO — click opens the snapshot tab
   marks?: { line: number; stale: boolean; onClick: () => void }[];
+  // human review: click (or click-drag a range of) line numbers to comment
+  onCompose?: (line: number, lineEnd: number) => void;
+  composer?: { line: number; lineEnd: number; onSubmit: (body: string) => void; onCancel: () => void };
+  reviewMarks?: { id: string; line: number; lineEnd: number; state: ReviewComment['state']; onClick: () => void }[];
+  thread?: {
+    comment: ReviewComment; line: number; stale: boolean;
+    onReply: (body: string) => void; onResolve: () => void;
+    onViewOriginal: () => void; onClose: () => void;
+  };
 }) {
   const r = file.render;
   const ref = useRef<HTMLDivElement>(null);
@@ -75,6 +85,21 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
   // single click toggles blame detail; a short timer lets double-click (jump)
   // cancel it so jumping doesn't also flip the gutter
   const blameClickTimer = useRef<number>(undefined);
+
+  // gutter drag: press a line number and drag to comment on a range
+  const [dragSel, setDragSel] = useState<{ from: number; to: number } | null>(null);
+  useEffect(() => {
+    if (!dragSel) return;
+    const up = () => {
+      setDragSel((sel) => {
+        if (sel && onCompose) onCompose(Math.min(sel.from, sel.to), Math.max(sel.from, sel.to));
+        return null;
+      });
+    };
+    window.addEventListener('mouseup', up);
+    return () => window.removeEventListener('mouseup', up);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dragSel !== null]);
 
   const html = useMemo(() => highlightHtml(content, file.path), [content, file.path]);
   const total = useMemo(() => content.split('\n').length, [content]);
@@ -131,14 +156,16 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
       if (caretY > el.scrollTop + el.clientHeight - 80) el.scrollTop = caretY - el.clientHeight + 80;
       else if (caretY < el.scrollTop) el.scrollTop = Math.max(0, caretY - 60);
     } else {
-      // leave headroom above the target line for an open waypoint card
-      const headroom = waypoint?.open ? 190 : 60;
-      el.scrollTo({ top: region ? Math.max(0, (region.start - startLine) * LH - headroom) : 0 });
+      const headroom = 60;
+      // an open waypoint or review thread outranks the region as the target:
+      // the tour must land with the card in view, wherever the region was
+      const target = thread?.line ?? (waypoint?.open ? waypoint.line : undefined) ?? region?.start;
+      el.scrollTo({ top: target !== undefined ? Math.max(0, (target - startLine) * LH - headroom) : 0 });
     }
     // content is a dep: user tabs load asynchronously, and the region scroll
     // must re-fire once the real content (and thus scrollHeight) exists
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [file.path, file.touchedAt, typedDone, caretY, content]);
+  }, [file.path, file.touchedAt, typedDone, caretY, content, thread?.line, waypoint?.open, waypoint?.line]);
 
   const regionTop = region ? (region.start - startLine) * LH : 0;
   const regionH = region ? (region.end - region.start + 1) * LH : 0;
@@ -147,8 +174,20 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
   return (
     <div className="editorBody" ref={ref} data-path={file.path} data-start-line={startLine}>
       <div className="codewrap" style={{ minHeight: total * LH }}>
-        <div className="gutter">
-          {Array.from({ length: total }, (_, i) => <div key={i}>{startLine + i}</div>)}
+        <div className={`gutter${onCompose ? ' composable' : ''}`}>
+          {Array.from({ length: total }, (_, i) => {
+            const ln = startLine + i;
+            const inDrag = dragSel && ln >= Math.min(dragSel.from, dragSel.to) && ln <= Math.max(dragSel.from, dragSel.to);
+            return (
+              <div
+                key={i}
+                className={inDrag ? 'gutterSel' : undefined}
+                title={onCompose ? 'Comment — drag to select a range' : undefined}
+                onMouseDown={onCompose ? (e) => { e.preventDefault(); setDragSel({ from: ln, to: ln }); } : undefined}
+                onMouseEnter={onCompose && dragSel ? () => setDragSel((s) => (s ? { ...s, to: ln } : s)) : undefined}
+              >{ln}</div>
+            );
+          })}
         </div>
         {blame && (
           <div
@@ -176,7 +215,7 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
             })}
           </div>
         )}
-        {(waypoint || marks?.length) ? (
+        {(waypoint || marks?.length || reviewMarks?.length) ? (
           <div className="wpTrough">
             {Array.from({ length: total }, (_, i) => {
               const line = startLine + i;
@@ -187,6 +226,17 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
                     className="wpMark codicon codicon-location"
                     title={waypoint.open ? 'Collapse note' : 'Show note'}
                     onClick={waypoint.onToggle}
+                  />
+                );
+              }
+              const rv = reviewMarks?.find((m) => m.line === line);
+              if (rv) {
+                return (
+                  <div
+                    key={i}
+                    className={`wpMark rvMark codicon codicon-comment rv-${rv.state}`}
+                    title={`review comment (${rv.state})`}
+                    onClick={rv.onClick}
                   />
                 );
               }
@@ -208,10 +258,9 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
         <pre className="code hljs" dangerouslySetInnerHTML={{ __html: html }} />
         {waypoint?.open && (() => {
           const lineTop = (waypoint.line - startLine) * LH;
-          // near the top there's no room above the line: place the card below
-          const below = lineTop < 190;
+          // below the line, same as review threads
           return (
-            <div className="wpOverlayWrap" style={below ? { top: lineTop + LH + 6, transform: 'none' } : { top: lineTop - 4 }}>
+            <div className="wpOverlayWrap" style={{ top: lineTop + LH + 6, transform: 'none' }}>
               <div className="wpCard">
                 <div className="wpCardHead">
                   <span className="codicon codicon-location" /> waypoint
@@ -222,6 +271,28 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
             </div>
           );
         })()}
+        {dragSel && (
+          <div className="rvBand" style={{ top: (Math.min(dragSel.from, dragSel.to) - startLine) * LH, height: (Math.abs(dragSel.to - dragSel.from) + 1) * LH }} />
+        )}
+        {composer && composer.lineEnd > composer.line && (
+          <div className="rvBand" style={{ top: (composer.line - startLine) * LH, height: (composer.lineEnd - composer.line + 1) * LH }} />
+        )}
+        {reviewMarks?.filter((m) => m.lineEnd > m.line).map((m) => (
+          <div key={`band-${m.id}`} className="rvBand" style={{ top: (m.line - startLine) * LH, height: (m.lineEnd - m.line + 1) * LH }} />
+        ))}
+        {composer && (
+          <div className="wpOverlayWrap" style={{ top: (composer.lineEnd - startLine + 1) * LH + 4, transform: 'none' }}>
+            <ComposerCard onSubmit={composer.onSubmit} onCancel={composer.onCancel} />
+          </div>
+        )}
+        {thread && (
+          <div
+            className="wpOverlayWrap"
+            style={{ top: (thread.line + ((thread.comment.line_end ?? thread.comment.line) - thread.comment.line) - startLine + 1) * LH + 4, transform: 'none' }}
+          >
+            <ThreadCard {...thread} />
+          </div>
+        )}
         {r.highlights?.map((h, i) => (
           <div
             key={i}
@@ -290,12 +361,82 @@ export interface UserTab {
   snapshot?: { line: number; note: string; before: string[]; anchor: string; after: string[] };
 }
 
-function FileBody({ file, animate, speed }: { file: FileView; animate: boolean; speed: number }) {
+function ComposerCard({ onSubmit, onCancel }: { onSubmit: (body: string) => void; onCancel: () => void }) {
+  const [body, setBody] = useState('');
+  return (
+    <div className="wpCard rvCard">
+      <div className="wpCardHead"><span className="codicon codicon-comment" /> new review comment</div>
+      <textarea
+        className="rvInput" autoFocus rows={3} value={body} placeholder="What should change here?"
+        onChange={(e) => setBody(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter' && e.ctrlKey && body.trim()) onSubmit(body.trim()); }}
+      />
+      <div className="rvActions">
+        <button disabled={!body.trim()} onClick={() => onSubmit(body.trim())}>comment</button>
+        <button onClick={onCancel}>cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function ThreadCard({ comment, stale, onReply, onResolve, onViewOriginal, onClose }: {
+  comment: ReviewComment; line: number; stale: boolean;
+  onReply: (body: string) => void; onResolve: () => void; onViewOriginal: () => void; onClose: () => void;
+}) {
+  const [body, setBody] = useState('');
+  return (
+    <div className="wpCard rvCard">
+      <div className="wpCardHead">
+        <span className="codicon codicon-comment" /> {comment.author}
+        <span className={`rvChip rv-${comment.state}`}>{comment.state}</span>
+        {stale && <button className="rvGhostBtn" onClick={onViewOriginal} title="The code moved — see it as it was when commented">view original</button>}
+        <span className="wpCollapse codicon codicon-chevron-up" onClick={onClose} />
+      </div>
+      <Md text={comment.body} />
+      {comment.replies.map((rep, i) => (
+        <div key={i} className={`rvReply ${rep.author === 'human' ? 'rvHuman' : 'rvAgent'}`}>
+          <span className="rvAuthor">{rep.author}</span>
+          <Md text={rep.body} />
+        </div>
+      ))}
+      <textarea
+        className="rvInput" rows={2} value={body} placeholder="Reply…"
+        onChange={(e) => setBody(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter' && e.ctrlKey && body.trim()) { onReply(body.trim()); setBody(''); } }}
+      />
+      <div className="rvActions">
+        <button disabled={!body.trim()} onClick={() => { onReply(body.trim()); setBody(''); }}>reply</button>
+        {comment.state !== 'resolved' && <button onClick={onResolve}>resolve</button>}
+      </div>
+    </div>
+  );
+}
+
+function FileBody({ file, animate, speed, onCompose, composer, waypoint, reviewMarks, thread }: {
+  file: FileView; animate: boolean; speed: number;
+  onCompose?: (line: number, lineEnd: number) => void;
+  composer?: { line: number; lineEnd: number; onSubmit: (body: string) => void; onCancel: () => void };
+  waypoint?: { line: number; note: string; open: boolean; onToggle: () => void };
+  reviewMarks?: ComponentProps<typeof CodeView>['reviewMarks'];
+  thread?: ComponentProps<typeof CodeView>['thread'];
+}) {
   return file.mode === 'diff'
     ? <DiffView key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} />
     : file.mode === 'image'
       ? <ImageView key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} />
-      : <CodeView key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} speed={speed} />;
+      : <CodeView key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} speed={speed} onCompose={onCompose} composer={composer} waypoint={waypoint} reviewMarks={reviewMarks} thread={thread} />;
+}
+
+// context capture for a review comment: the anchor line and its surroundings,
+// from the CONTENT ON SCREEN (live file or historical view alike)
+function captureContext(content: string, startLine: number, line: number) {
+  const lines = content.replace(/\r\n/g, '\n').split('\n');
+  const idx = line - startLine;
+  return {
+    before: lines.slice(Math.max(0, idx - 3), idx),
+    anchor: lines[idx] ?? '',
+    after: lines.slice(idx + 1, idx + 4),
+  };
 }
 
 // One PINNED tab always shows the file the replay is touching (jumps active on
@@ -303,9 +444,10 @@ function FileBody({ file, animate, speed }: { file: FileView; animate: boolean; 
 export function EditorPane({
   pinned, animate, speed, userTabs, active, onSelect, onClose, onOpenCurrent,
   timelinePath, onOpenTimeline, onCloseTimeline, timelineBody, onToggleWaypoint,
-  waypoints, onOpenSnapshot, onActivateWaypoint,
+  waypoints, onOpenSnapshot, onActivateWaypoint, pinnedFlash = 0, pointer = 0,
+  activeReview, focusThreadId, onReviewComment, onReviewReply, onReviewResolve, onReviewViewOriginal,
 }: {
-  pinned?: FileView; animate: boolean; speed: number;
+  pinned?: FileView; animate: boolean; speed: number; pointer?: number;
   userTabs: UserTab[]; active: string; // 'pinned' | 'timeline' | user tab path
   onSelect: (key: string) => void; onClose: (path: string) => void;
   onOpenCurrent?: (path: string) => void;
@@ -317,6 +459,13 @@ export function EditorPane({
   waypoints?: WaypointEntry[];
   onOpenSnapshot?: (wp: WaypointEntry) => void;
   onActivateWaypoint?: (key: string, line: number, note: string) => void;
+  activeReview?: Review | null;
+  focusThreadId?: string;
+  pinnedFlash?: number;
+  onReviewComment?: (c: { path: string; line: number; line_end?: number; step?: number; before: string[]; anchor: string; after: string[]; body: string }) => void;
+  onReviewReply?: (commentId: string, body: string) => void;
+  onReviewResolve?: (commentId: string) => void;
+  onReviewViewOriginal?: (comment: ReviewComment) => void;
 }) {
   const activeTabRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -324,6 +473,90 @@ export function EditorPane({
   }, [active]);
 
   const userTab = active !== 'pinned' && active !== 'timeline' ? userTabs.find((t) => t.key === active) : undefined;
+
+  // ---- human review state for the active view ----
+  const [composeAt, setComposeAt] = useState<{ path: string; line: number; lineEnd: number; step?: number; content: string; startLine: number } | null>(null);
+  const [openThreadId, setOpenThreadId] = useState<string | undefined>();
+  useEffect(() => { setOpenThreadId(focusThreadId); }, [focusThreadId]);
+  useEffect(() => { setComposeAt(null); }, [active]);
+
+  const reviewing = !!(activeReview && onReviewComment);
+  const submitComment = (body: string) => {
+    if (!composeAt || !onReviewComment) return;
+    onReviewComment({
+      path: composeAt.path, line: composeAt.line,
+      ...(composeAt.lineEnd > composeAt.line ? { line_end: composeAt.lineEnd } : {}),
+      ...(composeAt.step !== undefined ? { step: composeAt.step } : {}),
+      ...captureContext(composeAt.content, composeAt.startLine, composeAt.line),
+      body,
+    });
+    setComposeAt(null);
+  };
+  const composerFor = (path: string) => (composeAt && composeAt.path === path
+    ? { line: composeAt.line, lineEnd: composeAt.lineEnd, onSubmit: submitComment, onCancel: () => setComposeAt(null) }
+    : undefined);
+
+  // passive tab marker ladder: comments -> gray, agent replied -> purple,
+  // ALL resolved -> green, none -> no bubble
+  const tabReviewDot = (path: string) => {
+    if (!activeReview) return null;
+    const cs = activeReview.comments.filter((c) => normPath(c.path) === normPath(path));
+    if (!cs.length) return null;
+    const allResolved = cs.every((c) => c.state === 'resolved');
+    const replied = cs.some((c) => c.replies.some((rp) => rp.author !== 'human'));
+    const flavor = allResolved ? ' allResolved' : replied ? ' replied' : '';
+    const title = allResolved ? 'review comments · all resolved' : replied ? 'review comments · agent replied' : 'review comments';
+    return <span className={`codicon codicon-comment rvTabDot${flavor}`} title={title} />;
+  };
+
+  // comments for the live file on screen: pin to the CURRENT line when the
+  // context still matches, or clamp to the recorded line when it drifted
+  const tabReview = userTab && !userTab.snapshot && userTab.content !== undefined && activeReview
+    ? activeReview.comments
+      .filter((c) => normPath(c.path) === normPath(userTab.path))
+      .map((c) => {
+        const found = resolveWaypoint(userTab.content!, { path: c.path, line: c.line, note: '', before: c.before, anchor: c.anchor, after: c.after });
+        const total = userTab.content!.split('\n').length;
+        const line = found ?? Math.max(1, Math.min(c.line, total));
+        return { comment: c, line, lineEnd: line + ((c.line_end ?? c.line) - c.line), stale: found === null };
+      })
+    : [];
+  const openThread = tabReview.find((t) => t.comment.id === openThreadId);
+
+  // review threads for the live pinned view: resolved against the session
+  // content on screen, in file coordinates (the content may be a region)
+  const pinnedReview = pinned && pinned.mode === 'file' && pinned.render.content !== undefined && activeReview
+    ? activeReview.comments
+      .filter((c) => normPath(c.path) === normPath(pinned.path))
+      .flatMap((c) => {
+        const found = resolveWaypoint(pinned.render.content!, { path: c.path, line: c.line, note: '', before: c.before, anchor: c.anchor, after: c.after });
+        if (found === null) return [];
+        const line = (pinned.render.start_line ?? 1) - 1 + found;
+        return [{ comment: c, line, lineEnd: line + ((c.line_end ?? c.line) - c.line), stale: false }];
+      })
+    : [];
+  const pinnedThread = pinnedReview.find((t) => t.comment.id === openThreadId);
+
+  // the agent's newest waypoint on the pinned file pops its card right in
+  // the live view — the session content is what the agent saw when marking
+  const [pinnedWpOpen, setPinnedWpOpen] = useState(true);
+  const lastWpAt = waypoints?.at(-1)?.touchedAt;
+  useEffect(() => { setPinnedWpOpen(true); }, [lastWpAt]);
+  // any rewind re-arms the card: replaying a stretch must show what the
+  // waypoint points at, even when the jump lands past its create step
+  const lastPointer = useRef(pointer);
+  useEffect(() => {
+    if (pointer < lastPointer.current) setPinnedWpOpen(true);
+    lastPointer.current = pointer;
+  }, [pointer]);
+  const pinnedWaypoint = (() => {
+    if (!pinned || pinned.mode !== 'file' || pinned.render.content === undefined || !waypoints?.length) return undefined;
+    const w = waypoints.filter((x) => normPath(x.path) === normPath(pinned.path)).at(-1);
+    if (!w) return undefined;
+    const found = resolveWaypoint(pinned.render.content, w);
+    if (found === null) return undefined;
+    return { line: (pinned.render.start_line ?? 1) - 1 + found, note: w.note, open: pinnedWpOpen, onToggle: () => setPinnedWpOpen((o) => !o) };
+  })();
 
   // waypoint markers for the real on-disk file being shown: re-resolve each
   // against its content — matched ones live at their found line, stale ones
@@ -354,13 +587,15 @@ export function EditorPane({
     <div className="editorPane">
       <div className="tabs">
         <div
+          key={`pf${pinnedFlash}`}
           ref={active === 'pinned' ? activeTabRef : undefined}
-          className={`tab pinnedTab ${active === 'pinned' ? 'active' : ''}`}
+          className={`tab pinnedTab ${active === 'pinned' ? 'active' : ''} ${pinnedFlash ? 'tabFlashAnim' : ''}`}
           title={pinned?.path ?? 'the file being read or edited by the replay'}
           onClick={() => onSelect('pinned')}
         >
           <span className="pinDot" />
           {pinned ? (pinned.mode === 'diff' ? '± ' : '') + shortName(pinned.path) : 'live'}
+          {pinned && tabReviewDot(pinned.path)}
           {pinned && onOpenCurrent && (
             <span
               className="codicon codicon-go-to-file tabAction"
@@ -391,6 +626,7 @@ export function EditorPane({
             {shortName(t.path)}{t.snapshot
               ? ' [snapshot]'
               : <> <span className="roBadge">read only</span></>}
+            {tabReviewDot(t.path)}
             {t.snapshot && onOpenCurrent && (
               <span
                 className="codicon codicon-go-to-file tabAction"
@@ -457,10 +693,46 @@ export function EditorPane({
               onToggle: () => onToggleWaypoint(userTab.key),
             } : undefined}
             marks={tabMarks}
+            onCompose={reviewing ? (line, lineEnd) => setComposeAt({
+              path: userTab.path, line, lineEnd, content: userTab.content ?? '', startLine: 1,
+            }) : undefined}
+            composer={composerFor(userTab.path)}
+            reviewMarks={tabReview.map((t) => ({
+              id: t.comment.id, line: t.line, lineEnd: t.lineEnd, state: t.comment.state,
+              onClick: () => setOpenThreadId((cur) => (cur === t.comment.id ? undefined : t.comment.id)),
+            }))}
+            thread={openThread && onReviewReply && onReviewResolve && onReviewViewOriginal ? {
+              comment: openThread.comment, line: openThread.line, stale: openThread.stale,
+              onReply: (body) => onReviewReply(openThread.comment.id, body),
+              onResolve: () => onReviewResolve(openThread.comment.id),
+              onViewOriginal: () => onReviewViewOriginal(openThread.comment),
+              onClose: () => setOpenThreadId(undefined),
+            } : undefined}
           />
         )
       ) : pinned ? (
-        <FileBody file={pinned} animate={animate} speed={speed} />
+        <FileBody
+          file={pinned}
+          animate={animate}
+          speed={speed}
+          onCompose={reviewing && pinned.mode === 'file' && pinned.render.content !== undefined ? (line, lineEnd) => setComposeAt({
+            path: pinned.path, line, lineEnd, step: pinned.touchedAt,
+            content: pinned.render.content ?? '', startLine: pinned.render.start_line ?? 1,
+          }) : undefined}
+          composer={composerFor(pinned.path)}
+          waypoint={pinnedWaypoint}
+          reviewMarks={pinnedReview.map((t) => ({
+            id: t.comment.id, line: t.line, lineEnd: t.lineEnd, state: t.comment.state,
+            onClick: () => setOpenThreadId((cur) => (cur === t.comment.id ? undefined : t.comment.id)),
+          }))}
+          thread={pinnedThread && onReviewReply && onReviewResolve && onReviewViewOriginal ? {
+            comment: pinnedThread.comment, line: pinnedThread.line, stale: pinnedThread.stale,
+            onReply: (body) => onReviewReply(pinnedThread.comment.id, body),
+            onResolve: () => onReviewResolve(pinnedThread.comment.id),
+            onViewOriginal: () => onReviewViewOriginal(pinnedThread.comment),
+            onClose: () => setOpenThreadId(undefined),
+          } : undefined}
+        />
       ) : (
         <div className="emptyHint">files the agent reads will open here</div>
       )}

@@ -23,6 +23,7 @@ export interface Waypoint {
   before: string[];
   anchor: string;
   after: string[];
+  content?: string; // the whole file at capture time, when the envelope carries it
 }
 
 export interface CallRender {
@@ -78,6 +79,36 @@ export interface Message {
   timestamp?: number;
   role: 'user' | 'assistant';
   content: ContentBlock[];
+}
+
+// ---- human review: session-scoped threaded comments on code ----
+
+export interface ReviewReply { author: string; body: string; ts: number }
+
+export interface ReviewComment {
+  id: string;
+  author: string;
+  ts: number;
+  state: 'open' | 'addressed' | 'resolved';
+  path: string;
+  line: number; // line at capture time (range start)
+  line_end?: number; // range end, when the comment covers several lines
+  step?: number; // playhead step when commented from a historical view
+  before: string[];
+  anchor: string;
+  after: string[];
+  body: string;
+  replies: ReviewReply[];
+}
+
+export interface Review {
+  id: string;
+  project: string;
+  session: { provider: string; id: string } | null;
+  status: 'open' | 'closed';
+  created: number;
+  closed?: number;
+  comments: ReviewComment[];
 }
 
 export interface TailResponse {

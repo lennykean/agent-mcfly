@@ -8,7 +8,7 @@ import { DATA_MARKER, parseLineSpec, parseTsv } from './mcfly-data.js';
 
 const exec = promisify(execFile);
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url))).version;
-const INSTRUCTIONS = 'Use run_table for shell commands whose stdout is tabular data. The script must emit strict TSV: one unique, non-empty header row, at least two columns, at least one data row, and the same number of tab-separated cells on every row. Do not emit decoration or commentary to stdout; send diagnostics to stderr. Use highlight instead of a plain file read whenever you want to point the user at specific lines: it renders the file in the McFly viewer with those lines highlighted. Use waypoint to leave a durable note anchored to a specific line (a finding, explanation, or TODO): waypoints collect in the McFly Wayfinder tab and stay findable even after the file changes. Use waypoint_remove when a waypoint is resolved or obsolete. Use workspace_state whenever the user references something you cannot see — "this", "here", "that file", "what I highlighted", "where I am" — or to orient yourself in what they are looking at: it returns their open files, visible lines, playhead, panels, terminals, and recent selections and time-travel jumps.';
+const INSTRUCTIONS = 'Use run_table for shell commands whose stdout is tabular data. The script must emit strict TSV: one unique, non-empty header row, at least two columns, at least one data row, and the same number of tab-separated cells on every row. Do not emit decoration or commentary to stdout; send diagnostics to stderr. Use highlight instead of a plain file read whenever you want to point the user at specific lines: it renders the file in the McFly viewer with those lines highlighted. Use waypoint to leave a durable note anchored to a specific line (a finding, explanation, or TODO): waypoints collect in the McFly Wayfinder tab and stay findable even after the file changes. Use waypoint_remove when a waypoint is resolved or obsolete. Use workspace_state whenever the user references something you cannot see — "this", "here", "that file", "what I highlighted", "where I am" — or to orient yourself in what they are looking at: it returns their open files, visible lines, playhead, panels, terminals, and recent selections and time-travel jumps. When the user mentions a review or their comments, call review_state to read the threads and review_reply to answer them; set addressed: true on replies that complete the ask.';
 const TOOL = {
   name: 'run_table',
   title: 'Run tabular shell command',
@@ -129,8 +129,8 @@ async function runWorkspaceState(args = {}) {
     return { content: [{ type: 'text', text: 'no running mcfly server found' }], isError: true };
   }
   const cwd = path.resolve(args.cwd ?? process.cwd()).toLowerCase();
-  const pick = servers.find((s) => cwd.startsWith(String(s.pwd).toLowerCase()))
-    ?? servers.sort((a, b) => b.started - a.started)[0];
+  const byNewest = [...servers].sort((a, b) => b.started - a.started);
+  const pick = byNewest.find((s) => cwd.startsWith(String(s.pwd).toLowerCase())) ?? byNewest[0];
   const qs = new URLSearchParams();
   if (args.history) qs.set('history', String(args.history));
   if (Array.isArray(args.kinds) && args.kinds.length) qs.set('kinds', args.kinds.join(','));
@@ -142,6 +142,85 @@ async function runWorkspaceState(args = {}) {
     return { content: [{ type: 'text', text: `${DATA_MARKER}\n${JSON.stringify(result)}` }], structuredContent: result };
   } catch (error) {
     return { content: [{ type: 'text', text: `mcfly server on port ${pick.port} did not answer: ${error.message}` }], isError: true };
+  }
+}
+
+const REVIEW_STATE_TOOL = {
+  name: 'review_state',
+  title: 'Read human reviews',
+  description: "Human code reviews for this project: threaded comments the user anchored to lines, GitHub-review style. Call it when a review is active, when the user mentions their review or comments, or before starting work the user asked to be reviewed. Reply to threads with review_reply.",
+  inputSchema: {
+    type: 'object', additionalProperties: false,
+    properties: {
+      cwd: { type: 'string', description: 'Project directory. Defaults to the process cwd.' },
+      all: { type: 'boolean', description: 'Include closed reviews. Default: open reviews only.' },
+    },
+  },
+  outputSchema: {
+    type: 'object', required: ['schema', 'kind'],
+    properties: { schema: { const: 'mcfly.data.v1' }, kind: { const: 'review_state' } },
+  },
+  annotations: { readOnlyHint: true },
+};
+
+const REVIEW_REPLY_TOOL = {
+  name: 'review_reply',
+  title: 'Reply to a review thread',
+  description: 'Reply to a human review comment. Set addressed: true when your reply resolves the ask — the thread shows as addressed until the human resolves it.',
+  inputSchema: {
+    type: 'object', additionalProperties: false, required: ['comment_id', 'body'],
+    properties: {
+      comment_id: { type: 'string', description: 'The id of the comment thread to reply to.' },
+      body: { type: 'string', description: 'The reply text (markdown).' },
+      addressed: { type: 'boolean', description: 'Mark the thread addressed (you did what it asked).' },
+      cwd: { type: 'string', description: 'Project directory. Defaults to the process cwd.' },
+    },
+  },
+  outputSchema: {
+    type: 'object', required: ['schema', 'kind'],
+    properties: { schema: { const: 'mcfly.data.v1' }, kind: { const: 'review_reply' } },
+  },
+};
+
+async function reviewFetch(args, route, payload) {
+  const servers = liveServers();
+  if (!servers.length) return null;
+  const cwd = path.resolve(args.cwd ?? process.cwd()).toLowerCase();
+  // among cwd matches, prefer the newest server — it runs the newest code
+  const byNewest = [...servers].sort((a, b) => b.started - a.started);
+  const pick = byNewest.find((s) => cwd.startsWith(String(s.pwd).toLowerCase())) ?? byNewest[0];
+  const res = payload
+    ? await fetch(`http://127.0.0.1:${pick.port}${route}`, { method: 'POST', body: JSON.stringify({ ...payload, pwd: pick.pwd }) })
+    : await fetch(`http://127.0.0.1:${pick.port}${route}?pwd=${encodeURIComponent(pick.pwd)}`);
+  return res.json();
+}
+
+async function runReviewState(args = {}) {
+  try {
+    const reviews = await reviewFetch(args, '/api/reviews');
+    if (reviews === null) return { content: [{ type: 'text', text: 'no running mcfly server found' }], isError: true };
+    const filtered = args.all ? reviews : reviews.filter((r) => r.status === 'open');
+    const result = { schema: 'mcfly.data.v1', kind: 'review_state', reviews: filtered };
+    return { content: [{ type: 'text', text: `${DATA_MARKER}\n${JSON.stringify(result)}` }], structuredContent: result };
+  } catch (error) {
+    return { content: [{ type: 'text', text: `review lookup failed: ${error.message}` }], isError: true };
+  }
+}
+
+async function runReviewReply(args = {}) {
+  if (typeof args.comment_id !== 'string' || typeof args.body !== 'string' || !args.body.trim()) {
+    return { content: [{ type: 'text', text: 'comment_id and body are required' }], isError: true };
+  }
+  try {
+    const out = await reviewFetch(args, '/api/review-reply', {
+      commentId: args.comment_id, body: args.body, author: 'agent', addressed: !!args.addressed,
+    });
+    if (out === null) return { content: [{ type: 'text', text: 'no running mcfly server found' }], isError: true };
+    if (out.error) return { content: [{ type: 'text', text: out.error }], isError: true };
+    const result = { schema: 'mcfly.data.v1', kind: 'review_reply', review_id: out.id, comment_id: args.comment_id };
+    return { content: [{ type: 'text', text: `${DATA_MARKER}\n${JSON.stringify(result)}` }], structuredContent: result };
+  } catch (error) {
+    return { content: [{ type: 'text', text: `reply failed: ${error.message}` }], isError: true };
   }
 }
 
@@ -203,11 +282,15 @@ function runWaypoint(args = {}) {
   if (line > lines.length) {
     return { content: [{ type: 'text', text: `line ${line} is past the end of the file (${lines.length} lines)` }], isError: true };
   }
+  const content = lines.join('\n');
   const result = {
     schema: 'mcfly.data.v1', kind: 'waypoint', path: file, line, note: args.note,
     before: lines.slice(Math.max(0, line - 1 - WAYPOINT_CONTEXT), line - 1),
     anchor: lines[line - 1],
     after: lines.slice(line, line + WAYPOINT_CONTEXT),
+    // the file as the agent marked it: lets the workbench show the waypoint
+    // in the live session view instead of hunting the file on disk
+    ...(content.length <= MAX_HIGHLIGHT_BYTES ? { content } : {}),
   };
   return { content: [{ type: 'text', text: `${DATA_MARKER}\n${JSON.stringify(result)}` }], structuredContent: result };
 }
@@ -286,13 +369,15 @@ async function handle(request) {
         capabilities: { tools: {} }, serverInfo: { name: 'mcfly', version: VERSION }, instructions: INSTRUCTIONS,
       };
     case 'ping': return {};
-    case 'tools/list': return { tools: [TOOL, HIGHLIGHT_TOOL, WAYPOINT_TOOL, WAYPOINT_REMOVE_TOOL, WORKSPACE_STATE_TOOL] };
+    case 'tools/list': return { tools: [TOOL, HIGHLIGHT_TOOL, WAYPOINT_TOOL, WAYPOINT_REMOVE_TOOL, WORKSPACE_STATE_TOOL, REVIEW_STATE_TOOL, REVIEW_REPLY_TOOL] };
     case 'tools/call':
       if (request.params?.name === TOOL.name) return runTable(request.params.arguments);
       if (request.params?.name === HIGHLIGHT_TOOL.name) return runHighlight(request.params.arguments);
       if (request.params?.name === WAYPOINT_TOOL.name) return runWaypoint(request.params.arguments);
       if (request.params?.name === WAYPOINT_REMOVE_TOOL.name) return runWaypointRemove(request.params.arguments);
       if (request.params?.name === WORKSPACE_STATE_TOOL.name) return runWorkspaceState(request.params.arguments);
+      if (request.params?.name === REVIEW_STATE_TOOL.name) return runReviewState(request.params.arguments);
+      if (request.params?.name === REVIEW_REPLY_TOOL.name) return runReviewReply(request.params.arguments);
       throw new Error(`unknown tool: ${request.params?.name}`);
     default: throw Object.assign(new Error(`method not found: ${request.method}`), { code: -32601 });
   }

@@ -10,6 +10,7 @@ import { fileURLToPath } from 'node:url';
 import * as claudeCode from './loaders/claude-code.js';
 import * as codex from './loaders/codex.js';
 import { alive, attachPty, detectTools, killAllPtys, killPty, listPtys, reapOrphans, setPtySession, TOKEN } from './pty.js';
+import * as review from './review.js';
 
 const PROVIDERS = { 'claude-code': claudeCode, codex };
 const PORT = process.env.PORT || 7777;
@@ -55,6 +56,32 @@ const server = http.createServer((req, res) => {
     }
     // live terminal registry (agent tmux: list-sessions / map to transcript)
     if (url.pathname === '/api/ptys') return json(res, 200, listPtys());
+    // human review: session-scoped threaded comments; the human writes from
+    // the UI, agents read and reply through the MCP
+    if (url.pathname === '/api/reviews') {
+      return json(res, 200, review.listReviews(url.searchParams.get('pwd') ?? process.cwd()));
+    }
+    if (url.pathname.startsWith('/api/review-') && req.method === 'POST') {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        try {
+          const b = JSON.parse(body);
+          const pwd = b.pwd ?? process.cwd();
+          const out =
+            url.pathname === '/api/review-create' ? review.createReview(pwd, b.session)
+            : url.pathname === '/api/review-close' ? review.closeReview(pwd, b.id)
+            : url.pathname === '/api/review-comment' ? review.addComment(pwd, b.id, b.comment)
+            : url.pathname === '/api/review-reply' ? review.addReply(pwd, b.commentId, b.body, b.author ?? 'human', b.addressed)
+            : url.pathname === '/api/review-thread-state' ? review.setThreadState(pwd, b.id, b.commentId, b.state)
+            : undefined;
+          if (out === undefined) return json(res, 404, { error: 'unknown review action' });
+          if (out === null) return json(res, 404, { error: 'not found' });
+          json(res, 200, out);
+        } catch { json(res, 400, { error: 'bad body' }); }
+      });
+      return;
+    }
     // workspace state: the UI reports what the user has open/focused/selected;
     // the mcfly MCP queries it so agents can see what the user is pointing at
     if (url.pathname === '/api/workspace-events' && req.method === 'POST') {
@@ -186,7 +213,12 @@ const server = http.createServer((req, res) => {
     const file = path.resolve(DIST, relPath);
     if (file.startsWith(DIST + path.sep) && fs.existsSync(file) && fs.statSync(file).isFile()) {
       const body = fs.readFileSync(file); // read before writeHead: a throw here must reach the catch
-      res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] ?? 'application/octet-stream' });
+      const ext = path.extname(file);
+      // index.html must revalidate every load or browsers heuristically cache
+      // it and keep pointing at dead hashed bundles; the hashed assets
+      // themselves are immutable by name
+      const cache = ext === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable';
+      res.writeHead(200, { 'Content-Type': MIME[ext] ?? 'application/octet-stream', 'Cache-Control': cache });
       return res.end(body);
     }
     res.writeHead(404);

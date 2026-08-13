@@ -10,8 +10,9 @@ import { LiveTerm } from './components/LivePane';
 import { SessionPicker } from './components/SessionPicker';
 import { Wayfinder } from './components/Wayfinder';
 import { Splitter } from './components/Splitter';
-import type { SessionMeta } from './types';
-import { resolveWaypoint, type WaypointEntry } from './lib/timeline';
+import { HumanReview } from './components/HumanReview';
+import type { Review, ReviewComment, SessionMeta } from './types';
+import { normPath, resolveWaypoint, type WaypointEntry } from './lib/timeline';
 import { emit, updateSnapshot, watchSelections } from './lib/workspace';
 import { Terminal } from './components/Terminal';
 import { ToolDetail } from './components/ToolDetail';
@@ -54,7 +55,7 @@ export default function App() {
   const [bottomOpen, setBottomOpen] = useStoredBool('bottomOpen', true);
   const [leftTab, setLeftTab] = useStoredTab<'tools' | 'explorer'>('leftTab', 'tools');
   const [rightTab, setRightTab] = useStoredTab<'chat' | 'term'>('rightTab', 'chat');
-  const [bottomTab, setBottomTab] = useStoredTab<'term' | 'data' | 'tool' | 'way'>('bottomTab', 'term');
+  const [bottomTab, setBottomTab] = useStoredTab<'term' | 'data' | 'tool' | 'way' | 'review'>('bottomTab', 'term');
   const [editorTab, setEditorTab] = useState('pinned');
   const [userTabs, setUserTabs] = useState<UserTab[]>([]);
   // singleton by construction: the timeline is a projection of the one global
@@ -121,7 +122,7 @@ export default function App() {
   const TOOL_PROVIDERS: Record<string, string> = { claude: 'claude-code', codex: 'codex' };
   // one hunt per launch, each remembering which PTY it came from — a second
   // terminal starting mid-hunt must not steal or clobber the first's identity
-  const [hunts, setHunts] = useState<{ key: number; provider: string; tool: string; since: number; ptyId?: string }[]>([]);
+  const [hunts, setHunts] = useState<{ key: number; provider: string; tool: string; since: number; ptyId?: string; adopt?: boolean }[]>([]);
   const huntKey = useRef(1);
   const claimed = useRef(new Set<string>());
   const onToolStart = useCallback((tool: string) => {
@@ -130,9 +131,17 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const onPtyStart = useCallback((id: string, tool: string, fresh: boolean) => {
-    // only a freshly started terminal (not an adoption/take-back) can be the
-    // one a hunt launched; bind to the oldest unbound hunt of that tool
-    if (!fresh) return;
+    // an adopted terminal (page reload, take-back) lost its transcript label
+    // with the old page: re-detect so the follow button comes back. Label
+    // only — never yank the view the way a fresh launch does.
+    // ponytail: two adopted terminals of one tool guess the same session
+    if (!fresh) {
+      const provider = TOOL_PROVIDERS[tool];
+      if (provider) setHunts((hs) => [...hs, { key: huntKey.current++, provider, tool, since: Date.now(), ptyId: id, adopt: true }]);
+      return;
+    }
+    // only a freshly started terminal can be the one a hunt launched; bind
+    // to the oldest unbound hunt of that tool
     setHunts((hs) => {
       const i = hs.findIndex((h) => h.tool === tool && !h.ptyId);
       return i < 0 ? hs : hs.map((h, j) => (j === i ? { ...h, ptyId: id } : h));
@@ -153,10 +162,20 @@ export default function App() {
             await fetch(`/api/sessions?pwd=${encodeURIComponent(pwd)}&provider=${encodeURIComponent(h.provider)}`)
           ).json();
           const cand = Array.isArray(list)
-            ? list.filter((s) => s.updated_at > h.since - 5_000 && s.id !== sessionId && !claimed.current.has(s.id))
-              .sort((a, b) => a.updated_at - b.updated_at)[0]
+            ? (h.adopt
+              ? [...list].sort((a, b) => b.updated_at - a.updated_at)[0]
+              : list.filter((s) => s.updated_at > h.since - 5_000 && s.id !== sessionId && !claimed.current.has(s.id))
+                .sort((a, b) => a.updated_at - b.updated_at)[0])
             : undefined;
           if (!cand) continue;
+          if (h.adopt) {
+            setHunts((hs) => hs.filter((x) => x.key !== h.key));
+            void fetch('/api/pty-session', {
+              method: 'POST',
+              body: JSON.stringify({ ptyId: h.ptyId, provider: cand.provider, session: cand.id, pwd }),
+            });
+            continue;
+          }
           claimed.current.add(cand.id);
           setHunts((hs) => hs.filter((x) => x.key !== h.key));
           applyPick(pwd, cand);
@@ -260,18 +279,59 @@ export default function App() {
       : undefined;
   const animatedTermAt = animStep?.kind === 'tool' && animStep.call.command ? r.animateIndex : -1;
 
+  // auto-follow: ON = the view jumps to activity (tour-guide mode); OFF = the
+  // same things happen quietly, and the tab that had activity flashes instead
+  const [autoFollow, setAutoFollow] = useStoredBool('autoFollow', true);
+  const [flashes, setFlashes] = useState<Record<string, number>>({});
+  const flash = useCallback((key: string) => {
+    setFlashes((f) => ({ ...f, [key]: (f[key] ?? 0) + 1 }));
+  }, []);
+
   useEffect(() => {
     if (r.view.data?.touchedAt === undefined) return;
-    setBottomOpen(true);
-    setBottomTab('data');
+    if (autoFollow) {
+      setBottomOpen(true);
+      setBottomTab('data');
+    } else flash('data');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [r.view.data?.touchedAt, setBottomOpen, setBottomTab]);
 
-  const pinned = r.view.tabs.find((t) => t.path === r.view.activePath);
+  // terminal commands take you to the agent terminal; unknown tool calls
+  // (nothing renders them specially) take you to the tool call detail.
+  // In quiet mode the terminal flashes; tool call stays silent by design.
+  useEffect(() => {
+    const s = r.view.currentToolIndex >= 0 ? r.steps[r.view.currentToolIndex] : undefined;
+    if (!s || s.kind !== 'tool') return;
+    const verb = s.result?.verb ?? s.call.verb;
+    if (verb === 'exec') {
+      if (autoFollow) {
+        setBottomOpen(true);
+        setBottomTab('term');
+      } else flash('term');
+    } else if (verb === 'other' && !s.result?.waypoint && !s.result?.waypoint_remove) {
+      if (autoFollow) {
+        setBottomOpen(true);
+        setBottomTab('tool');
+      }
+      // quiet mode: no flash for tool call — every step is a tool call
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [r.view.currentToolIndex]);
+
+  // the tour can point the live tab at any session-known file (waypoint or
+  // review stop); the next fold touch takes the tab back. Declared before
+  // the tour effects so the clear-on-touch runs first, never after them.
+  const [pinnedOverride, setPinnedOverride] = useState<string | undefined>();
+  useEffect(() => setPinnedOverride(undefined), [r.view.activePath]);
+  const pinned = (pinnedOverride ? r.view.tabs.find((t) => normPath(t.path) === normPath(pinnedOverride)) : undefined)
+    ?? r.view.tabs.find((t) => t.path === r.view.activePath);
 
   // any touch of a file yanks the editor to the pinned live tab — unless
   // you're inspecting a file timeline, which follows the playhead itself
   useEffect(() => {
-    setEditorTab((cur) => (cur === 'timeline' ? cur : 'pinned'));
+    if (autoFollow) setEditorTab((cur) => (cur === 'timeline' ? cur : 'pinned'));
+    else flash('pinned');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pinned?.path, pinned?.touchedAt]);
 
   // the project pwd governs terminals and the explorer; session cwd is fallback
@@ -341,13 +401,120 @@ export default function App() {
       : t)));
   }, []);
 
+  // ---- human review: session-scoped threads; agents reply through the MCP ----
+  const [reviews, setReviews] = useState<Review[]>([]);
+  const [focusThreadId, setFocusThreadId] = useState<string | undefined>();
+  const refreshReviews = useCallback(() => {
+    if (!cwd) return;
+    fetch(`/api/reviews?pwd=${encodeURIComponent(cwd)}`)
+      .then((res) => res.json())
+      .then((d) => setReviews(Array.isArray(d) ? d : []))
+      .catch(() => { /* keep last */ });
+  }, [cwd]);
+  useEffect(() => {
+    refreshReviews();
+    const id = setInterval(refreshReviews, 4000); // agent replies appear live
+    return () => clearInterval(id);
+  }, [refreshReviews]);
+
+  const activeReview = reviews.find((v) => v.status === 'open'
+    && v.session?.provider === r.session?.provider && v.session?.id === r.session?.id) ?? null;
+
+  const reviewPost = useCallback((route: string, body: Record<string, unknown>) => {
+    if (!cwd) return;
+    void fetch(route, { method: 'POST', body: JSON.stringify({ pwd: cwd, ...body }) }).then(refreshReviews);
+  }, [cwd, refreshReviews]);
+
+  const createReview = useCallback(() => {
+    if (!r.session) return;
+    reviewPost('/api/review-create', { session: { provider: r.session.provider, id: r.session.id } });
+    setBottomTab('review');
+  }, [r.session, reviewPost, setBottomTab]);
+
+  // after submit the new thread stays OPEN at its line until collapsed
+  const reviewComment = useCallback(async (c: { path: string; line: number; line_end?: number; step?: number; before: string[]; anchor: string; after: string[]; body: string }) => {
+    if (!activeReview || !cwd) return;
+    try {
+      const res = await fetch('/api/review-comment', { method: 'POST', body: JSON.stringify({ pwd: cwd, id: activeReview.id, comment: c }) });
+      const updated: Review = await res.json();
+      setReviews((cur) => cur.map((v) => (v.id === updated.id ? updated : v)));
+      const newest = updated.comments.at(-1);
+      if (newest) setFocusThreadId(newest.id);
+    } catch { /* next poll reconciles */ }
+  }, [activeReview, cwd]);
+
+  const openReviewComment = useCallback((_review: Review, c: ReviewComment) => {
+    // the live tab first: when the session view holds content the comment
+    // resolves in, the thread shows there; the disk file is the fallback
+    const tab = r.view.tabs.find((t) => normPath(t.path) === normPath(c.path));
+    if (tab?.mode === 'file' && tab.render.content !== undefined
+      && resolveWaypoint(tab.render.content, { path: c.path, line: c.line, note: '', before: c.before, anchor: c.anchor, after: c.after }) !== null) {
+      setPinnedOverride(c.path);
+      setEditorTab('pinned');
+      setFocusThreadId(c.id);
+      return;
+    }
+    const m = c.path.match(/^(.*)[\\/]([^\\/]+)$/);
+    if (!m) return;
+    fetch(`/api/fs/read?root=${encodeURIComponent(m[1])}&path=${encodeURIComponent(m[2])}`)
+      .then((res) => res.json())
+      .then((d: { content?: string }) => {
+        const found = typeof d.content === 'string'
+          ? resolveWaypoint(d.content, { path: c.path, line: c.line, note: '', before: c.before, anchor: c.anchor, after: c.after })
+          : null;
+        const total = typeof d.content === 'string' ? d.content.split('\n').length : c.line;
+        openAbs(c.path, found ?? Math.max(1, Math.min(c.line, total)));
+        setFocusThreadId(c.id);
+      })
+      .catch(() => { openAbs(c.path, c.line); setFocusThreadId(c.id); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openAbs, r.view.tabs]);
+
+  const reviewViewOriginal = useCallback((c: ReviewComment) => {
+    const key = `snapshot:review:${c.id}`;
+    setEditorTab(key);
+    setUserTabs((tabs) => (tabs.some((t) => t.key === key)
+      ? tabs
+      : [...tabs, { key, path: c.path, snapshot: { line: c.line, note: c.body, before: c.before, anchor: c.anchor, after: c.after } }]));
+  }, []);
+
   // a waypoint step takes you to it — during playback, live follow, or scrub
   const lastWaypointAt = r.view.waypoints.at(-1)?.touchedAt;
   useEffect(() => {
     const wp = r.view.waypoints.at(-1);
-    if (wp) openWaypoint(wp);
+    if (!wp) return;
+    if (autoFollow) {
+      // pin only when the session view can actually show the card — the
+      // file tab holds content the waypoint resolves in. Anything less
+      // goes on disk so the tour always lands on a visible note.
+      const tab = r.view.tabs.find((t) => normPath(t.path) === normPath(wp.path));
+      const showable = tab?.mode === 'file' && tab.render.content !== undefined
+        && resolveWaypoint(tab.render.content, wp) !== null;
+      if (showable) { setPinnedOverride(wp.path); setEditorTab('pinned'); }
+      else openWaypoint(wp);
+    } else flash('way');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lastWaypointAt]);
+
+  // an agent reply on the active review is a tour stop too: go to the
+  // thread, or flash the review tab in quiet mode
+  const lastReplies = useRef<{ id: string; count: number } | null>(null);
+  useEffect(() => {
+    if (!activeReview) { lastReplies.current = null; return; }
+    const count = activeReview.comments.reduce((n, c) => n + c.replies.filter((p) => p.author !== 'human').length, 0);
+    const prev = lastReplies.current;
+    lastReplies.current = { id: activeReview.id, count };
+    if (!prev || prev.id !== activeReview.id || count <= prev.count) return;
+    if (autoFollow) {
+      setBottomOpen(true);
+      setBottomTab('review');
+      const c = activeReview.comments
+        .filter((x) => x.replies.some((p) => p.author !== 'human'))
+        .sort((a, b) => (b.replies.at(-1)?.ts ?? 0) - (a.replies.at(-1)?.ts ?? 0))[0];
+      if (c) openReviewComment(activeReview, c);
+    } else flash('review');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reviews]);
 
   const openFile = useCallback((rel: string) => {
     if (!cwd) return;
@@ -389,6 +556,15 @@ export default function App() {
         )}
         <span className="titleRight">
           {r.playing && r.pointer >= r.head && <span className="liveBadge">● LIVE</span>}
+          <button
+            className={`tourToggle ${autoFollow ? 'on' : ''}`}
+            title={autoFollow
+              ? 'Tour guide ON: the view takes you to files, tables, and waypoints as they happen. Click to wander freely.'
+              : 'Tour guide OFF: activity flashes its tab instead of moving you. Click to be shown around.'}
+            onClick={() => setAutoFollow(!autoFollow)}
+          >
+            <span className={`codicon codicon-${autoFollow ? 'eye' : 'eye-closed'}`} />
+          </button>
           <span className="layoutToggles">
             <button className={leftOpen ? 'on' : ''} title="Toggle left pane" onClick={() => setLeftOpen(!leftOpen)}>◧</button>
             <button className={bottomOpen ? 'on' : ''} title="Toggle bottom pane" onClick={() => setBottomOpen(!bottomOpen)}>⬓</button>
@@ -439,9 +615,17 @@ export default function App() {
                 <FileTimeline steps={r.steps} pointer={r.pointer} path={timelinePath} speed={r.speed} onJump={r.jump} />
               )}
               onToggleWaypoint={toggleWaypoint}
+              pinnedFlash={flashes.pinned ?? 0}
+              pointer={r.pointer}
               waypoints={r.view.waypoints}
               onOpenSnapshot={openSnapshot}
               onActivateWaypoint={activateTabWaypoint}
+              activeReview={activeReview}
+              focusThreadId={focusThreadId}
+              onReviewComment={reviewComment}
+              onReviewReply={(commentId, body) => reviewPost('/api/review-reply', { commentId, body, author: 'human' })}
+              onReviewResolve={(commentId) => activeReview && reviewPost('/api/review-thread-state', { id: activeReview.id, commentId, state: 'resolved' })}
+              onReviewViewOriginal={reviewViewOriginal}
             />
           </div>
           {bottomOpen && (
@@ -452,14 +636,17 @@ export default function App() {
               }} />
               <div className="bottomPane">
                 <div className="paneTabs">
-                  <div className={`paneTab ${bottomTab === 'term' ? 'active' : ''}`} onClick={() => setBottomTab('term')}>
+                  <div key={`t${flashes.term ?? 0}`} className={`paneTab ${bottomTab === 'term' ? 'active' : ''} ${flashes.term ? 'tabFlashAnim' : ''}`} onClick={() => setBottomTab('term')}>
                     AGENT TERMINAL <span className="roBadge">read only</span>
                   </div>
-                  <div className={`paneTab ${bottomTab === 'data' ? 'active' : ''}`} onClick={() => setBottomTab('data')}>
+                  <div key={`d${flashes.data ?? 0}`} className={`paneTab ${bottomTab === 'data' ? 'active' : ''} ${flashes.data ? 'tabFlashAnim' : ''}`} onClick={() => setBottomTab('data')}>
                     DATA
                   </div>
-                  <div className={`paneTab wayfinderTab ${bottomTab === 'way' ? 'active' : ''}`} onClick={() => setBottomTab('way')}>
+                  <div key={`w${flashes.way ?? 0}`} className={`paneTab wayfinderTab ${bottomTab === 'way' ? 'active' : ''} ${flashes.way ? 'tabFlashAnim' : ''}`} onClick={() => setBottomTab('way')}>
                     WAYFINDER{r.view.waypoints.length > 0 && <span className="wfCount">{r.view.waypoints.length}</span>}
+                  </div>
+                  <div key={`r${flashes.review ?? 0}`} className={`paneTab reviewTab ${bottomTab === 'review' ? 'active' : ''} ${flashes.review ? 'tabFlashAnim' : ''}`} onClick={() => setBottomTab('review')}>
+                    HUMAN REVIEW{activeReview && <span className="wfCount rvCount">{activeReview.comments.filter((c) => c.state !== 'resolved').length}</span>}
                   </div>
                   <div className={`paneTab ${bottomTab === 'tool' ? 'active' : ''}`} onClick={() => setBottomTab('tool')}>
                     TOOL CALL
@@ -473,6 +660,15 @@ export default function App() {
                 </div>
                 <div className={bottomTab === 'way' ? 'tabBody' : 'tabBody hiddenTab'}>
                   <Wayfinder waypoints={r.view.waypoints} onSelect={openWaypoint} />
+                </div>
+                <div className={bottomTab === 'review' ? 'tabBody' : 'tabBody hiddenTab'}>
+                  <HumanReview
+                    active={activeReview}
+                    sessionLoaded={!!r.session}
+                    onCreate={createReview}
+                    onClose={() => activeReview && reviewPost('/api/review-close', { id: activeReview.id })}
+                    onOpenComment={openReviewComment}
+                  />
                 </div>
                 <div className={bottomTab === 'tool' ? 'tabBody' : 'tabBody hiddenTab'}>
                   <ToolDetail step={currentTool} />
