@@ -7,6 +7,7 @@
 // prefix + JSON; everything else is raw terminal data.
 import os from 'node:os';
 import fs from 'node:fs';
+import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { WebSocketServer } from 'ws';
@@ -102,15 +103,78 @@ function detach(s) {
   s.detachedAt = Date.now();
 }
 
+// ---- orphan prevention: PTYs die with the server, even when the server
+// dies badly. Killing only the shell leaves the agent running inside it
+// alive (job control puts it in its own process group), so kills are
+// tree-wide; and a liveness file lets the NEXT server boot reap children
+// of servers that never got to run their handlers (force-kill, crash). ----
+
+const LIVE_FILE = path.join(os.homedir(), '.mcfly', 'live-ptys.json');
+
+function saveLive() {
+  try {
+    fs.mkdirSync(path.dirname(LIVE_FILE), { recursive: true });
+    let all = {};
+    try { all = JSON.parse(fs.readFileSync(LIVE_FILE, 'utf8')); } catch { /* fresh file */ }
+    all[process.pid] = [...sessions.values()].map((s) => ({ pid: s.p.pid, shell: path.basename(SHELL) }));
+    fs.writeFileSync(LIVE_FILE, JSON.stringify(all));
+  } catch { /* best effort */ }
+}
+
+const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+
+function processName(pid) {
+  try {
+    if (WIN) {
+      const out = execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], { encoding: 'utf8', windowsHide: true });
+      return out.split('","')[0]?.replace(/^"/, '').trim() ?? '';
+    }
+    return execFileSync('ps', ['-p', String(pid), '-o', 'comm='], { encoding: 'utf8' }).trim();
+  } catch { return ''; }
+}
+
+export function killTree(pid) {
+  try {
+    if (WIN) {
+      execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'pipe', windowsHide: true });
+    } else {
+      let kids = [];
+      try { kids = execFileSync('pgrep', ['-P', String(pid)], { encoding: 'utf8' }).split('\n').filter(Boolean); } catch { /* no children */ }
+      for (const kid of kids) killTree(Number(kid));
+      process.kill(pid, 'SIGKILL');
+    }
+  } catch { /* already gone */ }
+}
+
+// on boot: children recorded by servers that no longer exist are orphans.
+// PID-reuse guard: only kill a pid that still looks like the shell we spawned.
+export function reapOrphans() {
+  let all = {};
+  try { all = JSON.parse(fs.readFileSync(LIVE_FILE, 'utf8')); } catch { return; }
+  const next = {};
+  for (const [serverPid, ptys] of Object.entries(all)) {
+    if (Number(serverPid) === process.pid || alive(Number(serverPid))) { next[serverPid] = ptys; continue; }
+    for (const entry of Array.isArray(ptys) ? ptys : []) {
+      const want = String(entry.shell ?? '').replace(/\.exe$/i, '').toLowerCase();
+      if (entry.pid && alive(entry.pid) && want && processName(entry.pid).toLowerCase().includes(want)) {
+        killTree(entry.pid);
+      }
+    }
+  }
+  try { fs.writeFileSync(LIVE_FILE, JSON.stringify(next)); } catch { /* best effort */ }
+}
+
 export function killPty(id) {
   const s = sessions.get(id);
   if (!s) return false;
+  killTree(s.p.pid); // the whole tree: the shell AND the agent inside it
   try { s.p.kill(); } catch { /* onExit cleans up */ }
   return true;
 }
 
 export function killAllPtys() {
   for (const id of sessions.keys()) killPty(id);
+  saveLive();
 }
 
 function wire(s, ws) {
@@ -197,6 +261,7 @@ export function attachPty(server, allowedHosts) {
         shadow: new ShadowTerminal({ cols: 100, rows: 30, scrollback: 20, allowProposedApi: true }),
       };
       sessions.set(s.id, s);
+      saveLive();
       ws.send(ctl({ ptyId: s.id }));
 
       // launch the picked tool inside the shell so PATH/shims resolve the
@@ -218,6 +283,7 @@ export function attachPty(server, allowedHosts) {
         }
         try { s.shadow?.dispose(); } catch { /* already gone */ }
         sessions.delete(s.id);
+        saveLive();
       });
       wire(s, ws);
     });

@@ -7,7 +7,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as claudeCode from './loaders/claude-code.js';
 import * as codex from './loaders/codex.js';
-import { attachPty, detectTools, killAllPtys, killPty, listPtys, setPtySession, TOKEN } from './pty.js';
+import { attachPty, detectTools, killAllPtys, killPty, listPtys, reapOrphans, setPtySession, TOKEN } from './pty.js';
 
 const PROVIDERS = { 'claude-code': claudeCode, codex };
 const PORT = process.env.PORT || 7777;
@@ -126,9 +126,14 @@ const server = http.createServer((req, res) => {
 attachPty(server, ALLOWED_HOSTS);
 server.listen(PORT, '127.0.0.1', () => console.log(`Agent McFly API: http://localhost:${PORT}`));
 
+reapOrphans(); // children of servers that died without cleanup
+
 const shutdown = () => {
   killAllPtys();
   server.close();
 };
 process.once('SIGINT', shutdown);
 process.once('SIGTERM', shutdown);
+process.once('SIGHUP', shutdown); // terminal closed on the server (POSIX)
+process.once('uncaughtException', (e) => { console.error(e); killAllPtys(); process.exit(1); });
+process.once('exit', () => killAllPtys()); // sync-only, but killTree is sync
