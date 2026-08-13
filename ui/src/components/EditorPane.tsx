@@ -335,20 +335,33 @@ export function DiffView({ file, animate }: { file: FileView; animate: boolean }
   useEffect(() => {
     ref.current?.scrollTo({ top: 0 });
   }, [file.path, file.touchedAt]);
+  // per-line highlighting: stateless, so multi-line constructs lose their
+  // color across lines — the standard trade every inline diff viewer makes
+  const lang = LANGS[file.path.split('.').pop()?.toLowerCase() ?? ''];
+  const hi = (code: string) => {
+    if (!lang) return undefined;
+    try { return hljs.highlight(code, { language: lang, ignoreIllegals: true }).value; } catch { return undefined; }
+  };
   return (
     <div className={`editorBody ${animate ? 'diffFlash' : ''}`} ref={ref}>
-      {(file.render.hunks ?? []).map((h, hi) => (
-        <div key={hi}>
+      {(file.render.hunks ?? []).map((h, hi2) => (
+        <div key={hi2}>
           <div className="codeline hunk">
             <span className="ln" />
             <span>{h.oldStart >= 1 ? `@@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@` : '@@'}</span>
           </div>
           {h.lines.map((line, li) => {
             const cls = line.startsWith('+') ? 'added' : line.startsWith('-') ? 'removed' : '';
+            const html = hi(line.slice(1));
             return (
               <div key={li} className={`codeline ${cls}`}>
                 <span className="ln" />
-                <span className="lc">{line}</span>
+                <span className="lc">
+                  {line[0] ?? ' '}
+                  {html !== undefined
+                    ? <span className="hljs" dangerouslySetInnerHTML={{ __html: html }} />
+                    : line.slice(1)}
+                </span>
               </div>
             );
           })}
@@ -368,6 +381,8 @@ export interface UserTab {
   // a waypoint whose context no longer exists in the real file: the captured
   // chunk, shown as a snapshot of the code as it was
   snapshot?: { line: number; note: string; before: string[]; anchor: string; after: string[] };
+  // a git diff tab: inline hunks, read-only, no waypoints or comments
+  diff?: { hunks: NonNullable<FileView['render']['hunks']>; area: 'staged' | 'changed' };
 }
 
 function ComposerCard({ onSubmit, onCancel }: { onSubmit: (body: string) => void; onCancel: () => void }) {
@@ -453,11 +468,14 @@ function captureContext(content: string, startLine: number, line: number) {
 // every touch, cannot be closed); explorer files open as closable read-only tabs.
 export function EditorPane({
   pinned, animate, speed, userTabs, active, onSelect, onClose, onOpenCurrent,
-  timelinePath, onOpenTimeline, onCloseTimeline, timelineBody, onToggleWaypoint,
-  waypoints, onOpenSnapshot, onActivateWaypoint, pinnedFlash = 0, pointer = 0,
+  timelinePath, onOpenTimeline, onCloseTimeline, timelineBody, onToggleWaypoint, onCloseAll,
+  waypoints, onOpenSnapshot, onActivateWaypoint, pinnedFlash = 0, pointer = 0, worktreeBanner,
   activeReview, focusThreadId, onReviewComment, onReviewReply, onReviewResolve, onReviewViewOriginal,
 }: {
   pinned?: FileView; animate: boolean; speed: number; pointer?: number;
+  // the active view shows a file inside a linked worktree: say so, in orange
+  worktreeBanner?: { label: string; onOpen?: () => void };
+  onCloseAll?: () => void;
   userTabs: UserTab[]; active: string; // 'pinned' | 'timeline' | user tab path
   onSelect: (key: string) => void; onClose: (path: string) => void;
   onOpenCurrent?: (path: string) => void;
@@ -645,13 +663,16 @@ export function EditorPane({
           <div key={t.key}
             ref={t.key === active ? activeTabRef : undefined}
             className={`tab ${t.key === active ? 'active' : ''} ${t.snapshot ? 'snapshotTab' : ''}`}
-            title={t.snapshot ? `${t.path} — waypoint snapshot: the file as it was when the waypoint was dropped` : `${t.path} (read only)`}
-            onClick={() => onSelect(t.key)}>
-            {shortName(t.path)}{t.snapshot
+            title={t.snapshot ? `${t.path} — waypoint snapshot: the file as it was when the waypoint was dropped` : t.diff ? `${t.path} — git diff` : `${t.path} (read only)`}
+            onClick={() => onSelect(t.key)}
+            onMouseDown={(e) => { if (e.button === 1) { e.preventDefault(); onClose(t.key); } }}>
+            {t.diff ? '± ' : ''}{shortName(t.path)}{t.snapshot
               ? ' [snapshot]'
-              : <> <span className="roBadge">read only</span></>}
+              : t.diff
+                ? <> <span className="roBadge">{t.diff.area === 'staged' ? 'staged' : 'changes'}</span></>
+                : <> <span className="roBadge">read only</span></>}
             {tabReviewDot(t.path)}
-            {t.snapshot && onOpenCurrent && (
+            {(t.snapshot || t.diff) && onOpenCurrent && (
               <span
                 className="codicon codicon-go-to-file tabAction"
                 title="Open the current on-disk version (read only)"
@@ -662,11 +683,37 @@ export function EditorPane({
             <span className="tabClose" onClick={(e) => { e.stopPropagation(); onClose(t.key); }}>✕</span>
           </div>
         ))}
+        {userTabs.length >= 2 && onCloseAll && (
+          <span
+            className="codicon codicon-close-all tabsCloseAll"
+            title="Close all tabs (the live tab stays)"
+            onClick={onCloseAll}
+          />
+        )}
       </div>
+      {worktreeBanner && (
+        <div className="wtBanner">
+          <span className="codicon codicon-git-branch" />
+          WORKTREE · {worktreeBanner.label}
+          {worktreeBanner.onOpen && (
+            <span className="wtBannerAction" onClick={worktreeBanner.onOpen}>open this worktree</span>
+          )}
+        </div>
+      )}
       {active === 'timeline' && timelinePath ? (
         timelineBody
       ) : userTab ? (
-        userTab.snapshot ? (
+        userTab.diff ? (
+          userTab.diff.hunks.length ? (
+            <DiffView
+              key={userTab.key}
+              file={{ path: userTab.path, mode: 'diff', render: { verb: 'patch_file', hunks: userTab.diff.hunks }, touchedAt: userTab.nonce ?? 0 }}
+              animate={false}
+            />
+          ) : (
+            <div className="emptyHint">no changes in this file</div>
+          )
+        ) : userTab.snapshot ? (
           // a virtual file: the chunk the waypoint captured, rendered exactly
           // like a real one — line numbers from the capture position
           <CodeView

@@ -12,6 +12,7 @@
     "server/mcp.js",
     "server/mcfly-data.js",
     "server/review.js",
+    "server/git.js",
     "server/pty.js",
     "server/loaders/claude-code.js",
     "server/loaders/codex.js",

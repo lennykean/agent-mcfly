@@ -5,7 +5,7 @@ interface Entry { name: string; dir: boolean }
 const CODE_EXT = new Set(['ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'cs', 'py', 'rs', 'go', 'java', 'c', 'h', 'cpp', 'css', 'html', 'ps1', 'sh', 'sql', 'yml', 'yaml', 'toml']);
 const IMG_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico']);
 
-function fileIcon(name: string): string {
+export function fileIcon(name: string): string {
   const ext = name.split('.').pop()?.toLowerCase() ?? '';
   if (ext === 'json') return 'json';
   if (ext === 'md') return 'markdown';
@@ -14,8 +14,10 @@ function fileIcon(name: string): string {
   return 'file';
 }
 
-function Dir({ root, rel, name, depth, onOpen }: {
-  root: string; rel: string; name?: string; depth: number; onOpen: (rel: string) => void;
+function Dir({ root, rel, name, depth, onFileClick, selection, onToggleSelect }: {
+  root: string; rel: string; name?: string; depth: number;
+  onFileClick: (rel: string, additive: boolean) => void;
+  selection: string[]; onToggleSelect: (rel: string) => void;
 }) {
   const [open, setOpen] = useState(depth === 0);
   const [entries, setEntries] = useState<Entry[] | null>(null);
@@ -41,7 +43,11 @@ function Dir({ root, rel, name, depth, onOpen }: {
   return (
     <div>
       {name !== undefined && (
-        <div className="expRow" style={{ paddingLeft: 8 + (depth - 1) * 12 }} onClick={() => setOpen(!open)}>
+        <div
+          className={`expRow ${selection.includes(rel) ? 'sel' : ''}`}
+          style={{ paddingLeft: 8 + (depth - 1) * 12 }}
+          onClick={(e) => ((e.ctrlKey || e.metaKey) ? onToggleSelect(rel) : setOpen(!open))}
+        >
           <span className={`codicon codicon-chevron-${open ? 'down' : 'right'} expChevron`} />
           <span className={`codicon codicon-folder${open ? '-opened' : ''} expIcon expFolder`} />
           {name}
@@ -49,13 +55,18 @@ function Dir({ root, rel, name, depth, onOpen }: {
       )}
       {open && entries?.map((e) =>
         e.dir ? (
-          <Dir key={e.name} root={root} rel={`${rel}${rel ? '/' : ''}${e.name}`} name={e.name} depth={depth + 1} onOpen={onOpen} />
+          <Dir key={e.name} root={root} rel={`${rel}${rel ? '/' : ''}${e.name}`} name={e.name} depth={depth + 1} onFileClick={onFileClick} selection={selection} onToggleSelect={onToggleSelect} />
         ) : (
-          <div key={e.name} className="expRow expFile" style={{ paddingLeft: 24 + depth * 12 }}
-            onClick={() => onOpen(`${rel}${rel ? '/' : ''}${e.name}`)}>
-            <span className={`codicon codicon-${fileIcon(e.name)} expIcon`} />
-            {e.name}
-          </div>
+          (() => {
+            const fileRel = `${rel}${rel ? '/' : ''}${e.name}`;
+            return (
+              <div key={e.name} className={`expRow expFile ${selection.includes(fileRel) ? 'sel' : ''}`} style={{ paddingLeft: 24 + depth * 12 }}
+                onClick={(ev) => onFileClick(fileRel, ev.ctrlKey || ev.metaKey)}>
+                <span className={`codicon codicon-${fileIcon(e.name)} expIcon`} />
+                {e.name}
+              </div>
+            );
+          })()
         ),
       )}
       {open && entries === null && <div className="expRow expDim" style={{ paddingLeft: 24 + depth * 12 }}>…</div>}
@@ -63,11 +74,24 @@ function Dir({ root, rel, name, depth, onOpen }: {
   );
 }
 
-export function Explorer({ root, onOpen }: { root?: string; onOpen: (relPath: string) => void }) {
+// Plain click on a file selects it and opens it; clicking the sole selected
+// file again clears the selection. Ctrl/meta-click toggles membership (files
+// and folders, multi) without opening. The selection feeds workspace_state,
+// so an agent can resolve "these files" from what is highlighted here.
+export function Explorer({ root, onOpen, selection = [], onSelect }: {
+  root?: string; onOpen: (relPath: string) => void;
+  selection?: string[]; onSelect?: (sel: string[]) => void;
+}) {
   if (!root) return <div className="expDim expRow">no cwd recorded for this session</div>;
+  const toggle = (rel: string) => onSelect?.(selection.includes(rel) ? selection.filter((s) => s !== rel) : [...selection, rel]);
+  const fileClick = (rel: string, additive: boolean) => {
+    if (additive) { toggle(rel); return; }
+    onSelect?.(selection.length === 1 && selection[0] === rel ? [] : [rel]);
+    onOpen(rel);
+  };
   return (
     <div className="explorer">
-      <Dir root={root} rel="" depth={0} onOpen={onOpen} />
+      <Dir root={root} rel="" depth={0} onFileClick={fileClick} selection={selection} onToggleSelect={toggle} />
     </div>
   );
 }

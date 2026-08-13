@@ -11,6 +11,7 @@ import * as claudeCode from './loaders/claude-code.js';
 import * as codex from './loaders/codex.js';
 import { alive, attachPty, detectTools, killAllPtys, killPty, listPtys, reapOrphans, setPtySession, TOKEN } from './pty.js';
 import * as review from './review.js';
+import * as git from './git.js';
 
 const PROVIDERS = { 'claude-code': claudeCode, codex };
 const PORT = process.env.PORT || 7777;
@@ -45,7 +46,7 @@ function updateServersFile(mutate) {
   } catch { /* best effort */ }
 }
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   try {
     // DNS-rebinding defense: a hostile site pointed at 127.0.0.1 becomes
@@ -90,6 +91,24 @@ const server = http.createServer((req, res) => {
         } catch { /* label is cosmetic */ }
       }
       return json(res, 200, ptys);
+    }
+    // read-only git inspection for the GIT pane; root follows the explorer
+    if (url.pathname.startsWith('/api/git/')) {
+      const root = url.searchParams.get('root') ?? process.cwd();
+      if (!git.okRoot(root)) return json(res, 400, { error: 'bad root' });
+      try {
+        if (url.pathname === '/api/git/status') return json(res, 200, await git.status(root));
+        if (url.pathname === '/api/git/log') return json(res, 200, await git.log(root, Number(url.searchParams.get('limit') ?? 150)));
+        if (url.pathname === '/api/git/worktrees') return json(res, 200, await git.worktrees(root));
+        if (url.pathname === '/api/git/diff') {
+          const file = url.searchParams.get('path') ?? '';
+          const staged = url.searchParams.get('staged') === '1';
+          return json(res, 200, { hunks: await git.diff(root, file, staged) });
+        }
+      } catch (e) {
+        // not a repo, or git absent: the pane shows the message, nothing breaks
+        return json(res, 200, { error: String(e.message ?? e).split('\n')[0] });
+      }
     }
     // human review: session-scoped threaded comments; the human writes from
     // the UI, agents read and reply through the MCP

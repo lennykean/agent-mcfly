@@ -5,6 +5,7 @@ import { ChatPane } from './components/ChatPane';
 import { DataPane } from './components/DataPane';
 import { EditorPane, type UserTab } from './components/EditorPane';
 import { Explorer } from './components/Explorer';
+import { GitPane, type GitFile, type GitSelection } from './components/GitPane';
 import { FileTimeline } from './components/FileTimeline';
 import { LiveTerm } from './components/LivePane';
 import { SessionPicker } from './components/SessionPicker';
@@ -58,7 +59,7 @@ export default function App() {
   const [leftOpen, setLeftOpen] = useStoredBool('leftOpen', true);
   const [rightOpen, setRightOpen] = useStoredBool('rightOpen', true);
   const [bottomOpen, setBottomOpen] = useStoredBool('bottomOpen', true);
-  const [leftTab, setLeftTab] = useStoredTab<'tools' | 'explorer'>('leftTab', 'tools');
+  const [leftTab, setLeftTab] = useStoredTab<'tools' | 'explorer' | 'git'>('leftTab', 'tools');
   const [rightTab, setRightTab] = useStoredTab<'chat' | 'term'>('rightTab', 'chat');
   const [bottomTab, setBottomTab] = useStoredTab<'term' | 'data' | 'tool' | 'way' | 'review'>('bottomTab', 'term');
   const [editorTab, setEditorTab] = useState('pinned');
@@ -380,6 +381,57 @@ export default function App() {
   // the project pwd governs terminals and the explorer; session cwd is fallback
   const cwd = pwd ?? r.session?.cwd;
 
+  // ---- git pane + worktrees. The explorer can point at a worktree; git
+  // panels follow it. A vanished worktree falls back to main, silently. ----
+  const [explorerRoot, setExplorerRoot] = useState<string>();
+  const [gitSelection, setGitSelectionRaw] = useState<GitSelection[]>([]);
+  const [explorerSelection, setExplorerSelectionRaw] = useState<string[]>([]);
+  // selection changes also land in the event history: even a replaced
+  // selection stays visible to agents with a timestamp
+  const setGitSelection = useCallback((s: GitSelection[]) => {
+    setGitSelectionRaw(s);
+    emit({ kind: 'git_select', files: s });
+  }, []);
+  const setExplorerSelection = useCallback((s: string[]) => {
+    setExplorerSelectionRaw(s);
+    emit({ kind: 'explorer_select', paths: s });
+  }, []);
+  const [gitCommitSel, setGitCommitSelRaw] = useState<{ hash: string; subject: string }[]>([]);
+  const setGitCommitSel = useCallback((s: { hash: string; subject: string }[]) => {
+    setGitCommitSelRaw(s);
+    emit({ kind: 'git_commit_select', commits: s });
+  }, []);
+  useEffect(() => { setExplorerSelectionRaw([]); }, [explorerRoot]);
+  const [worktreeList, setWorktreeList] = useState<{ path: string; branch?: string }[]>([]);
+  const gitRoot = explorerRoot ?? cwd ?? '';
+  useEffect(() => {
+    if (!cwd) return;
+    const load = () => fetch(`/api/git/worktrees?root=${encodeURIComponent(cwd)}`)
+      .then((res) => res.json())
+      .then((d) => setWorktreeList(Array.isArray(d) ? d : []))
+      .catch(() => { /* keep last */ });
+    void load();
+    const t = setInterval(load, 10_000);
+    return () => clearInterval(t);
+  }, [cwd]);
+  useEffect(() => {
+    if (!explorerRoot || !worktreeList.length) return;
+    if (!worktreeList.some((w) => normPath(w.path) === normPath(explorerRoot))) setExplorerRoot(undefined);
+  }, [worktreeList, explorerRoot]);
+  // a path under a linked worktree gets the orange banner, wherever it came
+  // from — the explorer, a diff, or a file some subagent is editing
+  const worktreeOf = useCallback((p?: string) => {
+    if (!p || !cwd) return undefined;
+    const norm = normPath(p);
+    return worktreeList.find((w) => normPath(w.path) !== normPath(cwd)
+      && (norm === normPath(w.path) || norm.startsWith(`${normPath(w.path)}\\`)));
+  }, [worktreeList, cwd]);
+  const openWorktree = useCallback((p: string) => {
+    setExplorerRoot(cwd && normPath(p) === normPath(cwd) ? undefined : p);
+    setLeftTab('explorer');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cwd]);
+
   // open any absolute path as a read-only tab, current on-disk content;
   // an optional line scrolls/flashes there (nonce so re-clicks re-scroll),
   // an optional waypoint renders its note card above the line
@@ -560,9 +612,28 @@ export default function App() {
   }, [reviews]);
 
   const openFile = useCallback((rel: string) => {
-    if (!cwd) return;
-    openAbs(`${cwd.replace(/[\\/]+$/, '')}/${rel}`);
-  }, [cwd, openAbs]);
+    const root = explorerRoot ?? cwd;
+    if (!root) return;
+    openAbs(`${root.replace(/[\\/]+$/, '')}/${rel}`);
+  }, [cwd, explorerRoot, openAbs]);
+
+  // a changes-tree click: fetch the inline diff and open it as a tab
+  const openGitDiff = useCallback((f: GitFile, area: GitSelection['area']) => {
+    const root = gitRoot;
+    if (!root) return;
+    const abs = `${root.replace(/[\\/]+$/, '')}/${f.path}`;
+    const key = `diff:${area}:${abs}`;
+    fetch(`/api/git/diff?root=${encodeURIComponent(root)}&path=${encodeURIComponent(f.path)}&staged=${area === 'staged' ? '1' : '0'}`)
+      .then((res) => res.json())
+      .then((d) => {
+        setUserTabs((tabs) => {
+          const tab = { key, path: abs, nonce: openSeq.current++, diff: { hunks: d.hunks ?? [], area } };
+          return tabs.some((t) => t.key === key) ? tabs.map((t) => (t.key === key ? { ...t, ...tab } : t)) : [...tabs, tab];
+        });
+        setEditorTab(key);
+      })
+      .catch(() => { /* refresh will heal it */ });
+  }, [gitRoot]);
 
   // terminal file:line links; relative paths resolve against the project cwd
   const openFileRef = useCallback((p: string, line?: number) => {
@@ -575,9 +646,38 @@ export default function App() {
     setEditorTab((cur) => (cur === key ? 'pinned' : cur));
   }, []);
 
+  const closeAllFiles = useCallback(() => {
+    setUserTabs([]);
+    setTimelinePath(undefined);
+    setEditorTab('pinned');
+  }, []);
+
   const currentTool = r.view.currentToolIndex >= 0
     ? (r.steps[r.view.currentToolIndex] as (typeof r.steps[number] & { kind: 'tool' }))
     : undefined;
+
+  // the active editor view shows a file inside a linked worktree: orange
+  // banner, wherever the file came from (explorer, diff, or a subagent)
+  const activeViewPath = editorTab === 'pinned' ? pinned?.path
+    : editorTab === 'timeline' ? timelinePath
+      : userTabs.find((t) => t.key === editorTab)?.path;
+  const activeWt = worktreeOf(activeViewPath);
+
+  // agents see the git surface through workspace_state: the selection, the
+  // open diff, and the worktree — "commit these 3 files" resolves from here
+  useEffect(() => {
+    const active = userTabs.find((t) => t.key === editorTab);
+    updateSnapshot({
+      git: {
+        root: gitRoot || null,
+        selection: gitSelection,
+        commits: gitCommitSel,
+        diff: active?.diff ? { path: active.path, area: active.diff.area } : null,
+      },
+      explorer: { root: explorerRoot ?? cwd ?? null, selection: explorerSelection },
+      worktree: explorerRoot ?? null,
+    });
+  }, [gitRoot, gitSelection, gitCommitSel, editorTab, userTabs, explorerRoot, explorerSelection, cwd]);
 
   const cols = [leftOpen ? `${sideW}px 5px` : '', '1fr', rightOpen ? `5px ${rightW}px` : ''].join(' ');
 
@@ -650,6 +750,7 @@ export default function App() {
               <div className="paneTabs">
                 <div className={`paneTab ${leftTab === 'tools' ? 'active' : ''}`} onClick={() => setLeftTab('tools')}>TOOL CALLS</div>
                 <div className={`paneTab ${leftTab === 'explorer' ? 'active' : ''}`} onClick={() => setLeftTab('explorer')}>EXPLORER</div>
+                <div className={`paneTab ${leftTab === 'git' ? 'active' : ''}`} onClick={() => setLeftTab('git')}>GIT</div>
               </div>
               <div className={leftTab === 'tools' ? 'tabBody' : 'tabBody hiddenTab'}>
                 <ToolLog
@@ -660,7 +761,27 @@ export default function App() {
                 />
               </div>
               <div className={leftTab === 'explorer' ? 'tabBody' : 'tabBody hiddenTab'}>
-                <Explorer root={cwd} onOpen={openFile} />
+                {explorerRoot && cwd && normPath(explorerRoot) !== normPath(cwd) && (
+                  <div className="wtBanner">
+                    <span className="codicon codicon-git-branch" />
+                    WORKTREE · {worktreeList.find((w) => normPath(w.path) === normPath(explorerRoot))?.branch ?? explorerRoot.split(/[\\/]/).pop()}
+                    <span className="wtBannerAction" onClick={() => setExplorerRoot(undefined)}>back to main</span>
+                  </div>
+                )}
+                <Explorer key={explorerRoot ?? cwd} root={explorerRoot ?? cwd} onOpen={openFile} selection={explorerSelection} onSelect={setExplorerSelection} />
+              </div>
+              <div className={leftTab === 'git' ? 'tabBody' : 'tabBody hiddenTab'}>
+                <GitPane
+                  root={gitRoot}
+                  visible={leftTab === 'git'}
+                  selection={gitSelection}
+                  onSelect={setGitSelection}
+                  commitSelection={gitCommitSel}
+                  onSelectCommits={setGitCommitSel}
+                  onOpenDiff={openGitDiff}
+                  onOpenWorktree={openWorktree}
+                  currentRoot={explorerRoot ?? cwd ?? ''}
+                />
               </div>
             </div>
             <Splitter dir="col" onDrag={dragSide} />
@@ -685,8 +806,15 @@ export default function App() {
                 <FileTimeline steps={r.steps} pointer={r.pointer} path={timelinePath} speed={r.speed} onJump={r.jump} />
               )}
               onToggleWaypoint={toggleWaypoint}
+              onCloseAll={closeAllFiles}
               pinnedFlash={flashes.pinned ?? 0}
               pointer={r.pointer}
+              worktreeBanner={activeWt ? {
+                label: activeWt.branch ?? activeWt.path.split(/[\\/]/).pop() ?? activeWt.path,
+                // the jump only offers itself when the explorer is elsewhere
+                ...(normPath(activeWt.path) !== normPath(explorerRoot ?? cwd ?? '')
+                  ? { onOpen: () => openWorktree(activeWt.path) } : {}),
+              } : undefined}
               waypoints={r.view.waypoints}
               onOpenSnapshot={openSnapshot}
               onActivateWaypoint={activateTabWaypoint}

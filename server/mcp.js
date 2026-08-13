@@ -99,7 +99,7 @@ const WAYPOINT_TOOL = {
 const WORKSPACE_STATE_TOOL = {
   name: 'workspace_state',
   title: "See the user's McFly workspace",
-  description: "What the user has open, focused, and selected in McFly right now — open files and their flavor (pinned/read-only/snapshot/timeline), visible lines, playhead position, panels, live terminals — plus recent history: text selections, time-travel jumps, files opened. Call it whenever the user references something you cannot see: 'this', 'here', 'that file', 'what I highlighted', 'where I am'.",
+  description: "What the user has open, focused, and selected in McFly right now — open files and their flavor (pinned/read-only/snapshot/timeline), visible lines, playhead position, panels, live terminals — plus the git pane (selected staged/changed files, the open diff, the active worktree) and recent history: text selections, time-travel jumps, files opened. Call it whenever the user references something you cannot see: 'this', 'here', 'that file', 'these files', 'what I highlighted', 'where I am'. The git pane is read-only, so requests like 'commit these files' mean: read the selection here, then act with your own tools.",
   inputSchema: {
     type: 'object', additionalProperties: false,
     properties: {

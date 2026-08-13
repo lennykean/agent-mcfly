@@ -3,6 +3,52 @@
 /* dark scrollbars everywhere — thin, muted, no stark white rails */
 * { scrollbar-width: thin; scrollbar-color: #4d4d4d transparent; }
 
+/* GIT pane */
+.gitPane { flex: 1; display: flex; flex-direction: column; min-height: 0; font-size: 12px; }
+.gitChanges { flex: 1; min-height: 60px; display: flex; flex-direction: column; overflow: hidden; }
+.gitChangesScroll { flex: 1; overflow-y: auto; padding-bottom: 6px; }
+.gitHead { display: flex; align-items: center; gap: 6px; padding: 5px 10px 3px; font-size: 10px; letter-spacing: 1px; color: var(--fg-faint); flex: 0 0 auto; }
+.gitRefresh { margin-left: auto; cursor: pointer; font-size: 13px !important; }
+.gitRefresh:hover { color: var(--fg); }
+.gitSection { padding: 3px 10px 1px; font-size: 10px; text-transform: uppercase; letter-spacing: 1px; color: var(--fg-dim); }
+.gitSecHead { display: flex; align-items: center; gap: 3px; cursor: pointer; }
+.gitSecHead:hover { color: var(--fg); }
+.gitSecHead .codicon { font-size: 12px !important; }
+.gitSep { border-top: 1px solid var(--border-light); margin: 5px 0; }
+.gitRow { display: flex; align-items: center; gap: 4px; padding: 1px 8px; cursor: pointer; white-space: nowrap; overflow: hidden; color: var(--fg-dim); }
+.gitRow:hover { background: #2b2b2b; }
+.gitRow.sel { background: var(--accent-bg); color: #fff; }
+.gitRow.sel .gitStatus { color: #fff !important; }
+.gitName { overflow: hidden; text-overflow: ellipsis; }
+.gitFile .gitName { flex: 1; }
+.gitStatus { font-family: var(--font-mono); font-weight: 600; flex: 0 0 auto; }
+.gitGraph { flex: 0 0 auto; display: flex; flex-direction: column; overflow: hidden; border-top: 1px solid var(--border); }
+.gitWts { flex: 0 0 auto; display: flex; flex-direction: column; overflow: hidden; border-bottom: 1px solid var(--border); }
+.gitGraphScroll, .gitWtScroll { flex: 1; overflow: auto; }
+.ggRow { display: flex; align-items: center; gap: 6px; height: 22px; padding: 0 8px 0 4px; white-space: nowrap; overflow: hidden; cursor: pointer; }
+.ggRow:hover { background: #2b2b2b; }
+.ggRow.sel { background: var(--accent-bg); }
+.ggRow.sel .ggSubject, .ggRow.sel .ggHash { color: #fff; }
+/* the hljs wrapper paints its own background; inside diff lines the line owns the background */
+.codeline .hljs { background: transparent; }
+.ggSvg { flex: 0 0 auto; }
+.ggSubject { overflow: hidden; text-overflow: ellipsis; color: var(--fg-dim); flex: 1 1 auto; }
+.ggHash { font-family: var(--font-mono); color: var(--fg-faint); font-size: 10.5px; flex: 0 0 auto; }
+.ggRef { font-size: 9.5px; padding: 0 5px; border-radius: 7px; border: 1px solid; flex: 0 0 auto; }
+.ggBranch { color: #73c991; border-color: #73c991; }
+.ggRemote { color: #999; border-color: #666; }
+.ggTag { color: #c586c0; border-color: #c586c0; }
+.gitWtPath { margin-left: auto; color: var(--fg-faint); font-size: 10.5px; flex: 0 0 auto; }
+.gitWt.cur .gitName { color: #c63; }
+.gitWt.cur { cursor: default; }
+.gitWt.cur:hover { background: none; }
+.gitWt .codicon { font-size: 12px !important; }
+
+/* worktree awareness: actual orange, on the explorer and on file views */
+.wtBanner { background: #c63; color: #fff; font-weight: 600; font-size: 11px; padding: 3px 10px; display: flex; align-items: center; gap: 6px; white-space: nowrap; overflow: hidden; flex: 0 0 auto; }
+.wtBanner .codicon { font-size: 12px !important; }
+.wtBannerAction { margin-left: auto; cursor: pointer; text-decoration: underline; flex: 0 0 auto; }
+
 html, body, #root { height: 100%; }
 
 body {
@@ -156,6 +202,7 @@ pre, code { font-family: var(--font-mono); }
 /* explorer */
 .explorer { flex: 1; overflow: auto; padding: 2px 0; font-size: 12px; }
 .expRow { display: flex; align-items: center; gap: 4px; padding: 2px 8px; cursor: pointer; white-space: nowrap; overflow: hidden; color: var(--fg-dim); }
+.expRow.sel { background: var(--accent-bg); color: #fff; }
 .expRow:hover { background: #2a2d2e; }
 .expChevron { color: var(--fg-faint); font-size: 12px !important; flex: 0 0 auto; }
 .expIcon { font-size: 14px !important; flex: 0 0 auto; }
@@ -227,6 +274,8 @@ pre, code { font-family: var(--font-mono); }
 /* editor */
 .editorPane { flex: 1; display: flex; flex-direction: column; min-height: 0; }
 .tabs { display: flex; background: var(--bg-panel); overflow-x: auto; flex: 0 0 auto; }
+.tabsCloseAll { position: sticky; right: 0; margin-left: auto; align-self: center; padding: 4px 8px; cursor: pointer; color: var(--fg-dim); background: var(--bg-panel); }
+.tabsCloseAll:hover { color: var(--fg); }
 .tab { padding: 5px 12px; background: var(--bg-panel-alt); border-right: 1px solid var(--border); cursor: pointer; white-space: nowrap; color: #969696; font-size: 12px; }
 .tab.active { background: var(--bg); color: #fff; box-shadow: inset 0 1px 0 var(--accent); }
 .tab.pinnedTab { color: var(--purple); display: inline-flex; align-items: center; gap: 6px; }
