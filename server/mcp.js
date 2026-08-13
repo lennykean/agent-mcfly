@@ -185,13 +185,15 @@ const REVIEW_REPLY_TOOL = {
 async function reviewFetch(args, route, payload) {
   const servers = liveServers();
   if (!servers.length) return null;
-  const cwd = path.resolve(args.cwd ?? process.cwd()).toLowerCase();
-  // among cwd matches, prefer the newest server — it runs the newest code
+  const cwd = path.resolve(args.cwd ?? process.cwd());
+  // among cwd matches, prefer the newest server — it runs the newest code.
+  // The server's pwd only picks WHICH server; reviews belong to the
+  // project, so the query pwd is always the agent's own cwd.
   const byNewest = [...servers].sort((a, b) => b.started - a.started);
-  const pick = byNewest.find((s) => cwd.startsWith(String(s.pwd).toLowerCase())) ?? byNewest[0];
+  const pick = byNewest.find((s) => cwd.toLowerCase().startsWith(String(s.pwd).toLowerCase())) ?? byNewest[0];
   const res = payload
-    ? await fetch(`http://127.0.0.1:${pick.port}${route}`, { method: 'POST', body: JSON.stringify({ ...payload, pwd: pick.pwd }) })
-    : await fetch(`http://127.0.0.1:${pick.port}${route}?pwd=${encodeURIComponent(pick.pwd)}`);
+    ? await fetch(`http://127.0.0.1:${pick.port}${route}`, { method: 'POST', body: JSON.stringify({ ...payload, pwd: cwd }) })
+    : await fetch(`http://127.0.0.1:${pick.port}${route}?pwd=${encodeURIComponent(cwd)}`);
   return res.json();
 }
 
