@@ -15,6 +15,7 @@ import { HumanReview } from './components/HumanReview';
 import { HistoryBar } from './components/HistoryBar';
 import type { Review, ReviewComment, SessionMeta } from './types';
 import { normPath, resolveWaypoint, type WaypointEntry } from './lib/timeline';
+import { actionOf, focusEditor } from './lib/keys';
 import { emit, onEditorSelection, updateSnapshot, watchSelections } from './lib/workspace';
 import { applySelect, clickMode } from './lib/select';
 import { Terminal } from './components/Terminal';
@@ -252,13 +253,65 @@ export default function App() {
       const t = e.target;
       if (t instanceof HTMLInputElement || t instanceof HTMLSelectElement || t instanceof HTMLTextAreaElement) return;
       if (t instanceof Element && t.closest('.livePane')) return; // never steal keys from the live terminal
-      if (e.code === 'Space') { e.preventDefault(); r.togglePlay(); }
-      else if (e.code === 'ArrowLeft') r.stepBy(-1);
-      else if (e.code === 'ArrowRight') r.stepBy(1);
+      const action = actionOf(e, ['playPause', 'stepBack', 'stepForward']);
+      if (action === 'playPause') { e.preventDefault(); r.togglePlay(); }
+      else if (action === 'stepBack') r.stepBy(-1);
+      else if (action === 'stepForward') r.stepBy(1);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [r]);
+
+  // tab strips are navigable: left/right switch panes, down (or Enter)
+  // descends into the pane's focusable content, and content components
+  // escalate back up with their onEscapeTop
+  const leftStripRef = useRef<HTMLDivElement>(null);
+  const stripKeys = useCallback((order: readonly string[], cur: string, set: (t: string) => void) => (e: React.KeyboardEvent) => {
+    const action = actionOf(e, ['left', 'right', 'down', 'activate', 'dismiss']);
+    if (!action) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const i = Math.max(0, order.indexOf(cur));
+    if (action === 'left') set(order[(i - 1 + order.length) % order.length]);
+    else if (action === 'right') set(order[(i + 1) % order.length]);
+    else if (action === 'down' || action === 'activate') {
+      const el = (e.currentTarget as HTMLElement).parentElement?.querySelector('.tabBody:not(.hiddenTab) [tabindex]') as HTMLElement | null;
+      el?.focus();
+    } else if (action === 'dismiss') (e.target as HTMLElement).blur();
+  }, []);
+
+  // panels are separate keyboard worlds: plain arrows never cross a panel
+  // boundary, only tabs WITHIN a panel — hopping panels takes the deliberate
+  // panel* chords, caught here as unhandled keys bubble up. Each panel keeps
+  // its own state (cursors, carets live in refs), so a hop back lands where
+  // you were.
+  const lastSideFocus = useRef<HTMLElement | null>(null);
+  const workbenchKeys = useCallback((e: React.KeyboardEvent) => {
+    const action = actionOf(e, ['panelLeft', 'panelRight']);
+    if (!action) return;
+    const t = e.target as Element;
+    if (action === 'panelLeft' && !t.closest?.('.sidebar')) {
+      const back = lastSideFocus.current?.isConnected ? lastSideFocus.current : leftStripRef.current;
+      back?.focus();
+    } else if (action === 'panelRight' && !t.closest?.('.editorPane')) {
+      focusEditor();
+    } else return;
+    e.preventDefault();
+    e.stopPropagation();
+  }, []);
+
+  const sidebarKeys = useCallback((e: React.KeyboardEvent) => {
+    const action = actionOf(e, ['panelUp', 'panelDown']);
+    if (!action) return;
+    const inAgents = !!(e.target as Element).closest?.('.agentsSection');
+    if (action === 'panelUp' && !inAgents) {
+      ((e.currentTarget as HTMLElement).querySelector('.agentTree') as HTMLElement | null)?.focus();
+    } else if (action === 'panelDown' && inAgents) {
+      leftStripRef.current?.focus();
+    } else return;
+    e.preventDefault();
+    e.stopPropagation();
+  }, []);
 
   const { switchView } = r;
   const openAgent = useCallback((key: string) => switchView(key, key), [switchView]);
@@ -435,8 +488,8 @@ export default function App() {
 
   // the persistent editor text selection: survives terminal clicks, clears
   // only on a click back inside an editor body; shown char-precise
-  const [textSel, setTextSel] = useState<{ path: string; rects: { x: number; y: number; w: number; h: number }[] } | null>(null);
-  useEffect(() => { onEditorSelection((s) => setTextSel(s ? { path: s.path, rects: s.rects } : null)); }, []);
+  const [textSel, setTextSel] = useState<{ path: string; rects: { x: number; y: number; w: number; h: number }[] }[]>([]);
+  useEffect(() => { onEditorSelection((sels) => setTextSel(sels.map((s) => ({ path: s.path, rects: s.rects })))); }, []);
   useEffect(() => { setExplorerSelectionRaw([]); }, [explorerRoot]);
   const [worktreeList, setWorktreeList] = useState<{ path: string; branch?: string }[]>([]);
   const gitRoot = explorerRoot ?? cwd ?? '';
@@ -809,10 +862,10 @@ export default function App() {
         </span>
       </div>
 
-      <div className="workbench" style={{ gridTemplateColumns: cols }}>
+      <div className="workbench" style={{ gridTemplateColumns: cols }} onKeyDown={workbenchKeys}>
         {leftOpen && (
           <>
-            <div className="sidebar">
+            <div className="sidebar" onKeyDown={sidebarKeys} onFocusCapture={(e) => { lastSideFocus.current = e.target as HTMLElement; }}>
               {r.session && (
                 <>
                   <div className="agentsSection" style={{ height: agentsH }}>
@@ -822,7 +875,7 @@ export default function App() {
                   <Splitter dir="row" onDrag={dragAgents} />
                 </>
               )}
-              <div className="paneTabs">
+              <div className="paneTabs" ref={leftStripRef} tabIndex={-1} onKeyDown={stripKeys(['tools', 'explorer', 'git'], leftTab, (t) => setLeftTab(t as typeof leftTab))}>
                 <div className={`paneTab ${leftTab === 'tools' ? 'active' : ''}`} onClick={() => setLeftTab('tools')}>TOOL CALLS</div>
                 <div className={`paneTab ${leftTab === 'explorer' ? 'active' : ''}`} onClick={() => setLeftTab('explorer')}>EXPLORER</div>
                 <div className={`paneTab ${leftTab === 'git' ? 'active' : ''}`} onClick={() => setLeftTab('git')}>GIT</div>
@@ -833,6 +886,7 @@ export default function App() {
                   steps={r.steps} pointer={r.pointer} currentToolIndex={r.view.currentToolIndex} onJump={r.jump}
                   seekTick={r.seekTick}
                   visible={leftTab === 'tools'}
+                  onEscapeTop={() => leftStripRef.current?.focus()}
                 />
               </div>
               <div className={leftTab === 'explorer' ? 'tabBody' : 'tabBody hiddenTab'}>
@@ -843,7 +897,7 @@ export default function App() {
                     <span className="wtBannerAction" onClick={() => setExplorerRoot(undefined)}>back to main</span>
                   </div>
                 )}
-                <Explorer key={explorerRoot ?? cwd} root={explorerRoot ?? cwd} onOpen={openFile} selection={explorerSelection} onSelect={setExplorerSelection} />
+                <Explorer key={explorerRoot ?? cwd} root={explorerRoot ?? cwd} onOpen={openFile} selection={explorerSelection} onSelect={setExplorerSelection} onEscapeTop={() => leftStripRef.current?.focus()} />
               </div>
               <div className={leftTab === 'git' ? 'tabBody' : 'tabBody hiddenTab'}>
                 <GitPane
@@ -856,6 +910,7 @@ export default function App() {
                   onOpenDiff={openGitDiff}
                   onOpenWorktree={openWorktree}
                   currentRoot={explorerRoot ?? cwd ?? ''}
+                  onEscapeTop={() => leftStripRef.current?.focus()}
                 />
               </div>
             </div>

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Splitter } from './Splitter';
 import { fileIcon } from './Explorer';
 import { applySelect, clickMode } from '../lib/select';
+import { actionOf, focusEditor, synthClick } from '../lib/keys';
 
 export interface GitFile { path: string; status: string }
 export interface GitSelection { path: string; area: 'staged' | 'changed' }
@@ -106,7 +107,7 @@ const refClass = (r: string) => (r.startsWith('tag: ') ? 'ggTag' : r.includes('/
 // GIT pane: read-only. Changes (staged/changed trees), the commit graph, and
 // worktrees. The human selects here; agents read the selection through
 // workspace_state and act in their own terminal.
-export function GitPane({ root, visible, selection, onSelect, commitSelection, onSelectCommits, onOpenDiff, onOpenWorktree, currentRoot }: {
+export function GitPane({ root, visible, selection, onSelect, commitSelection, onSelectCommits, onOpenDiff, onOpenWorktree, currentRoot, onEscapeTop }: {
   root: string;
   visible: boolean;
   selection: GitSelection[];
@@ -116,6 +117,7 @@ export function GitPane({ root, visible, selection, onSelect, commitSelection, o
   onOpenDiff: (file: GitFile, area: 'staged' | 'changed') => void;
   onOpenWorktree: (path: string) => void;
   currentRoot: string; // what the explorer shows now, to badge the active worktree
+  onEscapeTop?: () => void; // 'up' beyond the first row: focus climbs to the tab strip
 }) {
   const [status, setStatus] = useState<{ staged: GitFile[]; changed: GitFile[]; error?: string }>({ staged: [], changed: [] });
   const [log, setLog] = useState<GitCommit[]>([]);
@@ -269,9 +271,134 @@ export function GitPane({ root, visible, selection, onSelect, commitSelection, o
     onSelectCommits(res.sel.map((h) => ({ hash: h, subject: byHash.get(h)?.subject ?? '' })));
   };
 
+  // ---- keyboard: one continuous walk from worktrees through changes into
+  // the commit tree; on the more… row, another 'down' IS the expand click.
+  // Imperative cursor + a rect-positioned bar (three scroll containers). ----
+  const kbCursor = useRef(-1);
+  const kbBar = useRef<HTMLDivElement>(null);
+  const kbRows = () => [...(paneRef.current?.querySelectorAll('.gitRow, .gitSecHead, .ggRow, .ggMore') ?? [])] as HTMLElement[];
+  const paintKb = useCallback(() => {
+    const bar = kbBar.current;
+    const pane = paneRef.current;
+    if (!bar || !pane) return;
+    const row = kbRows()[kbCursor.current];
+    if (!row) { bar.style.display = 'none'; return; }
+    const pr = pane.getBoundingClientRect();
+    const rr = row.getBoundingClientRect();
+    // clip to the row's own scroll container: a row scrolled out of view
+    // must not paint its bar over the neighboring sections
+    let top = rr.top;
+    let bottom = rr.bottom;
+    const cont = row.closest('.gitWtScroll, .gitChangesScroll, .gitGraphScroll');
+    if (cont) {
+      const cr = cont.getBoundingClientRect();
+      top = Math.max(top, cr.top);
+      bottom = Math.min(bottom, cr.bottom);
+    }
+    if (bottom - top < 2) { bar.style.display = 'none'; return; }
+    bar.style.display = 'block';
+    bar.style.top = `${top - pr.top}px`;
+    bar.style.height = `${bottom - top}px`;
+  }, []);
+  useEffect(() => {
+    const pane = paneRef.current;
+    if (!pane) return;
+    pane.addEventListener('scroll', paintKb, true); // inner containers scroll; capture catches them
+    return () => pane.removeEventListener('scroll', paintKb, true);
+  }, [paintKb]);
+  const kbKeyDown = (e: React.KeyboardEvent) => {
+    const rows = kbRows();
+    if (!rows.length) return;
+    let i = Math.max(0, Math.min(kbCursor.current, rows.length - 1));
+    const row = rows[i];
+    const selectable = (el?: HTMLElement | null) => !!el && (el.classList.contains('gitFile') || el.classList.contains('ggRow'));
+    // file rows understand 'open' (Enter or right): the diff opens and the
+    // caret lands in it
+    const action = actionOf(e, row?.classList.contains('gitFile')
+      ? ['extendUp', 'extendDown', 'select', 'extendActivate', 'open', 'up', 'down', 'left', 'dismiss']
+      : ['extendUp', 'extendDown', 'select', 'extendActivate', 'up', 'down', 'left', 'right', 'activate', 'dismiss']);
+    if (!action) return;
+    switch (action) {
+      case 'open':
+        row.click();
+        focusEditor(row.querySelector('.gitName')?.textContent?.trim() || undefined);
+        break;
+      case 'up':
+        if (i === 0 && onEscapeTop) {
+          e.preventDefault();
+          e.stopPropagation();
+          kbCursor.current = -1;
+          paintKb();
+          onEscapeTop();
+          return;
+        }
+        i = Math.max(0, i - 1);
+        break;
+      case 'down':
+        if (row?.classList.contains('ggMore')) row.click(); // deeper history; the cursor lands on the new commits
+        else i = Math.min(rows.length - 1, kbCursor.current < 0 ? 0 : i + 1);
+        break;
+      case 'extendUp':
+      case 'extendDown': {
+        i = action === 'extendUp' ? Math.max(0, i - 1) : Math.min(rows.length - 1, i + 1);
+        const target = rows[i];
+        if (selectable(target)) synthClick(target, { shiftKey: true });
+        break;
+      }
+      case 'select':
+        if (selectable(row)) synthClick(row, { ctrlKey: true });
+        break;
+      case 'extendActivate':
+        if (selectable(row)) synthClick(row, { shiftKey: true }); // range: anchor -> here
+        break;
+      case 'right':
+        if (row?.querySelector('.codicon-chevron-right')) row.click();
+        break;
+      case 'left': {
+        if (row?.querySelector('.codicon-chevron-down')) { row.click(); break; }
+        // in the changes tree, left climbs to the parent dir (or the section)
+        if (row?.classList.contains('gitFile') || row?.classList.contains('gitDir')) {
+          const depth = parseInt(row.style.paddingLeft || '0');
+          for (let j = i - 1; j >= 0; j--) {
+            const cand = rows[j];
+            const cDepth = cand.classList.contains('gitSecHead') ? -1 : parseInt(cand.style.paddingLeft || '0');
+            if ((cand.classList.contains('gitDir') || cand.classList.contains('gitSecHead')) && cDepth < depth) { i = j; break; }
+          }
+        }
+        break;
+      }
+      case 'activate': row?.click(); break;
+      case 'dismiss': (e.target as HTMLElement).blur(); kbCursor.current = -1; paintKb(); break;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    if (action !== 'dismiss') {
+      kbCursor.current = i;
+      requestAnimationFrame(() => {
+        kbRows()[kbCursor.current]?.scrollIntoView({ block: 'nearest' });
+        paintKb();
+      });
+    }
+  };
+  const kbMouseDown = (e: React.MouseEvent) => {
+    const row = (e.target as Element).closest?.('.gitRow, .gitSecHead, .ggRow, .ggMore') as HTMLElement | null;
+    if (!row) return;
+    // preventDefault stops the browser's own focus-steal to <body>;
+    // the click event still fires, so row actions are unaffected
+    e.preventDefault();
+    kbCursor.current = kbRows().indexOf(row);
+    // focus AFTER the mousedown sequence: Chromium reverts a focus made
+    // during the handler even when the default is prevented
+    requestAnimationFrame(() => {
+      paneRef.current?.focus();
+      paintKb();
+    });
+  };
+
   const mainWt = wts[0]?.path;
   return (
-    <div className="gitPane" ref={paneRef}>
+    <div className="gitPane" ref={paneRef} tabIndex={-1} onKeyDown={kbKeyDown} onMouseDown={kbMouseDown}>
+      <div className="expCursor" ref={kbBar} style={{ display: 'none' }} />
       <div className="gitWts" style={{ height: wtH }}>
         {head('WORKTREES', null, refreshWts)}
         <div className="gitWtScroll">

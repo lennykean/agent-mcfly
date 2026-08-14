@@ -4,6 +4,8 @@ import powershell from 'highlight.js/lib/languages/powershell';
 import 'highlight.js/styles/vs2015.css';
 import { TYPE_CPS, normPath, resolveWaypoint, type FileView, type WaypointEntry } from '../lib/timeline';
 import { Md } from './ChatPane';
+import { reportEditorSelection, updateSnapshot } from '../lib/workspace';
+import { EXTEND, actionOf } from '../lib/keys';
 import type { Review, ReviewComment } from '../types';
 
 hljs.registerLanguage('powershell', powershell);
@@ -34,6 +36,24 @@ function highlightHtml(content: string, path: string): string {
 }
 
 const shortName = (p: string) => p.split(/[\\/]/).slice(-1)[0];
+
+// tab-aware column math shared by every caret surface (tab stop = 8)
+const expand = (s: string, col: number) => {
+  let x = 0;
+  for (let i = 0; i < col && i < s.length; i++) x = s[i] === '\t' ? (Math.floor(x / 8) + 1) * 8 : x + 1;
+  return x;
+};
+// a block cursor sits ON a character, never past the end of the line
+const maxCol = (s: string) => Math.max(0, s.length - 1);
+const colFromX = (s: string, xChars: number) => {
+  let x = 0;
+  for (let i = 0; i < s.length; i++) {
+    const nx = s[i] === '\t' ? (Math.floor(x / 8) + 1) * 8 : x + 1;
+    if (nx > xChars) return i;
+    x = nx;
+  }
+  return maxCol(s);
+};
 
 // Width of the line-number gutter in px — must match .gutter CSS flex-basis
 // (50px total; its 12px padding is inside that, box-sizing: border-box).
@@ -109,6 +129,149 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
   // whenever the object is new, even for equal strings — and a rewrite
   // detaches every text node, killing any live text selection in the view
   const html = useMemo(() => ({ __html: highlightHtml(content, file.path) }), [content, file.path]);
+
+  // ---- read-only caret: click places it, arrows move it, the view follows.
+  // While the editor holds focus the arrows are the caret's; the playhead
+  // gets them back on blur. Fully imperative — a keypress must not cause a
+  // React render, or the cursor drags. No editing: a pointer, not a pen. ----
+  const caretRef = useRef<{ line: number; col: number } | null>(null);
+  const caretEl = useRef<HTMLDivElement>(null);
+  const wishCol = useRef(0); // sticky column across short lines
+  const preRef = useRef<HTMLPreElement>(null);
+  // CRLF files: the \r is not a column — it would give the caret a phantom
+  // cell at line end and leak into reported selection text
+  const contentLines = useMemo(() => content.split('\n').map((l) => (l.endsWith('\r') ? l.slice(0, -1) : l)), [content]);
+  const blinkTimer = useRef<number>(undefined);
+  const paintCaret = () => {
+    const el = caretEl.current;
+    const c = caretRef.current;
+    if (!el) return;
+    if (!c || !preRef.current) { el.style.display = 'none'; return; }
+    const text = contentLines[c.line - startLine] ?? '';
+    el.style.display = 'block';
+    el.style.top = `${(c.line - startLine) * LH}px`;
+    el.style.left = `${preRef.current.offsetLeft + expand(text, c.col) * charWidth()}px`;
+    el.style.width = `${Math.max(charWidth(), text[c.col] === '\t' ? charWidth() * 2 : charWidth())}px`;
+    // solid while moving; the blink resumes once the caret settles
+    el.style.animationName = 'none';
+    clearTimeout(blinkTimer.current);
+    blinkTimer.current = window.setTimeout(() => { el.style.animationName = ''; }, 350);
+    updateSnapshot({ cursor: { path: file.path, line: c.line, col: c.col } });
+  };
+  const caretSeeVisible = (line: number) => {
+    const el = ref.current;
+    if (!el) return;
+    const y = (line - startLine) * LH;
+    if (y < el.scrollTop + LH) el.scrollTop = Math.max(0, y - LH);
+    else if (y > el.scrollTop + el.clientHeight - 2 * LH) el.scrollTop = y - el.clientHeight + 2 * LH;
+  };
+  const placeCaret = (e: React.MouseEvent) => {
+    if (!window.getSelection()?.isCollapsed) return; // a drag-select is not a click
+    const pre = preRef.current;
+    if (!pre) return;
+    const rect = pre.getBoundingClientRect();
+    const line = Math.max(startLine, Math.min(startLine + total - 1, Math.floor((e.clientY - rect.top) / LH) + startLine));
+    const text = contentLines[line - startLine] ?? '';
+    const col = colFromX(text, Math.round((e.clientX - rect.left) / charWidth()));
+    wishCol.current = expand(text, col);
+    caretRef.current = { line, col };
+    selAnchor.current = null;
+    paintCaret();
+    ref.current?.focus();
+  };
+  // shift+arrows select from the caret, through the SAME reporting pipeline
+  // as a mouse drag: bands, snapshot entry, recency. The anchor is where the
+  // extension started; a plain (unshifted) move collapses it.
+  const selAnchor = useRef<{ line: number; col: number } | null>(null);
+  const reportKbSel = () => {
+    const a = selAnchor.current;
+    const c = caretRef.current;
+    const pre = preRef.current;
+    if (!a || !c || !pre) return;
+    const fwd = a.line < c.line || (a.line === c.line && a.col <= c.col);
+    const [s, e2] = fwd ? [a, c] : [c, a];
+    if (s.line === e2.line && s.col === e2.col) { reportEditorSelection({ path: file.path, clear: true }); return; }
+    const cw = charWidth();
+    const rects: { x: number; y: number; w: number; h: number }[] = [];
+    const parts: string[] = [];
+    for (let L = s.line; L <= e2.line; L++) {
+      const text = contentLines[L - startLine] ?? '';
+      const c0 = L === s.line ? s.col : 0;
+      // the block caret sits ON a character: the far end's char is included
+      const c1 = L === e2.line ? Math.min(text.length, e2.col + 1) : text.length;
+      parts.push(text.slice(c0, c1));
+      rects.push({
+        x: pre.offsetLeft + expand(text, c0) * cw,
+        y: (L - startLine) * LH,
+        w: Math.max(cw / 2, (expand(text, c1) - expand(text, c0)) * cw),
+        h: LH,
+      });
+    }
+    reportEditorSelection({ path: file.path, lines: [s.line, e2.line], text: parts.join('\n'), rects });
+  };
+  const moveCaret = (e: React.KeyboardEvent) => {
+    const c = caretRef.current;
+    if (!c) {
+      // a focused body must always have a pointer: the first key places it
+      if (!actionOf(e, ['up', 'down', 'left', 'right', 'pageUp', 'pageDown', 'home', 'end'])) return;
+      wishCol.current = 0;
+      caretRef.current = { line: startLine, col: 0 };
+      paintCaret();
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    const raw = actionOf(e, ['extendUp', 'extendDown', 'extendLeft', 'extendRight', 'extendHome', 'extendEnd', 'docHome', 'docEnd', 'up', 'down', 'left', 'right', 'pageUp', 'pageDown', 'home', 'end', 'dismiss']);
+    if (!raw) return;
+    const extending = raw in EXTEND;
+    const action = extending ? EXTEND[raw as keyof typeof EXTEND] : raw;
+    if (extending && !selAnchor.current) selAnchor.current = { ...c };
+    const el = ref.current;
+    const pageLines = el ? Math.max(4, Math.floor(el.clientHeight / LH) - 2) : 20;
+    const last = startLine + total - 1;
+    let { line, col } = c;
+    const lineText = () => contentLines[line - startLine] ?? '';
+    let vertical = false;
+    switch (action) {
+      case 'up': line = Math.max(startLine, line - 1); vertical = true; break;
+      case 'down': line = Math.min(last, line + 1); vertical = true; break;
+      case 'pageUp': line = Math.max(startLine, line - pageLines); vertical = true; break;
+      case 'pageDown': line = Math.min(last, line + pageLines); vertical = true; break;
+      case 'left':
+        if (col > 0) col -= 1;
+        else if (line > startLine) { line -= 1; col = maxCol(lineText()); }
+        break;
+      case 'right':
+        if (col < maxCol(lineText())) col += 1;
+        else if (line < last) { line += 1; col = 0; }
+        break;
+      case 'home': col = 0; break;
+      case 'end': col = maxCol(lineText()); break;
+      case 'docHome': line = startLine; col = 0; break;
+      case 'docEnd': line = last; col = maxCol(contentLines[last - startLine] ?? ''); break;
+      case 'dismiss':
+        caretRef.current = null;
+        selAnchor.current = null;
+        paintCaret();
+        updateSnapshot({ cursor: null });
+        (e.target as HTMLElement).blur();
+        break;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    if (action === 'dismiss') return;
+    const text = contentLines[line - startLine] ?? '';
+    if (vertical) col = colFromX(text, wishCol.current);
+    col = Math.min(col, maxCol(text));
+    if (!vertical) wishCol.current = expand(text, col);
+    caretRef.current = { line, col };
+    // a plain move drops the ANCHOR (the next shift starts fresh) but the
+    // selection itself persists, exactly like mouse bands do
+    if (extending) reportKbSel();
+    else selAnchor.current = null;
+    paintCaret();
+    caretSeeVisible(line);
+  };
   const total = useMemo(() => content.split('\n').length, [content]);
 
   const regionText = useMemo(() => {
@@ -186,7 +349,17 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
   const maskBH = regionBottomY - (caretY + LH);
 
   return (
-    <div className="editorBody" ref={ref} data-path={file.path} data-start-line={startLine}>
+    <div
+      className="editorBody" ref={ref} data-path={file.path} data-start-line={startLine} tabIndex={-1} onKeyDown={moveCaret}
+      onFocus={() => {
+        // keyboard entry ('open' or panel hop): a caret must exist to move;
+        // a caret already placed is WHERE YOU WERE — keep it
+        if (caretRef.current) return;
+        wishCol.current = 0;
+        caretRef.current = { line: startLine, col: 0 };
+        paintCaret();
+      }}
+    >
       <div className="codewrap" style={{ minHeight: total * LH }}>
         <div className={`gutter${onCompose ? ' composable' : ''}`}>
           {Array.from({ length: total }, (_, i) => {
@@ -269,7 +442,8 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
             })}
           </div>
         ) : null}
-        <pre className="code hljs" dangerouslySetInnerHTML={html} />
+        <pre className="code hljs" ref={preRef} dangerouslySetInnerHTML={html} onClick={placeCaret} />
+        <div className="userCaret" ref={caretEl} style={{ display: 'none' }} />
         {waypoint?.open && (() => {
           const lineTop = (waypoint.line - startLine) * LH;
           // below the line, same as review threads
@@ -386,12 +560,14 @@ function diffRows(hunks: NonNullable<FileView['render']['hunks']>, fileLines: st
   return out;
 }
 
-export function DiffView({ file, animate, onComment, fileLines }: {
+export function DiffView({ file, animate, onComment, fileLines, textBand }: {
   file: FileView; animate: boolean;
   // present = review mode: lines that exist on disk (green + context) take comments
   onComment?: (c: DiffComment) => void;
   // present = the on-disk file: hunk gaps become expandable context
   fileLines?: string[];
+  // the persistent text selection fragments, same as CodeView
+  textBand?: { rects: { x: number; y: number; w: number; h: number }[] };
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -474,6 +650,178 @@ export function DiffView({ file, animate, onComment, fileLines }: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rows, file.path, onComment !== undefined]);
 
+  // ---- the read-only caret, diff edition: walks content rows (gaps and
+  // hunk headers are skipped), same imperative zero-render machinery ----
+  const dCaret = useRef<{ row: number; col: number } | null>(null);
+  const dCaretEl = useRef<HTMLDivElement>(null);
+  const dWish = useRef(0);
+  const dBlink = useRef<number>(undefined);
+  const wrapRef = useRef<HTMLDivElement>(null);
+  const isContent = (i: number) => rows[i] && rows[i].kind !== 'hunk' && rows[i].kind !== 'gap';
+  const rowText = (i: number) => (isContent(i) ? (rows[i] as DiffRow).text : '');
+  const paintDCaret = () => {
+    const el = dCaretEl.current;
+    const c = dCaret.current;
+    const wrap = wrapRef.current;
+    if (!el || !wrap) return;
+    if (!c) { el.style.display = 'none'; return; }
+    const rowEl = wrap.children[c.row] as HTMLElement | undefined;
+    const lc = rowEl?.querySelector('.lc') as HTMLElement | null;
+    if (!lc) { el.style.display = 'none'; return; }
+    el.style.display = 'block';
+    el.style.top = `${c.row * LH}px`;
+    el.style.left = `${lc.offsetLeft + expand(rowText(c.row), c.col) * charWidth()}px`;
+    el.style.width = `${charWidth()}px`;
+    el.style.animationName = 'none';
+    clearTimeout(dBlink.current);
+    dBlink.current = window.setTimeout(() => { el.style.animationName = ''; }, 350);
+    const r2 = rows[c.row] as DiffRow;
+    updateSnapshot({ cursor: { path: file.path, line: r2.newNo ?? null, oldLine: r2.oldNo ?? null, col: c.col, in: 'diff' } });
+  };
+  const dSeeVisible = (rowIdx: number) => {
+    const el = ref.current;
+    if (!el) return;
+    const y = rowIdx * LH;
+    if (y < el.scrollTop + LH) el.scrollTop = Math.max(0, y - LH);
+    else if (y > el.scrollTop + el.clientHeight - 2 * LH) el.scrollTop = y - el.clientHeight + 2 * LH;
+  };
+  const dPlaceCaret = (e: React.MouseEvent) => {
+    if (!window.getSelection()?.isCollapsed) return;
+    const rowEl = (e.target as Element).closest?.('.codeline') as HTMLElement | null;
+    const wrap = wrapRef.current;
+    if (!rowEl || !wrap) return;
+    const idx = [...wrap.children].indexOf(rowEl);
+    if (!isContent(idx)) return;
+    const lc = rowEl.querySelector('.lc') as HTMLElement | null;
+    if (!lc) return;
+    const col = colFromX(rowText(idx), Math.round((e.clientX - lc.getBoundingClientRect().left) / charWidth()));
+    dWish.current = expand(rowText(idx), col);
+    dCaret.current = { row: idx, col };
+    dAnchor.current = null;
+    paintDCaret();
+    ref.current?.focus();
+  };
+  const dNextContent = (from: number, dir: 1 | -1) => {
+    for (let i = from + dir; i >= 0 && i < rows.length; i += dir) {
+      if (isContent(i)) return i;
+    }
+    return from;
+  };
+  const dInitCaret = () => {
+    const first = rows.findIndex((_, i2) => isContent(i2));
+    if (first < 0) return;
+    dWish.current = 0;
+    dCaret.current = { row: first, col: 0 };
+    paintDCaret();
+  };
+  // shift+arrows select from the diff caret, same pipeline as a mouse drag;
+  // gap and hunk rows contribute no text and no band
+  const dAnchor = useRef<{ row: number; col: number } | null>(null);
+  const reportDKbSel = () => {
+    const a = dAnchor.current;
+    const c = dCaret.current;
+    const wrap = wrapRef.current;
+    if (!a || !c || !wrap) return;
+    const fwd = a.row < c.row || (a.row === c.row && a.col <= c.col);
+    const [s, e2] = fwd ? [a, c] : [c, a];
+    if (s.row === e2.row && s.col === e2.col) { reportEditorSelection({ path: file.path, clear: true }); return; }
+    const cw = charWidth();
+    const rects: { x: number; y: number; w: number; h: number }[] = [];
+    const parts: string[] = [];
+    let first: DiffRow | null = null;
+    let last: DiffRow | null = null;
+    for (let R = s.row; R <= e2.row; R++) {
+      if (!isContent(R)) continue;
+      const text = rowText(R);
+      const c0 = R === s.row ? s.col : 0;
+      // the block caret sits ON a character: the far end's char is included
+      const c1 = R === e2.row ? Math.min(text.length, e2.col + 1) : text.length;
+      parts.push(text.slice(c0, c1));
+      const lc = (wrap.children[R] as HTMLElement | undefined)?.querySelector('.lc') as HTMLElement | null;
+      rects.push({
+        x: (lc?.offsetLeft ?? 0) + expand(text, c0) * cw,
+        y: R * LH,
+        w: Math.max(cw / 2, (expand(text, c1) - expand(text, c0)) * cw),
+        h: LH,
+      });
+      first ??= rows[R] as DiffRow;
+      last = rows[R] as DiffRow;
+    }
+    reportEditorSelection({
+      path: file.path,
+      lines: first?.newNo !== undefined && last?.newNo !== undefined ? [first.newNo, last.newNo] : undefined,
+      old_lines: first?.oldNo !== undefined && last?.oldNo !== undefined ? [first.oldNo, last.oldNo] : undefined,
+      view: 'diff',
+      text: parts.join('\n'),
+      rects,
+    });
+  };
+  const dMoveCaret = (e: React.KeyboardEvent) => {
+    const c = dCaret.current;
+    if (!c) {
+      // a focused body must always have a pointer: the first key places it
+      if (!actionOf(e, ['up', 'down', 'left', 'right', 'pageUp', 'pageDown', 'home', 'end'])) return;
+      dInitCaret();
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    const raw = actionOf(e, ['extendUp', 'extendDown', 'extendLeft', 'extendRight', 'extendHome', 'extendEnd', 'up', 'down', 'left', 'right', 'pageUp', 'pageDown', 'home', 'end', 'dismiss']);
+    if (!raw) return;
+    const extending = raw in EXTEND;
+    const action = extending ? EXTEND[raw as keyof typeof EXTEND] : raw;
+    if (extending && !dAnchor.current) dAnchor.current = { ...c };
+    const el = ref.current;
+    const pageLines = el ? Math.max(4, Math.floor(el.clientHeight / LH) - 2) : 20;
+    let { row, col } = c;
+    let vertical = false;
+    switch (action) {
+      case 'up': row = dNextContent(row, -1); vertical = true; break;
+      case 'down': row = dNextContent(row, 1); vertical = true; break;
+      case 'pageUp': for (let n = 0; n < pageLines; n++) row = dNextContent(row, -1); vertical = true; break;
+      case 'pageDown': for (let n = 0; n < pageLines; n++) row = dNextContent(row, 1); vertical = true; break;
+      case 'left':
+        if (col > 0) col -= 1;
+        else { const p = dNextContent(row, -1); if (p !== row) { row = p; col = maxCol(rowText(row)); } }
+        break;
+      case 'right':
+        if (col < maxCol(rowText(row))) col += 1;
+        else { const n = dNextContent(row, 1); if (n !== row) { row = n; col = 0; } }
+        break;
+      case 'home': col = 0; break;
+      case 'end': col = maxCol(rowText(row)); break;
+      case 'dismiss':
+        dCaret.current = null;
+        dAnchor.current = null;
+        paintDCaret();
+        updateSnapshot({ cursor: null });
+        (e.target as HTMLElement).blur();
+        break;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    if (action === 'dismiss') return;
+    if (vertical) col = colFromX(rowText(row), dWish.current);
+    col = Math.min(col, maxCol(rowText(row)));
+    if (!vertical) dWish.current = expand(rowText(row), col);
+    dCaret.current = { row, col };
+    // a plain move drops the ANCHOR (the next shift starts fresh) but the
+    // selection itself persists, exactly like mouse bands do
+    if (extending) reportDKbSel();
+    else dAnchor.current = null;
+    paintDCaret();
+    dSeeVisible(row);
+  };
+  useEffect(() => {
+    dCaret.current = null;
+    dAnchor.current = null;
+    if (dCaretEl.current) dCaretEl.current.style.display = 'none';
+    // an open-into-diff can land focus BEFORE the rows settle: this reset
+    // must not leave a focused body with no pointer — re-place the caret
+    if (ref.current && ref.current === document.activeElement) dInitCaret();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [file.path, file.touchedAt, rows]);
+
   // drag handling by delegation so the memoized body never re-renders
   const rowFromEvent = (e: React.MouseEvent) => {
     const t = (e.target as Element).closest?.('.dlnLive') as HTMLElement | null;
@@ -528,9 +876,16 @@ export function DiffView({ file, animate, onComment, fileLines }: {
   const composerTop = compose ? (rowIdxOfNew(compose.hunk, compose.lineEnd) + 1) * LH + 4 : 0;
 
   return (
-    <div className={`editorBody ${animate ? 'diffFlash' : ''}`} ref={ref}>
-      <div className="diffwrap" onMouseDown={onMouseDown} onMouseOver={onMouseOver} onClick={onClick}>
+    <div
+      className={`editorBody ${animate ? 'diffFlash' : ''}`} ref={ref} tabIndex={-1} onKeyDown={dMoveCaret} data-path={file.path} data-start-line={1}
+      onFocus={() => { if (!dCaret.current) dInitCaret(); }}
+    >
+      <div className="diffwrap" ref={wrapRef} onMouseDown={onMouseDown} onMouseOver={onMouseOver} onClick={(e) => { onClick(e); dPlaceCaret(e); }}>
         {body}
+        {textBand?.rects.map((rc, i) => (
+          <div key={`ts${i}`} className="textSelBand" style={{ left: rc.x, top: rc.y, width: rc.w, height: rc.h }} />
+        ))}
+        <div className="userCaret" ref={dCaretEl} style={{ display: 'none' }} />
         {band && <div className="rvBand" style={{ top: band.top, height: band.height }} />}
         {compose && (
           <div className="wpOverlayWrap" style={{ top: composerTop, transform: 'none' }}>
@@ -619,7 +974,7 @@ function FileBody({ file, animate, speed, onCompose, composer, waypoint, reviewM
   textBand?: { rects: { x: number; y: number; w: number; h: number }[] };
 }) {
   return file.mode === 'diff'
-    ? <DiffView key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} />
+    ? <DiffView key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} textBand={textBand} />
     : file.mode === 'image'
       ? <ImageView key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} />
       : <CodeView key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} speed={speed} onCompose={onCompose} composer={composer} waypoint={waypoint} reviewMarks={reviewMarks} thread={thread} scrollTo={scrollTo} textBand={textBand} />;
@@ -650,7 +1005,7 @@ export function EditorPane({
   worktreeBanner?: { label: string; onOpen?: () => void };
   onCloseAll?: () => void;
   // the persistent text selection: char-precise fragments that outlive focus
-  textSel?: { path: string; rects: { x: number; y: number; w: number; h: number }[] } | null;
+  textSel?: { path: string; rects: { x: number; y: number; w: number; h: number }[] }[];
   userTabs: UserTab[]; active: string; // 'pinned' | 'timeline' | user tab path
   onSelect: (key: string) => void; onClose: (path: string) => void;
   onOpenCurrent?: (path: string) => void;
@@ -792,9 +1147,12 @@ export function EditorPane({
       })
     : undefined;
 
-  const textBandFor = (path: string) => (textSel?.rects.length && normPath(textSel.path) === normPath(path)
-    ? { rects: textSel.rects }
-    : undefined);
+  const textBandFor = (path: string) => {
+    const s = textSel?.find((t) => t.rects.length && normPath(t.path) === normPath(path));
+    return s ? { rects: s.rects } : undefined;
+  };
+
+  // (the read-only caret lives inside CodeView itself)
 
   const historyAction = (path: string) => onOpenTimeline && (
     <span
@@ -889,6 +1247,7 @@ export function EditorPane({
               file={{ path: userTab.path, mode: 'diff', render: { verb: 'patch_file', hunks: userTab.diff.hunks }, touchedAt: userTab.nonce ?? 0 }}
               animate={false}
               fileLines={userTab.diff.fileLines}
+              textBand={textBandFor(userTab.path)}
               onComment={reviewing ? (c) => onReviewComment!({
                 path: userTab.path, line: c.line,
                 ...(c.lineEnd > c.line ? { line_end: c.lineEnd } : {}),

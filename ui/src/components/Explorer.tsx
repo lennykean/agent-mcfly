@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { applySelect, clickMode } from '../lib/select';
+import { actionOf, focusEditor, synthClick } from '../lib/keys';
 
 interface Entry { name: string; dir: boolean }
 
@@ -80,11 +81,117 @@ function Dir({ root, rel, name, depth, onFileClick, selection, onToggleSelect }:
 // file again clears the selection. Ctrl/meta toggles membership; shift
 // ranges within the clicked file's directory. The selection feeds
 // workspace_state, so an agent can resolve "these files".
-export function Explorer({ root, onOpen, selection = [], onSelect }: {
+//
+// Keyboard: up/down walk the visible rows, right expands (or steps into) a
+// folder, left collapses (or jumps to the parent), Enter acts like a click.
+// Fully imperative — cursor in a ref, an overlay bar for the highlight — so
+// keys cost no renders and the 5s listing refresh cannot wipe it.
+export function Explorer({ root, onOpen, selection = [], onSelect, onEscapeTop }: {
   root?: string; onOpen: (relPath: string) => void;
   selection?: string[]; onSelect?: (sel: string[]) => void;
+  onEscapeTop?: () => void; // 'up' beyond the first row: focus climbs to the tab strip
 }) {
   const anchor = useRef<string | null>(null);
+  const boxRef = useRef<HTMLDivElement>(null);
+  const barRef = useRef<HTMLDivElement>(null);
+  const cursor = useRef(-1);
+
+  const rowsNow = () => [...(boxRef.current?.querySelectorAll('.expRow:not(.expDim)') ?? [])] as HTMLElement[];
+  const paintBar = () => {
+    const bar = barRef.current;
+    const row = rowsNow()[cursor.current];
+    if (!bar) return;
+    if (!row) { bar.style.display = 'none'; return; }
+    bar.style.display = 'block';
+    bar.style.top = `${row.offsetTop}px`;
+    bar.style.height = `${row.offsetHeight}px`;
+    row.scrollIntoView({ block: 'nearest' });
+  };
+  const isDir = (row: HTMLElement) => !row.classList.contains('expFile');
+  const isOpenDir = (row: HTMLElement) => !!row.querySelector('.codicon-chevron-down');
+  const depthOf = (row: HTMLElement) => parseInt(row.style.paddingLeft || '0');
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    const rows = rowsNow();
+    if (!rows.length) return;
+    let i = Math.max(0, Math.min(cursor.current, rows.length - 1));
+    const row = rows[i];
+    // file rows understand 'open' (Enter or right): GO INTO the file — the
+    // caret lands in the editor; dirs keep toggle/expand on those chords
+    const action = actionOf(e, row?.classList.contains('expFile')
+      ? ['extendUp', 'extendDown', 'select', 'extendActivate', 'open', 'up', 'down', 'left', 'dismiss']
+      : ['extendUp', 'extendDown', 'select', 'extendActivate', 'up', 'down', 'left', 'right', 'activate', 'dismiss']);
+    if (!action) return;
+    switch (action) {
+      case 'open':
+        row.click();
+        focusEditor(row.textContent?.trim() || undefined);
+        break;
+      case 'extendUp':
+      case 'extendDown': {
+        i = action === 'extendUp' ? Math.max(0, i - 1) : Math.min(rows.length - 1, i + 1);
+        const target = rows[i];
+        if (target?.classList.contains('expFile')) synthClick(target, { shiftKey: true });
+        break;
+      }
+      case 'select':
+        if (row?.classList.contains('expFile') || isDir(row)) synthClick(row, { ctrlKey: true });
+        break;
+      case 'extendActivate':
+        if (row?.classList.contains('expFile')) synthClick(row, { shiftKey: true }); // range: anchor -> here
+        break;
+      case 'up':
+        if (i === 0 && onEscapeTop) {
+          e.preventDefault();
+          e.stopPropagation();
+          cursor.current = -1;
+          paintBar();
+          onEscapeTop();
+          return;
+        }
+        i = Math.max(0, i - 1);
+        break;
+      case 'down': i = Math.min(rows.length - 1, cursor.current < 0 ? 0 : i + 1); break;
+      case 'right':
+        if (row && isDir(row) && !isOpenDir(row)) row.click();
+        else i = Math.min(rows.length - 1, i + 1);
+        break;
+      case 'left': {
+        if (row && isDir(row) && isOpenDir(row)) { row.click(); break; }
+        // jump to the parent: the nearest row above with a smaller indent
+        const d = row ? depthOf(row) : 0;
+        for (let j = i - 1; j >= 0; j--) {
+          if (depthOf(rows[j]) < d) { i = j; break; }
+        }
+        break;
+      }
+      case 'activate': row?.click(); break;
+      case 'dismiss': (e.target as HTMLElement).blur(); cursor.current = -1; paintBar(); break;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    if (action !== 'dismiss') {
+      cursor.current = i;
+      // clicks mutate the tree; paint after the DOM settles
+      requestAnimationFrame(paintBar);
+    }
+  };
+
+  // clicking a row moves the cursor there and focuses the tree
+  const onMouseDown = (e: React.MouseEvent) => {
+    const row = (e.target as Element).closest?.('.expRow') as HTMLElement | null;
+    if (!row) return;
+    // preventDefault: the browser's default would move focus to <body>
+    e.preventDefault();
+    const idx = rowsNow().indexOf(row);
+    if (idx >= 0) cursor.current = idx;
+    // focus AFTER the mousedown sequence (Chromium reverts an in-handler focus)
+    requestAnimationFrame(() => {
+      boxRef.current?.focus();
+      paintBar();
+    });
+  };
+
   if (!root) return <div className="expDim expRow">no cwd recorded for this session</div>;
   const toggle = (rel: string) => {
     anchor.current = rel;
@@ -98,7 +205,8 @@ export function Explorer({ root, onOpen, selection = [], onSelect }: {
     if (mode === 'plain') onOpen(rel);
   };
   return (
-    <div className="explorer">
+    <div className="explorer" ref={boxRef} tabIndex={-1} onKeyDown={onKeyDown} onMouseDown={onMouseDown}>
+      <div className="expCursor" ref={barRef} style={{ display: 'none' }} />
       <Dir root={root} rel="" depth={0} onFileClick={fileClick} selection={selection} onToggleSelect={toggle} />
     </div>
   );

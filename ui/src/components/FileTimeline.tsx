@@ -13,7 +13,7 @@ const timeOf = (ts?: number) => (ts ? new Date(ts).toLocaleTimeString() : '');
 // here seeks the whole session (log, terminal, chat follow).
 export function FileTimeline({ steps, pointer, path, speed, onJump, textSel }: {
   steps: Step[]; pointer: number; path: string; speed: number; onJump: (index: number) => void;
-  textSel?: { path: string; rects: { x: number; y: number; w: number; h: number }[] } | null;
+  textSel?: { path: string; rects: { x: number; y: number; w: number; h: number }[] }[];
 }) {
   // steps mutates in place; length grows on append, and a pending tool step is
   // replaced in place when its result arrives — count resolved results so a
@@ -76,7 +76,7 @@ export function FileTimeline({ steps, pointer, path, speed, onJump, textSel }: {
           flashOnly
           speed={speed}
           blame={blameMarks ? { marks: blameMarks, compact: blameCompact, onJump, onToggle: () => setBlameCompact((c) => !c) } : undefined}
-          textBand={textSel?.rects.length && normPath(textSel.path) === normPath(path) ? { rects: textSel.rects } : undefined}
+          textBand={(() => { const s = textSel?.find((t) => t.rects.length && normPath(t.path) === normPath(path)); return s ? { rects: s.rects } : undefined; })()}
         />
       ) : snap?.hunks ? (
         <DiffView
