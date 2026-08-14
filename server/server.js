@@ -146,17 +146,19 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, {});
       }
     }
-    // quick pickers: grep the repo, find a file by name (tracked files)
+    // quick pickers: grep the repo, find a file by name (tracked files).
+    // Failures surface as {error} — a silent [] reads as "no matches"
     if (url.pathname === '/api/grep' || url.pathname === '/api/files') {
       const root = url.searchParams.get('root') ?? process.cwd();
       const q = url.searchParams.get('q') ?? '';
-      if (!git.okRoot(root) || !q.trim()) return json(res, 200, []);
+      if (!git.okRoot(root)) return json(res, 200, { error: `not a directory: ${root}` });
+      if (!q.trim()) return json(res, 200, []);
       try {
         return json(res, 200, url.pathname === '/api/grep'
           ? await git.grep(root, q)
           : await git.listFiles(root, q));
-      } catch {
-        return json(res, 200, []);
+      } catch (e) {
+        return json(res, 200, { error: String(e.message ?? e) });
       }
     }
     // human review: session-scoped threaded comments; the human writes from

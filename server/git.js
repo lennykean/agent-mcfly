@@ -16,19 +16,24 @@ export const okRoot = (root) => {
   try { return fs.statSync(root).isDirectory(); } catch { return false; }
 };
 
-// grep the work tree (tracked files) with an extended regex; "no matches"
-// exits 1, which is an empty result, not an error
+// exit 1 with no output is git grep's "no matches" — an empty result;
+// anything else (not a repo, git missing) must SURFACE, not silently read
+// as no matches
+const runLenient = (root, args) => new Promise((resolve, reject) => {
+  execFile('git', args, { cwd: root, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+    if (err && err.code !== 1) reject(new Error(String(stderr || err.message).split('\n')[0]));
+    else resolve(stdout);
+  });
+});
+
+// grep the work tree (tracked files) with an extended regex
 export async function grep(root, q) {
-  try {
-    const out = await run(root, ['grep', '-n', '-I', '--no-color', '-E', '--', q]);
-    return out.split('\n').filter(Boolean).slice(0, 500).map((l) => {
-      // CRLF work trees: the \r would block the $ anchor (JS "." skips \r)
-      const m = l.replace(/\r$/, '').match(/^(.+?):(\d+):(.*)$/);
-      return m && { path: m[1], line: Number(m[2]), text: m[3].slice(0, 400) };
-    }).filter(Boolean);
-  } catch {
-    return [];
-  }
+  const out = await runLenient(root, ['grep', '-n', '-I', '--no-color', '-E', '--', q]);
+  return out.split('\n').filter(Boolean).slice(0, 500).map((l) => {
+    // CRLF work trees: the \r would block the $ anchor (JS "." skips \r)
+    const m = l.replace(/\r$/, '').match(/^(.+?):(\d+):(.*)$/);
+    return m && { path: m[1], line: Number(m[2]), text: m[3].slice(0, 400) };
+  }).filter(Boolean);
 }
 
 // ---- review checklist: what differs between a base ref and the work tree ----
@@ -60,15 +65,11 @@ export async function diffAgainstRef(root, ref, file) {
 
 // find tracked files by name substring, case-insensitive
 export async function listFiles(root, q) {
-  try {
-    const out = await run(root, ['ls-files']);
-    const needle = q.toLowerCase();
-    return out.split('\n').filter(Boolean)
-      .filter((p) => p.toLowerCase().includes(needle))
-      .slice(0, 200);
-  } catch {
-    return [];
-  }
+  const out = await runLenient(root, ['ls-files']);
+  const needle = q.toLowerCase();
+  return out.split('\n').filter(Boolean)
+    .filter((p) => p.toLowerCase().includes(needle))
+    .slice(0, 200);
 }
 
 // porcelain v1 -z: "XY path\0" — renames add the original as a second record.

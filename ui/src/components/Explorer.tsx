@@ -135,6 +135,8 @@ export function Explorer({ root, onOpen, selection = [], onSelect, onEscapeTop }
         break;
       }
       case 'select':
+        // no active cursor row: the key is not ours (a leader may want it)
+        if (cursor.current < 0) return;
         if (row?.classList.contains('expFile') || isDir(row)) synthClick(row, { ctrlKey: true });
         break;
       case 'extendActivate':

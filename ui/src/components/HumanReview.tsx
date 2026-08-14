@@ -112,6 +112,8 @@ function Checklist({ cl, width, onEscapeTop, onExitDown, boxRef }: {
       case 'home': i = 0; break;
       case 'end': i = rows.length - 1; break;
       case 'select':
+        // no active cursor row: the key is not ours (a leader may want it)
+        if (cursor.i < 0) return;
         (row?.querySelector('input') as HTMLElement | null)?.click(); // tick the box
         break;
       case 'open':

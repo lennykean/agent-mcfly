@@ -138,23 +138,39 @@ export const APP_CHORDS: Action[] = [
   'tab1', 'tab2', 'tab3', 'tab4', 'tab5', 'tab6', 'tab7', 'tab8', 'tab9',
   'openTimeline', 'openReal', 'grep', 'findFile', 'closeTab', 'showKeys', 'playHome', 'playEnd',
 ];
-export const appChord = (e: { key: string; code?: string; ctrlKey: boolean; shiftKey: boolean; altKey: boolean }) =>
-  actionOf(e, APP_CHORDS) !== null;
+// a PURE look at the table: would this key fire one of these actions,
+// either as a single chord or by completing the pending sequence? No
+// arming, no counts — the terminal predicate runs on EVERY keystroke and a
+// side effect here once made every second space vanish into the leader.
+const wouldFire = (e: ChordEvent, actions: Action[]) => {
+  const prev = seqPending && Date.now() - seqPending.at < SEQ_MS ? seqPending.chords : [];
+  for (const a of actions) {
+    for (const b of TABLE[a]) {
+      if (Array.isArray(b)) {
+        if (prev.length && b.length === prev.length + 1
+          && prev.every((ev, i) => matches(ev, b[i])) && matches(e, b[prev.length])) return true;
+      } else if (matches(e, b)) return true;
+    }
+  }
+  return false;
+};
 
 // what a live terminal gives up: the app chords, plus the two panel hops
 // that actually LEAVE it (left -> editor, down -> bottom pane). ctrl+right
 // and ctrl+up still reach the shell (word-jump, scrollback) — and ctrl+
 // LETTER chords always stay with the shell (^H backspace, ^J newline),
-// so vim's ctrl+hjkl hops don't apply inside a terminal.
+// so vim's ctrl+hjkl hops don't apply inside a terminal. Leader sequences
+// never START in a terminal (space must type a space); one armed outside
+// may complete here.
 export const termReleasedChord = (e: { key: string; code?: string; ctrlKey: boolean; shiftKey: boolean; altKey: boolean }) => {
   if (tmuxOn) {
     // the tmux prefix leaves the shell, and so does the key right after it
     if (matches(e, tmuxPrefix)) return true;
     if (seqPending && Date.now() - seqPending.at < SEQ_MS && matches(seqPending.chords[0], tmuxPrefix)) return true;
   }
-  if (appChord(e)) return true;
-  if (e.ctrlKey && (e.code ?? '').startsWith('Key')) return false;
-  return actionOf(e, ['panelLeft', 'panelDown']) !== null;
+  if (e.ctrlKey && !e.altKey && (e.code ?? '').startsWith('Key')) return false;
+  if (wouldFire(e, APP_CHORDS)) return true;
+  return wouldFire(e, ['panelLeft', 'panelDown']);
 };
 
 // extend actions are their base movement plus "grow the selection": surfaces
@@ -256,6 +272,28 @@ const buildVIM = (): Partial<Record<Action, Binding[]>> => {
     findFile: [{ key: 'p', ctrl: true }, { key: 'KeyP', ctrl: true }, [L, { key: 'KeyF' }, { key: 'KeyF' }]],
     closeTab: [{ key: 'F4', ctrl: true }, [L, { key: 'KeyQ' }]],
     showKeys: [{ key: 'F1' }, [L, { key: '?', shift: true }], [L, { key: '?' }]],
+    // every pane has a bespoke leader jump (alt+shift chords stay too).
+    // git is <leader>b (branches) — g belongs to <leader>gg play-home.
+    gotoTools: [{ key: 'KeyL', alt: true, shift: true }, [L, { key: 'KeyT' }]],
+    gotoExplorer: [{ key: 'KeyE', alt: true, shift: true }, [L, { key: 'KeyE' }]],
+    gotoGit: [{ key: 'KeyG', alt: true, shift: true }, [L, { key: 'KeyB' }]],
+    gotoChat: [{ key: 'KeyC', alt: true, shift: true }, [L, { key: 'KeyC' }]],
+    gotoLiveTerm: [{ key: 'KeyV', alt: true, shift: true }, [L, { key: 'Backquote' }]],
+    gotoAgentTerm: [{ key: 'KeyA', alt: true, shift: true }, [L, { key: 'KeyA' }]],
+    gotoData: [{ key: 'KeyD', alt: true, shift: true }, { key: 'KeyS', alt: true, shift: true }, [L, { key: 'KeyD' }]],
+    gotoWayfinder: [{ key: 'KeyW', alt: true, shift: true }, [L, { key: 'KeyW' }]],
+    gotoReview: [{ key: 'KeyR', alt: true, shift: true }, { key: 'KeyU', alt: true, shift: true }, [L, { key: 'KeyR' }]],
+    gotoToolDetail: [{ key: 'KeyI', alt: true, shift: true }, [L, { key: 'KeyI' }]],
+    // editor tabs by number: <leader>1..9
+    tab1: [{ key: 'Digit1', alt: true }, [L, { key: 'Digit1' }]],
+    tab2: [{ key: 'Digit2', alt: true }, [L, { key: 'Digit2' }]],
+    tab3: [{ key: 'Digit3', alt: true }, [L, { key: 'Digit3' }]],
+    tab4: [{ key: 'Digit4', alt: true }, [L, { key: 'Digit4' }]],
+    tab5: [{ key: 'Digit5', alt: true }, [L, { key: 'Digit5' }]],
+    tab6: [{ key: 'Digit6', alt: true }, [L, { key: 'Digit6' }]],
+    tab7: [{ key: 'Digit7', alt: true }, [L, { key: 'Digit7' }]],
+    tab8: [{ key: 'Digit8', alt: true }, [L, { key: 'Digit8' }]],
+    tab9: [{ key: 'Digit9', alt: true }, [L, { key: 'Digit9' }]],
     // transport in leader semantics: <leader><leader> play/pause, h/l step,
     // gg/G to the ends — contextual panes (history bars) still apply
     playPause: [[L, L]],

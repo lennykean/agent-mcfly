@@ -110,7 +110,7 @@ function PtySession({ tool, token, cwd, platform, attachId, steal, visible, onPt
     // already pastes natively. App chords (tab jumps, terminal switch/new)
     // are declined the same way: the window handler owns them.
     term.attachCustomKeyEventHandler((e) => {
-      if (e.type === 'keydown' && termReleasedChord(e)) return false;
+      if (e.type === 'keydown' && termReleasedChord(e)) return false; // pure check: never arms sequences
       return !(e.type === 'keydown' && e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'v');
     });
 

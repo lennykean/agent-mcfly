@@ -350,6 +350,8 @@ export const GitPane = memo(function GitPane({ root, visible, selection, onSelec
         break;
       }
       case 'select':
+        // no active cursor row: the key is not ours (a leader may want it)
+        if (kbCursor.current < 0) return;
         if (selectable(row)) synthClick(row, { ctrlKey: true });
         break;
       case 'extendActivate':

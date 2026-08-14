@@ -15,7 +15,7 @@ import { HumanReview } from './components/HumanReview';
 import { HistoryBar } from './components/HistoryBar';
 import type { Review, ReviewComment, SessionMeta } from './types';
 import { normPath, resolveWaypoint, type WaypointEntry } from './lib/timeline';
-import { APP_CHORDS, actionOf, applyKeymap, focusEditor, justArmed, setLeaders, setTmuxMode, setVimMode } from './lib/keys';
+import { APP_CHORDS, actionOf, applyKeymap, focusEditor, justArmed, setLeaders, setTmuxMode, setVimMode, termReleasedChord } from './lib/keys';
 import { QuickPick } from './components/QuickPick';
 import { Settings, type McflySettings } from './components/Settings';
 import { emit, onEditorSelection, updateSnapshot, watchSelections } from './lib/workspace';
@@ -1031,6 +1031,9 @@ export default function App() {
       const textual = t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement
         || (t instanceof HTMLInputElement && !['checkbox', 'radio', 'button', 'range'].includes(t.type));
       if (textual && !el?.closest('.livePane')) return;
+      // terminal keys the shell KEPT must not touch the engine (arming a
+      // leader from typed spaces made every second space vanish)
+      if (el?.closest('.livePane') && !termReleasedChord(e)) return;
       const chord = actionOf(e, APP_CHORDS.filter((a) => a !== 'playHome' && a !== 'playEnd'));
       if (chord) {
         e.preventDefault();
@@ -1471,11 +1474,14 @@ export default function App() {
           placeholder={quick === 'grep' ? 'regex…' : 'file name…'}
           onQuery={async (q) => {
             const root = explorerRoot ?? cwd;
-            if (!root || !q.trim()) return [];
+            if (!root) return [{ label: '⚠ no project folder open', path: '' }];
+            if (!q.trim()) return [];
             const kind = quick === 'grep' ? 'grep' : 'files';
-            const res = await fetch(`/api/${kind}?root=${encodeURIComponent(root)}&q=${encodeURIComponent(q)}`)
-              .then((r2) => r2.json())
-              .catch(() => []);
+            const r2 = await fetch(`/api/${kind}?root=${encodeURIComponent(root)}&q=${encodeURIComponent(q)}`).catch(() => null);
+            if (!r2) return [{ label: '⚠ server unreachable', path: '' }];
+            if (!r2.ok) return [{ label: `⚠ server too old for /${kind} — restart mcfly after updating`, path: '' }];
+            const res = await r2.json().catch(() => null);
+            if (res && !Array.isArray(res) && res.error) return [{ label: `⚠ ${res.error}`, path: '' }];
             if (!Array.isArray(res)) return [];
             return quick === 'grep'
               ? (res as { path: string; line: number; text: string }[]).map((m) => ({
@@ -1484,6 +1490,7 @@ export default function App() {
               : (res as string[]).map((p) => ({ label: p, path: p }));
           }}
           onPick={(it) => {
+            if (!it.path) return; // an error row is information, not a target
             setQuick(null);
             const root = explorerRoot ?? cwd;
             if (!root) return;
