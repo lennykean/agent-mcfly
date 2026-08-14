@@ -50,12 +50,14 @@ function LeaderInput({ label, hint, value, placeholder, onSave }: {
 // click a row to override in vim notation). Enabling vim/tmux over custom
 // bindings asks before overwriting them; disabling a mode removes only what
 // the mode itself brought.
-export function Settings({ settings, onSave, onClose }: {
+export function Settings({ settings, initialPage = 'settings', keysVersion = 0, onSave, onClose }: {
   settings: McflySettings;
+  initialPage?: 'settings' | 'keys';
+  keysVersion?: number; // bumped AFTER the keys module absorbed the settings
   onSave: (patch: Partial<McflySettings>) => void;
   onClose: () => void;
 }) {
-  const [page, setPage] = useState<'settings' | 'keys'>('settings');
+  const [page, setPage] = useState<'settings' | 'keys'>(initialPage);
   const keymap = settings.keymap ?? {};
   const [ask, setAsk] = useState<null | { mode: 'vim' | 'tmux'; conflicts: string[] }>(null);
 
@@ -89,7 +91,7 @@ export function Settings({ settings, onSave, onClose }: {
   const [editVal, setEditVal] = useState('');
   const [editErr, setEditErr] = useState<string | null>(null);
   const [filter, setFilter] = useState('');
-  const rows = useMemo(() => bindingsFor(), [settings]); // eslint-disable-line react-hooks/exhaustive-deps
+  const rows = useMemo(() => bindingsFor(), [keysVersion]); // eslint-disable-line react-hooks/exhaustive-deps
   const shown = rows.filter((r) => !filter.trim() || r.action.toLowerCase().includes(filter.toLowerCase()));
   const startEdit = (a: Action) => {
     setEdit(a);

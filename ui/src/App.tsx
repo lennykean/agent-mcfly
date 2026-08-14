@@ -440,7 +440,7 @@ export default function App() {
   // topbar eye/LIVE buttons are in-the-moment; autoTour/autoLive are the
   // START states applied when a session opens. ----
   const [settings, setSettings] = useState<McflySettings | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState<false | 'settings' | 'keys'>(false);
   const [autoFollow, setAutoFollow] = useState(true);
   useEffect(() => {
     void fetch('/api/settings').then((r2) => r2.json()).then((s: McflySettings) => {
@@ -475,30 +475,37 @@ export default function App() {
     }, 250);
     return () => clearTimeout(t);
   }, [settings]);
-  // the keymap tables follow the settings
+  // the keymap tables follow the settings; keysVersion tells the grid the
+  // MODULE is now in sync (it reads module state, which lags one render)
+  const [keysVersion, setKeysVersion] = useState(0);
   useEffect(() => {
     if (!settings) return;
     setLeaders(settings.vimLeader, settings.tmuxPrefix);
     setVimMode(!!settings.vim);
     setTmuxMode(!!settings.tmux);
     applyKeymap(settings.keymap ?? {});
+    setKeysVersion((v) => v + 1);
   }, [settings]);
   const vimMode = !!settings?.vim;
-  // session START state: tour + live per settings, applied when a session
-  // opens and once at boot (a session may already be open when settings land)
+  // session START state: tour + live per settings, applied ONCE per session
+  // and only after its timeline has actually loaded — goLive on an empty
+  // timeline pins the pointer at 0 instead of the head
   const sessKey = r.session ? `${r.session.provider}:${r.session.id}` : null;
   const settingsRef = useRef<McflySettings | null>(null);
   settingsRef.current = settings;
+  const startApplied = useRef<string | null>(null);
   useEffect(() => {
     const s = settingsRef.current;
-    if (!sessKey || !s) return;
+    if (!sessKey || !s || startApplied.current === sessKey) return;
+    if (!r.steps.length) return; // wait for the timeline to land
+    startApplied.current = sessKey;
     setAutoFollow(s.autoTour !== false);
     if (s.autoLive) {
       setPinnedOverride(undefined);
       r.goLive();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessKey, settings === null]);
+  }, [sessKey, r.steps.length, settings === null]);
   const [flashes, setFlashes] = useState<Record<string, number>>({});
   const flash = useCallback((key: string) => {
     setFlashes((f) => ({ ...f, [key]: (f[key] ?? 0) + 1 }));
@@ -967,6 +974,7 @@ export default function App() {
             break;
           case 'grep': setQuick('grep'); break;
           case 'findFile': setQuick('file'); break;
+          case 'showKeys': setSettingsOpen('keys'); break;
           case 'closeTab':
             if (editorTab === 'timeline') { setTimelinePath(undefined); setEditorTab('pinned'); }
             else if (editorTab !== 'pinned') closeFile(editorTab);
@@ -1107,7 +1115,7 @@ export default function App() {
             <button className={bottomOpen ? 'on' : ''} title="Toggle bottom pane" onClick={() => setBottomOpen(!bottomOpen)}>⬓</button>
             <button className={rightOpen ? 'on' : ''} title="Toggle right pane" onClick={() => setRightOpen(!rightOpen)}>◨</button>
           </span>
-          <button className="tourToggle" title="Settings and keybindings" onClick={() => setSettingsOpen(true)}>
+          <button className="tourToggle" title="Settings and keybindings" onClick={() => setSettingsOpen('settings')}>
             <span className="codicon codicon-settings-gear" />
           </button>
         </span>
@@ -1324,7 +1332,13 @@ export default function App() {
       )}
 
       {settingsOpen && settings && (
-        <Settings settings={settings} onSave={saveSettings} onClose={() => setSettingsOpen(false)} />
+        <Settings
+          settings={settings}
+          initialPage={settingsOpen}
+          keysVersion={keysVersion}
+          onSave={saveSettings}
+          onClose={() => { setSettingsOpen(false); focusEditor(); }}
+        />
       )}
 
       {quick && (
@@ -1362,7 +1376,7 @@ export default function App() {
               focusEditor(it.path.split('/').pop());
             }
           }}
-          onClose={() => setQuick(null)}
+          onClose={() => { setQuick(null); focusEditor(); }}
         />
       )}
     </div>

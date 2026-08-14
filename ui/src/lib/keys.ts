@@ -15,7 +15,7 @@ export type Action =
   | 'tab1' | 'tab2' | 'tab3' | 'tab4' | 'tab5' | 'tab6' | 'tab7' | 'tab8' | 'tab9'
   | 'gotoTools' | 'gotoExplorer' | 'gotoGit' | 'gotoChat' | 'gotoLiveTerm'
   | 'gotoAgentTerm' | 'gotoData' | 'gotoWayfinder' | 'gotoReview' | 'gotoToolDetail'
-  | 'openTimeline' | 'openReal' | 'grep' | 'findFile' | 'closeTab'
+  | 'openTimeline' | 'openReal' | 'grep' | 'findFile' | 'closeTab' | 'showKeys'
   | 'termFocus' | 'termNew' | 'termNext' | 'termPrev' | 'termKill';
 
 // a chord is one key with exact modifiers; `capture: true` makes a chord
@@ -115,6 +115,8 @@ const DEFAULT: Record<Action, Binding[]> = {
   grep: [{ key: 'F', ctrl: true, shift: true }, { key: 'KeyF', ctrl: true, shift: true }],
   findFile: [{ key: 'p', ctrl: true }, { key: 'KeyP', ctrl: true }],
   closeTab: [{ key: 'F4', ctrl: true }],
+  // the cheat sheet: the settings popover opened on the keybindings grid
+  showKeys: [{ key: 'F1' }],
   // VS Code muscle memory: ctrl+` focuses/cycles terminals, ctrl+shift+` news;
   // ctrl+\ is the same jump (in a shell this outbids SIGQUIT — deliberate)
   termFocus: [{ key: 'Backquote', ctrl: true }, { key: 'Backslash', ctrl: true }],
@@ -134,7 +136,7 @@ export const APP_CHORDS: Action[] = [
   'gotoAgentTerm', 'gotoData', 'gotoWayfinder', 'gotoReview', 'gotoToolDetail',
   'bufferPrev', 'bufferNext', 'paneNext', 'panePrev',
   'tab1', 'tab2', 'tab3', 'tab4', 'tab5', 'tab6', 'tab7', 'tab8', 'tab9',
-  'openTimeline', 'openReal', 'grep', 'findFile', 'closeTab', 'playHome', 'playEnd',
+  'openTimeline', 'openReal', 'grep', 'findFile', 'closeTab', 'showKeys', 'playHome', 'playEnd',
 ];
 export const appChord = (e: { key: string; code?: string; ctrlKey: boolean; shiftKey: boolean; altKey: boolean }) =>
   actionOf(e, APP_CHORDS) !== null;
@@ -230,7 +232,8 @@ const buildVIM = (): Partial<Record<Action, Binding[]>> => {
     left: [{ key: 'ArrowLeft' }, { key: 'KeyH' }],
     right: [{ key: 'ArrowRight' }, { key: 'KeyL' }],
     home: [{ key: 'Home' }, { key: '0' }, { key: 'Digit0' }],
-    end: [{ key: 'End' }, { key: '$', shift: true }],
+    // layouts differ on whether $, ?, : need shift — accept both
+    end: [{ key: 'End' }, { key: '$', shift: true }, { key: '$' }],
     docHome: [{ key: 'Home', ctrl: true }, [{ key: 'KeyG' }, { key: 'KeyG' }]],
     docEnd: [{ key: 'End', ctrl: true }, { key: 'KeyG', shift: true }],
     visual: [{ key: 'KeyV' }],
@@ -240,7 +243,7 @@ const buildVIM = (): Partial<Record<Action, Binding[]>> => {
     wordEnd: [{ key: 'KeyE' }],
     yank: [[{ key: 'KeyY' }, { key: 'KeyY' }]],
     find: [{ key: 'f', ctrl: true }, { key: 'KeyF', ctrl: true }, { key: '/' }],
-    command: [{ key: ':', shift: true }],
+    command: [{ key: ':', shift: true }, { key: ':' }],
     // vim window nav: ctrl+hjkl hop panels (ctrl+arrows still work)
     panelLeft: [{ key: 'ArrowLeft', ctrl: true }, { key: 'KeyH', ctrl: true }],
     panelDown: [{ key: 'ArrowDown', ctrl: true }, { key: 'KeyJ', ctrl: true }],
@@ -252,6 +255,7 @@ const buildVIM = (): Partial<Record<Action, Binding[]>> => {
     grep: [{ key: 'F', ctrl: true, shift: true }, { key: 'KeyF', ctrl: true, shift: true }, [L, { key: '/' }]],
     findFile: [{ key: 'p', ctrl: true }, { key: 'KeyP', ctrl: true }, [L, { key: 'KeyF' }, { key: 'KeyF' }]],
     closeTab: [{ key: 'F4', ctrl: true }, [L, { key: 'KeyQ' }]],
+    showKeys: [{ key: 'F1' }, [L, { key: '?', shift: true }], [L, { key: '?' }]],
     // transport in leader semantics: <leader><leader> play/pause, h/l step,
     // gg/G to the ends — contextual panes (history bars) still apply
     playPause: [[L, L]],
