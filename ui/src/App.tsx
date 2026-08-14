@@ -909,6 +909,10 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target;
       const el = t instanceof Element ? t : null;
+      // typing is typing: text inputs never trigger chords and never arm
+      // sequences (the leader must not eat a space mid-sentence). The live
+      // terminal's textarea is the exception — xterm releases app chords.
+      if ((t instanceof HTMLInputElement || t instanceof HTMLSelectElement || t instanceof HTMLTextAreaElement) && !el?.closest('.livePane')) return;
       const chord = actionOf(e, APP_CHORDS.filter((a) => a !== 'playHome' && a !== 'playEnd'));
       if (chord) {
         e.preventDefault();
@@ -1001,7 +1005,6 @@ export default function App() {
         e.stopPropagation();
         return;
       }
-      if (t instanceof HTMLInputElement || t instanceof HTMLSelectElement || t instanceof HTMLTextAreaElement) return;
       if (el?.closest('.livePane')) return; // plain keys belong to the live terminal
       const action = actionOf(e, ['playPause', 'stepBack', 'stepForward', 'playHome', 'playEnd']);
       if (!action) return;

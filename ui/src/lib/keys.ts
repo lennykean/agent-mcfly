@@ -248,10 +248,17 @@ const buildVIM = (): Partial<Record<Action, Binding[]>> => {
     panelRight: [{ key: 'ArrowRight', ctrl: true }, { key: 'KeyL', ctrl: true }],
     // THE LEADER: <leader>/ grep, <leader>ff find file, <leader>q close tab.
     // The cost: the leader key alone stops doing its base job (a leader
-    // must consume its key while waiting) — Space gives up play/pause.
+    // must consume its key while waiting) — Space gives up bare play/pause.
     grep: [{ key: 'F', ctrl: true, shift: true }, { key: 'KeyF', ctrl: true, shift: true }, [L, { key: '/' }]],
     findFile: [{ key: 'p', ctrl: true }, { key: 'KeyP', ctrl: true }, [L, { key: 'KeyF' }, { key: 'KeyF' }]],
     closeTab: [{ key: 'F4', ctrl: true }, [L, { key: 'KeyQ' }]],
+    // transport in leader semantics: <leader><leader> play/pause, h/l step,
+    // gg/G to the ends — contextual panes (history bars) still apply
+    playPause: [[L, L]],
+    stepBack: [{ key: 'ArrowLeft' }, [L, { key: 'KeyH' }]],
+    stepForward: [{ key: 'ArrowRight' }, [L, { key: 'KeyL' }]],
+    playHome: [{ key: 'Home', ctrl: true, shift: true }, [L, { key: 'KeyG' }, { key: 'KeyG' }]],
+    playEnd: [{ key: 'End', ctrl: true, shift: true }, [L, { key: 'KeyG', shift: true }]],
   };
 };
 // tmux style terminal: prefix chords, working INSIDE a live terminal too
