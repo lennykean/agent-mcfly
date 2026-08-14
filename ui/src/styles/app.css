@@ -282,19 +282,33 @@ pre, code { font-family: var(--font-mono); }
 /* quick pickers float without dimming the app */
 .quickPickOverlay { position: fixed; inset: 0; display: flex; align-items: flex-start; justify-content: center; padding-top: 10vh; z-index: 10; }
 .quickPick { pointer-events: auto; width: 720px; }
-/* settings panel */
-.settingsModal { width: 560px; }
+/* settings panel: two pages, bigger than the pickers */
+.settingsModal { width: 840px; max-height: 80vh; }
+.setTabs { margin: 0 -16px; padding: 0 8px; }
+.setBody { display: flex; flex-direction: column; gap: 10px; overflow-y: auto; min-height: 0; padding-top: 4px; }
 .setRow { display: flex; align-items: baseline; gap: 8px; font-size: 12px; cursor: pointer; }
 .setLabel { font-weight: 600; }
 .setHint { color: var(--fg-faint); font-size: 11px; }
-.setKeymapHead { display: flex; flex-direction: column; gap: 2px; font-size: 12px; font-weight: 600; margin-top: 4px; }
-.setKeymap { background: var(--bg-inset); color: var(--fg); border: 1px solid var(--border-light); border-radius: 3px; padding: 6px 8px; font-family: var(--font-mono); font-size: 12px; resize: vertical; }
-.setKeymap:focus { outline: 1px solid var(--accent); }
-.setActions { display: flex; align-items: center; gap: 10px; }
-.setOk { color: var(--green); font-size: 11px; }
 .setErr { color: var(--red); font-size: 11px; }
-.setActionsList { font-size: 11px; color: var(--fg-dim); }
-.setActionsList div { margin-top: 4px; font-family: var(--font-mono); line-height: 1.7; word-spacing: 6px; }
+.setAsk { border: 1px solid rgb(234 179 8 / 40%); background: rgb(234 179 8 / 12%); border-radius: 4px; padding: 8px 10px; font-size: 12px; display: flex; flex-direction: column; gap: 8px; }
+.setSub { display: flex; align-items: baseline; gap: 8px; font-size: 12px; padding-left: 24px; }
+.setMini { flex: 0 0 110px; }
+.setMini.bad { outline: 1px solid var(--red); }
+.setAskActions { display: flex; gap: 8px; }
+/* the keybindings grid */
+.kbGrid { display: flex; flex-direction: column; border-top: 1px solid var(--border-light); }
+.kbRow { display: grid; grid-template-columns: 180px 1fr 64px 20px; align-items: center; gap: 10px; padding: 4px 6px; border-bottom: 1px solid var(--border); font-size: 12px; }
+.kbRow:hover { background: #2a2d2e; }
+.kbAction { font-family: var(--font-mono); cursor: pointer; }
+.kbKeys { display: flex; gap: 6px; flex-wrap: wrap; cursor: pointer; }
+.kbKeys kbd { background: var(--bg-inset); border: 1px solid var(--border-light); border-bottom-width: 2px; border-radius: 3px; padding: 1px 6px; font-family: var(--font-mono); font-size: 11px; }
+.kbEdit { display: flex; align-items: center; gap: 8px; }
+.kbSource { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--fg-faint); text-align: right; }
+.kbSource.kb-custom { color: var(--yellow); }
+.kbSource.kb-vim { color: var(--green); }
+.kbSource.kb-tmux { color: var(--purple); }
+.kbReset { cursor: pointer; color: var(--fg-dim); }
+.kbReset:hover { color: #fff; }
 .sbFind { display: flex; align-items: center; gap: 6px; }
 .sbSlash { opacity: 0.8; }
 .sbInput { background: var(--bg-inset); border: 1px solid var(--border-light); color: inherit; font: inherit; outline: none; padding: 0 6px; width: 240px; border-radius: 2px; }

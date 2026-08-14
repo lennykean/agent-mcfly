@@ -112,6 +112,30 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, { error: String(e.message ?? e).split('\n')[0] });
       }
     }
+    // user settings: one JSON file beside servers.json in ~/.mcfly
+    if (url.pathname === '/api/settings') {
+      const settingsPath = path.join(os.homedir(), '.mcfly', 'settings.json');
+      if (req.method === 'POST') {
+        let body = '';
+        req.on('data', (c) => { body += c; });
+        req.on('end', () => {
+          try {
+            const s = JSON.parse(body);
+            fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+            fs.writeFileSync(settingsPath, JSON.stringify(s, null, 2));
+            json(res, 200, { ok: true });
+          } catch (e) {
+            json(res, 400, { error: String(e.message ?? e) });
+          }
+        });
+        return;
+      }
+      try {
+        return json(res, 200, JSON.parse(fs.readFileSync(settingsPath, 'utf8')));
+      } catch {
+        return json(res, 200, {});
+      }
+    }
     // quick pickers: grep the repo, find a file by name (tracked files)
     if (url.pathname === '/api/grep' || url.pathname === '/api/files') {
       const root = url.searchParams.get('root') ?? process.cwd();

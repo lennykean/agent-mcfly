@@ -147,11 +147,8 @@ export const appChord = (e: { key: string; code?: string; ctrlKey: boolean; shif
 export const termReleasedChord = (e: { key: string; code?: string; ctrlKey: boolean; shiftKey: boolean; altKey: boolean }) => {
   if (tmuxOn) {
     // the tmux prefix leaves the shell, and so does the key right after it
-    if (e.ctrlKey && !e.shiftKey && !e.altKey && e.code === 'KeyB') return true;
-    if (seqPending && Date.now() - seqPending.at < SEQ_MS) {
-      const f = seqPending.chords[0];
-      if (f.ctrlKey && f.code === 'KeyB') return true;
-    }
+    if (matches(e, tmuxPrefix)) return true;
+    if (seqPending && Date.now() - seqPending.at < SEQ_MS && matches(seqPending.chords[0], tmuxPrefix)) return true;
   }
   if (appChord(e)) return true;
   if (e.ctrlKey && (e.code ?? '').startsWith('Key')) return false;
@@ -219,47 +216,54 @@ export function parseKeys(s: string): Binding | null {
   return chords.length === 1 ? chords[0] : chords;
 }
 
-// ---- the VIM overlay: enabled by the vim-mode setting, swapped over the
-// base table wholesale. Physical-key chords so caps lock and layouts hold.
-const VIM: Partial<Record<Action, Binding[]>> = {
-  // hjkl are canonical motions (arrows still work)
-  up: [{ key: 'ArrowUp' }, { key: 'KeyK' }],
-  down: [{ key: 'ArrowDown' }, { key: 'KeyJ' }],
-  left: [{ key: 'ArrowLeft' }, { key: 'KeyH' }],
-  right: [{ key: 'ArrowRight' }, { key: 'KeyL' }],
-  home: [{ key: 'Home' }, { key: '0' }, { key: 'Digit0' }],
-  end: [{ key: 'End' }, { key: '$', shift: true }],
-  docHome: [{ key: 'Home', ctrl: true }, [{ key: 'KeyG' }, { key: 'KeyG' }]],
-  docEnd: [{ key: 'End', ctrl: true }, { key: 'KeyG', shift: true }],
-  visual: [{ key: 'KeyV' }],
-  visualLine: [{ key: 'KeyV', shift: true }],
-  wordNext: [{ key: 'KeyW' }],
-  wordPrev: [{ key: 'KeyB' }],
-  wordEnd: [{ key: 'KeyE' }],
-  yank: [[{ key: 'KeyY' }, { key: 'KeyY' }]],
-  find: [{ key: 'f', ctrl: true }, { key: 'KeyF', ctrl: true }, { key: '/' }],
-  command: [{ key: ':', shift: true }],
-  // vim window nav: ctrl+hjkl hop panels (ctrl+arrows still work)
-  panelLeft: [{ key: 'ArrowLeft', ctrl: true }, { key: 'KeyH', ctrl: true }],
-  panelDown: [{ key: 'ArrowDown', ctrl: true }, { key: 'KeyJ', ctrl: true }],
-  panelUp: [{ key: 'ArrowUp', ctrl: true }, { key: 'KeyK', ctrl: true }],
-  panelRight: [{ key: 'ArrowRight', ctrl: true }, { key: 'KeyL', ctrl: true }],
-  // SPACE IS THE LEADER in vim mode: space / grep, space f f find file,
-  // space q close tab. The cost: space alone no longer play/pauses in vim
-  // mode (a leader must consume its key while waiting).
-  grep: [{ key: 'F', ctrl: true, shift: true }, { key: 'KeyF', ctrl: true, shift: true }, [{ key: ' ' }, { key: '/' }]],
-  findFile: [{ key: 'p', ctrl: true }, { key: 'KeyP', ctrl: true }, [{ key: ' ' }, { key: 'KeyF' }, { key: 'KeyF' }]],
-  closeTab: [{ key: 'F4', ctrl: true }, [{ key: ' ' }, { key: 'KeyQ' }]],
+// ---- the mode overlays are GENERATED from a configurable leader (vim: one
+// key, Space by default) and prefix (tmux style: a chord, ctrl+b by
+// default). Physical-key chords so caps lock and layouts hold. ----
+let vimLeader: KeyChord = { key: ' ' };
+let tmuxPrefix: KeyChord = { key: 'KeyB', ctrl: true };
+const buildVIM = (): Partial<Record<Action, Binding[]>> => {
+  const L = vimLeader;
+  return {
+    // hjkl are canonical motions (arrows still work)
+    up: [{ key: 'ArrowUp' }, { key: 'KeyK' }],
+    down: [{ key: 'ArrowDown' }, { key: 'KeyJ' }],
+    left: [{ key: 'ArrowLeft' }, { key: 'KeyH' }],
+    right: [{ key: 'ArrowRight' }, { key: 'KeyL' }],
+    home: [{ key: 'Home' }, { key: '0' }, { key: 'Digit0' }],
+    end: [{ key: 'End' }, { key: '$', shift: true }],
+    docHome: [{ key: 'Home', ctrl: true }, [{ key: 'KeyG' }, { key: 'KeyG' }]],
+    docEnd: [{ key: 'End', ctrl: true }, { key: 'KeyG', shift: true }],
+    visual: [{ key: 'KeyV' }],
+    visualLine: [{ key: 'KeyV', shift: true }],
+    wordNext: [{ key: 'KeyW' }],
+    wordPrev: [{ key: 'KeyB' }],
+    wordEnd: [{ key: 'KeyE' }],
+    yank: [[{ key: 'KeyY' }, { key: 'KeyY' }]],
+    find: [{ key: 'f', ctrl: true }, { key: 'KeyF', ctrl: true }, { key: '/' }],
+    command: [{ key: ':', shift: true }],
+    // vim window nav: ctrl+hjkl hop panels (ctrl+arrows still work)
+    panelLeft: [{ key: 'ArrowLeft', ctrl: true }, { key: 'KeyH', ctrl: true }],
+    panelDown: [{ key: 'ArrowDown', ctrl: true }, { key: 'KeyJ', ctrl: true }],
+    panelUp: [{ key: 'ArrowUp', ctrl: true }, { key: 'KeyK', ctrl: true }],
+    panelRight: [{ key: 'ArrowRight', ctrl: true }, { key: 'KeyL', ctrl: true }],
+    // THE LEADER: <leader>/ grep, <leader>ff find file, <leader>q close tab.
+    // The cost: the leader key alone stops doing its base job (a leader
+    // must consume its key while waiting) — Space gives up play/pause.
+    grep: [{ key: 'F', ctrl: true, shift: true }, { key: 'KeyF', ctrl: true, shift: true }, [L, { key: '/' }]],
+    findFile: [{ key: 'p', ctrl: true }, { key: 'KeyP', ctrl: true }, [L, { key: 'KeyF' }, { key: 'KeyF' }]],
+    closeTab: [{ key: 'F4', ctrl: true }, [L, { key: 'KeyQ' }]],
+  };
 };
-
-// ---- the TMUX overlay: prefix chords for terminal management. The prefix
-// works INSIDE a live terminal too (the shell gives up ctrl+b — that is
-// the tmux trade, which is why it's a mode).
-const TMUX: Partial<Record<Action, Binding[]>> = {
-  termNew: [{ key: 'Backquote', ctrl: true, shift: true }, [{ key: 'KeyB', ctrl: true }, { key: 'KeyC' }]],
-  termNext: [[{ key: 'KeyB', ctrl: true }, { key: 'KeyN' }]],
-  termPrev: [[{ key: 'KeyB', ctrl: true }, { key: 'KeyP' }]],
-  termKill: [[{ key: 'KeyB', ctrl: true }, { key: 'KeyX' }]],
+// tmux style terminal: prefix chords, working INSIDE a live terminal too
+// (the shell gives up the prefix — that is the tmux trade)
+const buildTMUX = (): Partial<Record<Action, Binding[]>> => {
+  const P = tmuxPrefix;
+  return {
+    termNew: [{ key: 'Backquote', ctrl: true, shift: true }, [P, { key: 'KeyC' }]],
+    termNext: [[P, { key: 'KeyN' }]],
+    termPrev: [[P, { key: 'KeyP' }]],
+    termKill: [[P, { key: 'KeyX' }]],
+  };
 };
 
 // ---- table assembly: base, plus the mode overlays when on, plus user
@@ -269,36 +273,70 @@ let vimOn = false;
 let tmuxOn = false;
 let userOverrides: Partial<Record<string, string[] | null>> = {};
 function rebuild() {
-  TABLE = { ...DEFAULT, ...(vimOn ? VIM : {}), ...(tmuxOn ? TMUX : {}) };
+  TABLE = { ...DEFAULT, ...(vimOn ? buildVIM() : {}), ...(tmuxOn ? buildTMUX() : {}) };
   for (const [a, seqs] of Object.entries(userOverrides)) {
     if (!(a in DEFAULT) || !seqs?.length) continue;
     const parsed = seqs.map(parseKeys).filter((b): b is Binding => b !== null);
     if (parsed.length) TABLE[a as Action] = parsed;
   }
 }
+// the leader (vim: one key) and prefix (tmux style: a chord), vim notation;
+// a sequence notation takes its first chord, bad notation keeps the default
+export function setLeaders(vimNotation?: string, tmuxNotation?: string) {
+  const chordOf = (s?: string, fallback?: KeyChord): KeyChord | undefined => {
+    if (!s?.trim()) return fallback;
+    const b = parseKeys(s.trim());
+    if (!b) return fallback;
+    return Array.isArray(b) ? b[0] : b;
+  };
+  vimLeader = chordOf(vimNotation, { key: ' ' }) ?? { key: ' ' };
+  tmuxPrefix = chordOf(tmuxNotation, { key: 'KeyB', ctrl: true }) ?? { key: 'KeyB', ctrl: true };
+  rebuild();
+}
 export function applyKeymap(overrides: Partial<Record<string, string[] | null>>) {
   userOverrides = overrides;
   rebuild();
 }
+// persistence lives in ~/.mcfly/settings.json (the App loads it and drives
+// these switches); the module holds no storage of its own
 export function setVimMode(on: boolean) {
   vimOn = on;
-  try { localStorage.setItem('mcfly.vimMode', on ? '1' : '0'); } catch { /* private mode */ }
   rebuild();
 }
 export const isVimMode = () => vimOn;
 export function setTmuxMode(on: boolean) {
   tmuxOn = on;
-  try { localStorage.setItem('mcfly.tmuxMode', on ? '1' : '0'); } catch { /* private mode */ }
   rebuild();
 }
 export const isTmuxMode = () => tmuxOn;
-try {
-  vimOn = localStorage.getItem('mcfly.vimMode') === '1';
-  tmuxOn = localStorage.getItem('mcfly.tmuxMode') === '1';
-  const raw = localStorage.getItem('mcfly.keymap');
-  if (raw) userOverrides = JSON.parse(raw);
-} catch { /* a bad keymap must never brick the keyboard: defaults stand */ }
-rebuild();
+
+// ---- introspection for the settings panel ----
+const keyLabel = (c: KeyChord) => {
+  if (c.capture) return '<char>';
+  let k = c.key ?? '';
+  if (k.startsWith('Key')) k = k.slice(3).toLowerCase();
+  else if (k.startsWith('Digit')) k = k.slice(5);
+  else if (k === ' ') k = 'Space';
+  const mods = [c.ctrl && 'Ctrl', c.alt && 'Alt', c.shift && 'Shift'].filter(Boolean);
+  return [...mods, k].join('+');
+};
+export const formatBinding = (b: Binding) => (Array.isArray(b) ? b.map(keyLabel).join(' ') : keyLabel(b));
+// the actions an overlay would (re)bind — the settings panel asks before a
+// mode overwrites custom bindings on these
+export const overlayActions = (which: 'vim' | 'tmux') => Object.keys(which === 'vim' ? buildVIM() : buildTMUX()) as Action[];
+// the effective grid: every action, its live bindings, and where they came from
+export function bindingsFor(): { action: Action; bindings: string[]; source: 'base' | 'vim' | 'tmux' | 'custom' }[] {
+  const vim = vimOn ? buildVIM() : {};
+  const tmux = tmuxOn ? buildTMUX() : {};
+  return ACTIONS.map((a) => ({
+    action: a,
+    bindings: TABLE[a].map(formatBinding),
+    source: userOverrides[a]?.length ? 'custom' as const
+      : tmux[a] ? 'tmux' as const
+        : vim[a] ? 'vim' as const
+          : 'base' as const,
+  }));
+}
 
 // ---- the resolver ----
 // One pending buffer serves the whole app (keyboards are serial):

@@ -15,9 +15,9 @@ import { HumanReview } from './components/HumanReview';
 import { HistoryBar } from './components/HistoryBar';
 import type { Review, ReviewComment, SessionMeta } from './types';
 import { normPath, resolveWaypoint, type WaypointEntry } from './lib/timeline';
-import { APP_CHORDS, actionOf, focusEditor, justArmed, setTmuxMode, setVimMode } from './lib/keys';
+import { APP_CHORDS, actionOf, applyKeymap, focusEditor, justArmed, setLeaders, setTmuxMode, setVimMode } from './lib/keys';
 import { QuickPick } from './components/QuickPick';
-import { Settings } from './components/Settings';
+import { Settings, type McflySettings } from './components/Settings';
 import { emit, onEditorSelection, updateSnapshot, watchSelections } from './lib/workspace';
 import { applySelect, clickMode } from './lib/select';
 import { Terminal } from './components/Terminal';
@@ -436,14 +436,69 @@ export default function App() {
 
   // auto-follow: ON = the view jumps to activity (tour-guide mode); OFF = the
   // same things happen quietly, and the tab that had activity flashes instead
-  const [autoFollow, setAutoFollow] = useStoredBool('autoFollow', true);
-  // vim mode: swaps the vim keymap overlay in and shows the status bar
-  const [vimMode, setVimModeState] = useStoredBool('vimMode', false);
-  useEffect(() => { setVimMode(vimMode); }, [vimMode]);
-  // tmux mode: ctrl+b prefix chords manage terminals, from inside them too
-  const [tmuxMode, setTmuxModeState] = useStoredBool('tmuxMode', false);
-  useEffect(() => { setTmuxMode(tmuxMode); }, [tmuxMode]);
+  // ---- settings: persisted server-side in ~/.mcfly/settings.json. The
+  // topbar eye/LIVE buttons are in-the-moment; autoTour/autoLive are the
+  // START states applied when a session opens. ----
+  const [settings, setSettings] = useState<McflySettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [autoFollow, setAutoFollow] = useState(true);
+  useEffect(() => {
+    void fetch('/api/settings').then((r2) => r2.json()).then((s: McflySettings) => {
+      if (s && Object.keys(s).length) { setSettings(s); return; }
+      // first run: adopt the old localStorage toggles, then persist
+      let keymap: Record<string, string[]> = {};
+      try { keymap = JSON.parse(localStorage.getItem('mcfly.keymap') ?? '{}'); } catch { /* fresh */ }
+      const seed: McflySettings = {
+        vim: localStorage.getItem('mcfly.vimMode') === '1',
+        tmux: localStorage.getItem('mcfly.tmuxMode') === '1',
+        autoTour: localStorage.getItem('mcfly.autoFollow') !== '0',
+        autoLive: false,
+        keymap,
+      };
+      setSettings(seed);
+      void fetch('/api/settings', { method: 'POST', body: JSON.stringify(seed) });
+    }).catch(() => setSettings({ autoTour: true }));
+  }, []);
+  // saves go through state, persistence follows in an effect: an updater
+  // must stay pure (React may re-invoke it), and the debounce keeps posts
+  // ordered — last state wins
+  const settingsDirty = useRef(false);
+  const saveSettings = useCallback((patch: Partial<McflySettings>) => {
+    settingsDirty.current = true;
+    setSettings((cur) => ({ ...(cur ?? {}), ...patch }));
+  }, []);
+  useEffect(() => {
+    if (!settings || !settingsDirty.current) return;
+    const t = setTimeout(() => {
+      settingsDirty.current = false;
+      void fetch('/api/settings', { method: 'POST', body: JSON.stringify(settings) }).catch(() => { /* runtime state stands */ });
+    }, 250);
+    return () => clearTimeout(t);
+  }, [settings]);
+  // the keymap tables follow the settings
+  useEffect(() => {
+    if (!settings) return;
+    setLeaders(settings.vimLeader, settings.tmuxPrefix);
+    setVimMode(!!settings.vim);
+    setTmuxMode(!!settings.tmux);
+    applyKeymap(settings.keymap ?? {});
+  }, [settings]);
+  const vimMode = !!settings?.vim;
+  // session START state: tour + live per settings, applied when a session
+  // opens and once at boot (a session may already be open when settings land)
+  const sessKey = r.session ? `${r.session.provider}:${r.session.id}` : null;
+  const settingsRef = useRef<McflySettings | null>(null);
+  settingsRef.current = settings;
+  useEffect(() => {
+    const s = settingsRef.current;
+    if (!sessKey || !s) return;
+    setAutoFollow(s.autoTour !== false);
+    if (s.autoLive) {
+      setPinnedOverride(undefined);
+      r.goLive();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessKey, settings === null]);
   const [flashes, setFlashes] = useState<Record<string, number>>({});
   const flash = useCallback((key: string) => {
     setFlashes((f) => ({ ...f, [key]: (f[key] ?? 0) + 1 }));
@@ -1044,14 +1099,14 @@ export default function App() {
           >
             <span className={`codicon codicon-${autoFollow ? 'eye' : 'eye-closed'}`} />
           </button>
-          <button className="tourToggle" title="Settings: keyboard modes, custom keymap" onClick={() => setSettingsOpen(true)}>
-            <span className="codicon codicon-settings-gear" />
-          </button>
           <span className="layoutToggles">
             <button className={leftOpen ? 'on' : ''} title="Toggle left pane" onClick={() => setLeftOpen(!leftOpen)}>◧</button>
             <button className={bottomOpen ? 'on' : ''} title="Toggle bottom pane" onClick={() => setBottomOpen(!bottomOpen)}>⬓</button>
             <button className={rightOpen ? 'on' : ''} title="Toggle right pane" onClick={() => setRightOpen(!rightOpen)}>◨</button>
           </span>
+          <button className="tourToggle" title="Settings and keybindings" onClick={() => setSettingsOpen(true)}>
+            <span className="codicon codicon-settings-gear" />
+          </button>
         </span>
       </div>
 
@@ -1265,16 +1320,8 @@ export default function App() {
         />
       )}
 
-      {settingsOpen && (
-        <Settings
-          tour={autoFollow}
-          onTour={(v) => { if (v) setPinnedOverride(undefined); setAutoFollow(v); }}
-          vim={vimMode}
-          onVim={setVimModeState}
-          tmux={tmuxMode}
-          onTmux={setTmuxModeState}
-          onClose={() => setSettingsOpen(false)}
-        />
+      {settingsOpen && settings && (
+        <Settings settings={settings} onSave={saveSettings} onClose={() => setSettingsOpen(false)} />
       )}
 
       {quick && (
