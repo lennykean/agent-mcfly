@@ -390,6 +390,9 @@ export function resolve(e: ChordEvent, actions: Action[]): Resolved | null {
   return null;
 }
 
+// every bindable action, for the settings panel's keymap editor
+export const ACTIONS = Object.keys(DEFAULT) as Action[];
+
 // the classic API: surfaces that don't care about counts or captures
 export function actionOf(e: ChordEvent, actions: Action[]): Action | null {
   return resolve(e, actions)?.action ?? null;

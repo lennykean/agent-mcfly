@@ -17,6 +17,7 @@ import type { Review, ReviewComment, SessionMeta } from './types';
 import { normPath, resolveWaypoint, type WaypointEntry } from './lib/timeline';
 import { APP_CHORDS, actionOf, focusEditor, justArmed, setTmuxMode, setVimMode } from './lib/keys';
 import { QuickPick } from './components/QuickPick';
+import { Settings } from './components/Settings';
 import { emit, onEditorSelection, updateSnapshot, watchSelections } from './lib/workspace';
 import { applySelect, clickMode } from './lib/select';
 import { Terminal } from './components/Terminal';
@@ -442,6 +443,7 @@ export default function App() {
   // tmux mode: ctrl+b prefix chords manage terminals, from inside them too
   const [tmuxMode, setTmuxModeState] = useStoredBool('tmuxMode', false);
   useEffect(() => { setTmuxMode(tmuxMode); }, [tmuxMode]);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [flashes, setFlashes] = useState<Record<string, number>>({});
   const flash = useCallback((key: string) => {
     setFlashes((f) => ({ ...f, [key]: (f[key] ?? 0) + 1 }));
@@ -1042,23 +1044,8 @@ export default function App() {
           >
             <span className={`codicon codicon-${autoFollow ? 'eye' : 'eye-closed'}`} />
           </button>
-          <button
-            className={`tourToggle ${vimMode ? 'on' : ''}`}
-            title={vimMode
-              ? 'Vim mode ON: hjkl, visual mode, yy, gg/G, / find, : commands, status bar. Click for normal keys.'
-              : 'Vim mode OFF: normal keys only. Click for vim motions and the command bar.'}
-            onClick={() => setVimModeState(!vimMode)}
-          >
-            <span className="vimBadge">vim</span>
-          </button>
-          <button
-            className={`tourToggle ${tmuxMode ? 'on' : ''}`}
-            title={tmuxMode
-              ? 'Tmux mode ON: ctrl+b c new terminal, ctrl+b n/p cycle — the shell gives up ctrl+b. Click to return it.'
-              : 'Tmux mode OFF: ctrl+b stays with the shell. Click for prefix terminal chords.'}
-            onClick={() => setTmuxModeState(!tmuxMode)}
-          >
-            <span className="vimBadge">tmux</span>
+          <button className="tourToggle" title="Settings: keyboard modes, custom keymap" onClick={() => setSettingsOpen(true)}>
+            <span className="codicon codicon-settings-gear" />
           </button>
           <span className="layoutToggles">
             <button className={leftOpen ? 'on' : ''} title="Toggle left pane" onClick={() => setLeftOpen(!leftOpen)}>◧</button>
@@ -1275,6 +1262,18 @@ export default function App() {
           onPick={applyPick}
           onGo={scopeFolder}
           onClose={() => { setPickerOpen(false); setPickerSeed(undefined); }}
+        />
+      )}
+
+      {settingsOpen && (
+        <Settings
+          tour={autoFollow}
+          onTour={(v) => { if (v) setPinnedOverride(undefined); setAutoFollow(v); }}
+          vim={vimMode}
+          onVim={setVimModeState}
+          tmux={tmuxMode}
+          onTmux={setTmuxModeState}
+          onClose={() => setSettingsOpen(false)}
         />
       )}
 

@@ -282,6 +282,19 @@ pre, code { font-family: var(--font-mono); }
 /* quick pickers float without dimming the app */
 .quickPickOverlay { position: fixed; inset: 0; display: flex; align-items: flex-start; justify-content: center; padding-top: 10vh; z-index: 10; }
 .quickPick { pointer-events: auto; width: 720px; }
+/* settings panel */
+.settingsModal { width: 560px; }
+.setRow { display: flex; align-items: baseline; gap: 8px; font-size: 12px; cursor: pointer; }
+.setLabel { font-weight: 600; }
+.setHint { color: var(--fg-faint); font-size: 11px; }
+.setKeymapHead { display: flex; flex-direction: column; gap: 2px; font-size: 12px; font-weight: 600; margin-top: 4px; }
+.setKeymap { background: var(--bg-inset); color: var(--fg); border: 1px solid var(--border-light); border-radius: 3px; padding: 6px 8px; font-family: var(--font-mono); font-size: 12px; resize: vertical; }
+.setKeymap:focus { outline: 1px solid var(--accent); }
+.setActions { display: flex; align-items: center; gap: 10px; }
+.setOk { color: var(--green); font-size: 11px; }
+.setErr { color: var(--red); font-size: 11px; }
+.setActionsList { font-size: 11px; color: var(--fg-dim); }
+.setActionsList div { margin-top: 4px; font-family: var(--font-mono); line-height: 1.7; word-spacing: 6px; }
 .sbFind { display: flex; align-items: center; gap: 6px; }
 .sbSlash { opacity: 0.8; }
 .sbInput { background: var(--bg-inset); border: 1px solid var(--border-light); color: inherit; font: inherit; outline: none; padding: 0 6px; width: 240px; border-radius: 2px; }
