@@ -5,15 +5,15 @@ interface ProviderInfo { provider: string; count: number }
 
 const PROVIDER_LABELS: Record<string, string> = { 'claude-code': 'claude', codex: 'codex' };
 
-// Open-session flow: pwd -> agent type (detected from session history) ->
-// type-ahead over that project's sessions. Live terminals live in the
-// LIVE TERMINAL pane, not here.
-export function SessionPicker({ initialPwd, initialProvider, initialFilter, onPick, onOpenFolder, onClose }: {
+// Open-session flow: pwd -> go (scopes the workbench to the folder) ->
+// agent type -> type-ahead over that project's sessions; picking a session
+// is optional. The ... button browses folders through the server.
+export function SessionPicker({ initialPwd, initialProvider, initialFilter, onPick, onGo, onClose }: {
   initialPwd: string;
   initialProvider?: string; // pre-select this agent and load its sessions
   initialFilter?: string; // pre-fill the filter (e.g. an ambiguous title match)
   onPick: (pwd: string, session: SessionMeta) => void;
-  onOpenFolder?: (pwd: string) => void;
+  onGo?: (pwd: string) => void; // scope the workbench to this folder, no session needed
   onClose: () => void;
 }) {
   // the currently-open project wins; last-used pwd only seeds a bare open
@@ -25,6 +25,27 @@ export function SessionPicker({ initialPwd, initialProvider, initialFilter, onPi
   const [hi, setHi] = useState(0);
   const [scanning, setScanning] = useState(false);
   const filterRef = useRef<HTMLInputElement>(null);
+
+  // server-backed folder browser (the native dialog cannot give real paths)
+  const [browse, setBrowse] = useState<string | null>(null);
+  const [browseDirs, setBrowseDirs] = useState<string[] | null>(null);
+  useEffect(() => {
+    if (browse === null) return;
+    setBrowseDirs(null);
+    fetch(`/api/fs/list?root=${encodeURIComponent(browse)}&path=`)
+      .then((r) => r.json())
+      .then((d) => setBrowseDirs(Array.isArray(d) ? d.filter((e) => e.dir).map((e) => e.name) : []))
+      .catch(() => setBrowseDirs([]));
+  }, [browse]);
+  const atRoot = browse !== null && /^[A-Za-z]:[\\/]?$/.test(browse);
+  const browseUp = () => setBrowse((b) => (b === null || atRoot ? b : b.replace(/[\\/][^\\/]+[\\/]?$/, '') || b));
+  const go = (raw: string) => {
+    // typed paths arrive messy: collapse repeated separators (UNC prefix stays)
+    const dir = raw.trim().replace(/(?!^)[\\/]{2,}/g, '\\').replace(/[\\/]+$/, '');
+    if (!dir) return;
+    onGo?.(dir);
+    onClose();
+  };
 
   const loadProviders = (dir: string) => {
     if (!dir.trim()) return;
@@ -95,16 +116,32 @@ export function SessionPicker({ initialPwd, initialProvider, initialFilter, onPi
             className="pickerInput"
             value={pwd}
             onChange={(e) => setPwd(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') loadProviders(pwd); }}
+            onKeyDown={(e) => { if (e.key === 'Enter') go(pwd); }}
             spellCheck={false}
           />
-          <button onClick={() => loadProviders(pwd)}>go</button>
-          {onOpenFolder && (
-            <button onClick={() => onOpenFolder(pwd)} title="Scope to this folder without loading a session">
-              open folder only
-            </button>
-          )}
+          <button title="Browse folders" onClick={() => setBrowse((b) => (b === null ? (pwd.trim() || 'C:\\') : null))}>…</button>
+          <button onClick={() => go(pwd)} title="Open this folder; pick a session below if you want one">go</button>
         </div>
+
+        {browse !== null && (
+          <div className="folderBrowse">
+            <div className="fbPath" title={browse}>{browse}</div>
+            <div className="fbList">
+              {!atRoot && <div className="fbRow" onClick={browseUp}><span className="codicon codicon-arrow-up" /> ..</div>}
+              {browseDirs === null && <div className="pickerHint">listing…</div>}
+              {browseDirs?.map((d) => (
+                <div key={d} className="fbRow" onClick={() => setBrowse(`${browse.replace(/[\\/]+$/, '')}\\${d}`)}>
+                  <span className="codicon codicon-folder expFolder" /> {d}
+                </div>
+              ))}
+              {browseDirs?.length === 0 && <div className="pickerHint">no subfolders</div>}
+            </div>
+            <div className="fbActions">
+              <button onClick={() => go(browse)}>open this folder</button>
+              <button onClick={() => setBrowse(null)}>cancel</button>
+            </div>
+          </div>
+        )}
 
         {scanning && <div className="pickerHint">scanning session history…</div>}
         {providers && (

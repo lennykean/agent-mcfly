@@ -55,13 +55,15 @@ function charWidth(): number {
 // to be typed live — in full color. A region band flashes and fades after.
 export interface BlameMark { text: string; title: string; step: number }
 
-export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, marks, onCompose, composer, reviewMarks, thread, scrollTo }: {
+export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, marks, onCompose, composer, reviewMarks, thread, scrollTo, textBand }: {
   file: FileView; animate: boolean; speed: number;
   flashOnly?: boolean;
   blame?: { marks: (BlameMark | null)[]; compact?: boolean; onJump: (step: number) => void; onToggle?: () => void };
   waypoint?: { line: number; note: string; open: boolean; onToggle: () => void };
   // tour-driven scroll target; human expand/collapse must never move the view
   scrollTo?: { line: number; nonce: number };
+  // the persistent text selection fragments (native selection dies on focus loss)
+  textBand?: { rects: { x: number; y: number; w: number; h: number }[] };
   // all waypoint markers for this file: resolved ones open their card here;
   // stale ones are just something to GO TO — click opens the snapshot tab
   marks?: { line: number; stale: boolean; onClick: () => void }[];
@@ -103,7 +105,10 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dragSel !== null]);
 
-  const html = useMemo(() => highlightHtml(content, file.path), [content, file.path]);
+  // the {__html} OBJECT must be identity-stable: React 19 rewrites innerHTML
+  // whenever the object is new, even for equal strings — and a rewrite
+  // detaches every text node, killing any live text selection in the view
+  const html = useMemo(() => ({ __html: highlightHtml(content, file.path) }), [content, file.path]);
   const total = useMemo(() => content.split('\n').length, [content]);
 
   const regionText = useMemo(() => {
@@ -264,7 +269,7 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
             })}
           </div>
         ) : null}
-        <pre className="code hljs" dangerouslySetInnerHTML={{ __html: html }} />
+        <pre className="code hljs" dangerouslySetInnerHTML={html} />
         {waypoint?.open && (() => {
           const lineTop = (waypoint.line - startLine) * LH;
           // below the line, same as review threads
@@ -280,6 +285,9 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
             </div>
           );
         })()}
+        {textBand?.rects.map((rc, i) => (
+          <div key={`ts${i}`} className="textSelBand" style={{ left: rc.x, top: rc.y, width: rc.w, height: rc.h }} />
+        ))}
         {dragSel && (
           <div className="rvBand" style={{ top: (Math.min(dragSel.from, dragSel.to) - startLine) * LH, height: (Math.abs(dragSel.to - dragSel.from) + 1) * LH }} />
         )}
@@ -336,37 +344,42 @@ export function DiffView({ file, animate }: { file: FileView; animate: boolean }
     ref.current?.scrollTo({ top: 0 });
   }, [file.path, file.touchedAt]);
   // per-line highlighting: stateless, so multi-line constructs lose their
-  // color across lines — the standard trade every inline diff viewer makes
-  const lang = LANGS[file.path.split('.').pop()?.toLowerCase() ?? ''];
-  const hi = (code: string) => {
-    if (!lang) return undefined;
-    try { return hljs.highlight(code, { language: lang, ignoreIllegals: true }).value; } catch { return undefined; }
-  };
+  // color across lines — the standard trade every inline diff viewer makes.
+  // The whole body is memoized so re-renders keep stable {__html} objects:
+  // React 19 rewrites innerHTML on object identity, which kills selections.
+  const body = useMemo(() => {
+    const lang = LANGS[file.path.split('.').pop()?.toLowerCase() ?? ''];
+    const hi = (code: string) => {
+      if (!lang) return undefined;
+      try { return hljs.highlight(code, { language: lang, ignoreIllegals: true }).value; } catch { return undefined; }
+    };
+    return (file.render.hunks ?? []).map((h, hi2) => (
+      <div key={hi2}>
+        <div className="codeline hunk">
+          <span className="ln" />
+          <span>{h.oldStart >= 1 ? `@@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@` : '@@'}</span>
+        </div>
+        {h.lines.map((line, li) => {
+          const cls = line.startsWith('+') ? 'added' : line.startsWith('-') ? 'removed' : '';
+          const html = hi(line.slice(1));
+          return (
+            <div key={li} className={`codeline ${cls}`}>
+              <span className="ln" />
+              <span className="lc">
+                {line[0] ?? ' '}
+                {html !== undefined
+                  ? <span className="hljs" dangerouslySetInnerHTML={{ __html: html }} />
+                  : line.slice(1)}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+    ));
+  }, [file.render.hunks, file.path]);
   return (
     <div className={`editorBody ${animate ? 'diffFlash' : ''}`} ref={ref}>
-      {(file.render.hunks ?? []).map((h, hi2) => (
-        <div key={hi2}>
-          <div className="codeline hunk">
-            <span className="ln" />
-            <span>{h.oldStart >= 1 ? `@@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@` : '@@'}</span>
-          </div>
-          {h.lines.map((line, li) => {
-            const cls = line.startsWith('+') ? 'added' : line.startsWith('-') ? 'removed' : '';
-            const html = hi(line.slice(1));
-            return (
-              <div key={li} className={`codeline ${cls}`}>
-                <span className="ln" />
-                <span className="lc">
-                  {line[0] ?? ' '}
-                  {html !== undefined
-                    ? <span className="hljs" dangerouslySetInnerHTML={{ __html: html }} />
-                    : line.slice(1)}
-                </span>
-              </div>
-            );
-          })}
-        </div>
-      ))}
+      {body}
     </div>
   );
 }
@@ -436,7 +449,7 @@ function ThreadCard({ comment, stale, onReply, onResolve, onViewOriginal, onClos
   );
 }
 
-function FileBody({ file, animate, speed, onCompose, composer, waypoint, reviewMarks, thread, scrollTo }: {
+function FileBody({ file, animate, speed, onCompose, composer, waypoint, reviewMarks, thread, scrollTo, textBand }: {
   file: FileView; animate: boolean; speed: number;
   onCompose?: (line: number, lineEnd: number) => void;
   composer?: { line: number; lineEnd: number; onSubmit: (body: string) => void; onCancel: () => void };
@@ -444,12 +457,13 @@ function FileBody({ file, animate, speed, onCompose, composer, waypoint, reviewM
   reviewMarks?: ComponentProps<typeof CodeView>['reviewMarks'];
   thread?: ComponentProps<typeof CodeView>['thread'];
   scrollTo?: { line: number; nonce: number };
+  textBand?: { rects: { x: number; y: number; w: number; h: number }[] };
 }) {
   return file.mode === 'diff'
     ? <DiffView key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} />
     : file.mode === 'image'
       ? <ImageView key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} />
-      : <CodeView key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} speed={speed} onCompose={onCompose} composer={composer} waypoint={waypoint} reviewMarks={reviewMarks} thread={thread} scrollTo={scrollTo} />;
+      : <CodeView key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} speed={speed} onCompose={onCompose} composer={composer} waypoint={waypoint} reviewMarks={reviewMarks} thread={thread} scrollTo={scrollTo} textBand={textBand} />;
 }
 
 // context capture for a review comment: the anchor line and its surroundings,
@@ -469,13 +483,15 @@ function captureContext(content: string, startLine: number, line: number) {
 export function EditorPane({
   pinned, animate, speed, userTabs, active, onSelect, onClose, onOpenCurrent,
   timelinePath, onOpenTimeline, onCloseTimeline, timelineBody, onToggleWaypoint, onCloseAll,
-  waypoints, onOpenSnapshot, onActivateWaypoint, pinnedFlash = 0, pointer = 0, worktreeBanner,
+  waypoints, onOpenSnapshot, onActivateWaypoint, pinnedFlash = 0, pointer = 0, worktreeBanner, textSel,
   activeReview, focusThreadId, onReviewComment, onReviewReply, onReviewResolve, onReviewViewOriginal,
 }: {
   pinned?: FileView; animate: boolean; speed: number; pointer?: number;
   // the active view shows a file inside a linked worktree: say so, in orange
   worktreeBanner?: { label: string; onOpen?: () => void };
   onCloseAll?: () => void;
+  // the persistent text selection: char-precise fragments that outlive focus
+  textSel?: { path: string; rects: { x: number; y: number; w: number; h: number }[] } | null;
   userTabs: UserTab[]; active: string; // 'pinned' | 'timeline' | user tab path
   onSelect: (key: string) => void; onClose: (path: string) => void;
   onOpenCurrent?: (path: string) => void;
@@ -616,6 +632,10 @@ export function EditorPane({
           : { line, stale: false, onClick: () => onActivateWaypoint?.(userTab.key, line, w.note) };
       })
     : undefined;
+
+  const textBandFor = (path: string) => (textSel?.rects.length && normPath(textSel.path) === normPath(path)
+    ? { rects: textSel.rects }
+    : undefined);
 
   const historyAction = (path: string) => onOpenTimeline && (
     <span
@@ -780,6 +800,7 @@ export function EditorPane({
               onClose: () => setOpenThreadId(undefined),
             } : undefined}
             scrollTo={scrollTo}
+            textBand={textBandFor(userTab.path)}
           />
         )
       ) : pinned ? (
@@ -805,6 +826,7 @@ export function EditorPane({
             onClose: () => setOpenThreadId(undefined),
           } : undefined}
           scrollTo={scrollTo}
+          textBand={textBandFor(pinned.path)}
         />
       ) : (
         <div className="emptyHint">files the agent reads will open here</div>

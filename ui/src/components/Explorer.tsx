@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { applySelect, clickMode } from '../lib/select';
 
 interface Entry { name: string; dir: boolean }
 
@@ -16,7 +17,7 @@ export function fileIcon(name: string): string {
 
 function Dir({ root, rel, name, depth, onFileClick, selection, onToggleSelect }: {
   root: string; rel: string; name?: string; depth: number;
-  onFileClick: (rel: string, additive: boolean) => void;
+  onFileClick: (rel: string, ev: React.MouseEvent, dirFiles: string[]) => void;
   selection: string[]; onToggleSelect: (rel: string) => void;
 }) {
   const [open, setOpen] = useState(depth === 0);
@@ -61,7 +62,8 @@ function Dir({ root, rel, name, depth, onFileClick, selection, onToggleSelect }:
             const fileRel = `${rel}${rel ? '/' : ''}${e.name}`;
             return (
               <div key={e.name} className={`expRow expFile ${selection.includes(fileRel) ? 'sel' : ''}`} style={{ paddingLeft: 24 + depth * 12 }}
-                onClick={(ev) => onFileClick(fileRel, ev.ctrlKey || ev.metaKey)}>
+                onClick={(ev) => onFileClick(fileRel, ev, entries.filter((x) => !x.dir).map((x) => `${rel}${rel ? '/' : ''}${x.name}`))}
+                onMouseDown={(ev) => { if (ev.shiftKey) ev.preventDefault(); }}>
                 <span className={`codicon codicon-${fileIcon(e.name)} expIcon`} />
                 {e.name}
               </div>
@@ -75,19 +77,25 @@ function Dir({ root, rel, name, depth, onFileClick, selection, onToggleSelect }:
 }
 
 // Plain click on a file selects it and opens it; clicking the sole selected
-// file again clears the selection. Ctrl/meta-click toggles membership (files
-// and folders, multi) without opening. The selection feeds workspace_state,
-// so an agent can resolve "these files" from what is highlighted here.
+// file again clears the selection. Ctrl/meta toggles membership; shift
+// ranges within the clicked file's directory. The selection feeds
+// workspace_state, so an agent can resolve "these files".
 export function Explorer({ root, onOpen, selection = [], onSelect }: {
   root?: string; onOpen: (relPath: string) => void;
   selection?: string[]; onSelect?: (sel: string[]) => void;
 }) {
+  const anchor = useRef<string | null>(null);
   if (!root) return <div className="expDim expRow">no cwd recorded for this session</div>;
-  const toggle = (rel: string) => onSelect?.(selection.includes(rel) ? selection.filter((s) => s !== rel) : [...selection, rel]);
-  const fileClick = (rel: string, additive: boolean) => {
-    if (additive) { toggle(rel); return; }
-    onSelect?.(selection.length === 1 && selection[0] === rel ? [] : [rel]);
-    onOpen(rel);
+  const toggle = (rel: string) => {
+    anchor.current = rel;
+    onSelect?.(selection.includes(rel) ? selection.filter((s) => s !== rel) : [...selection, rel]);
+  };
+  const fileClick = (rel: string, ev: React.MouseEvent, dirFiles: string[]) => {
+    const mode = clickMode(ev);
+    const res = applySelect(dirFiles, selection, anchor.current, rel, mode);
+    anchor.current = res.anchor;
+    onSelect?.(res.sel);
+    if (mode === 'plain') onOpen(rel);
   };
   return (
     <div className="explorer">

@@ -1,9 +1,8 @@
 import { useMemo, useState } from 'react';
-import { fileChain } from '../lib/timeline';
+import { fileChain, normPath } from '../lib/timeline';
 import { CodeView, DiffView, type BlameMark } from './EditorPane';
+import { HistoryBar } from './HistoryBar';
 import type { Step } from '../types';
-
-const VERB_ICONS: Record<string, string> = { read_file: 'file', patch_file: 'edit', write_file: 'new-file' };
 
 const timeOf = (ts?: number) => (ts ? new Date(ts).toLocaleTimeString() : '');
 
@@ -12,8 +11,9 @@ const timeOf = (ts?: number) => (ts ? new Date(ts).toLocaleTimeString() : '');
 // reconstructed state (with blame) where the chain is clean, or the raw patch
 // where it isn't. Selection is a PROJECTION of the global playhead: navigating
 // here seeks the whole session (log, terminal, chat follow).
-export function FileTimeline({ steps, pointer, path, speed, onJump }: {
+export function FileTimeline({ steps, pointer, path, speed, onJump, textSel }: {
   steps: Step[]; pointer: number; path: string; speed: number; onJump: (index: number) => void;
+  textSel?: { path: string; rects: { x: number; y: number; w: number; h: number }[] } | null;
 }) {
   // steps mutates in place; length grows on append, and a pending tool step is
   // replaced in place when its result arrives — count resolved results so a
@@ -32,10 +32,6 @@ export function FileTimeline({ steps, pointer, path, speed, onJump }: {
   }, [touches, pointer]);
 
   const ordinal = useMemo(() => new Map(touches.map((t, i) => [t.index, i + 1])), [touches]);
-
-  const at = selected === null ? -1 : touches.findIndex((t) => t.index === selected);
-  const prev = at > 0 ? touches[at - 1] : null;
-  const next = at >= 0 && at < touches.length - 1 ? touches[at + 1] : (at < 0 && touches.length ? touches[0] : null);
 
   const snap = selected === null ? null : snapshots.get(selected);
   const step = selected === null ? null : steps[selected];
@@ -57,39 +53,9 @@ export function FileTimeline({ steps, pointer, path, speed, onJump }: {
     });
   }, [snap, touches, ordinal, steps, blameCompact]);
 
-  const winStart = at < 0 ? 0 : Math.max(0, Math.min(at - 1, touches.length - 3));
-  const win = touches.slice(winStart, winStart + 3);
-
   return (
     <div className="fileTimeline">
-      {touches.length > 0 && (
-        <div className="ftPager">
-          <button disabled={at === 0} onClick={() => onJump(touches[0].index)} title="First touch">
-            <span className="codicon codicon-debug-reverse-continue" />
-          </button>
-          <button disabled={!prev} onClick={() => prev && onJump(prev.index)} title="Previous touch">
-            <span className="codicon codicon-chevron-left" />
-          </button>
-          {win.map((t) => (
-            <span
-              key={t.index}
-              className={`ftChip ${t.index === selected ? 'active' : ''} ${snapshots.get(t.index)?.content === undefined && t.verb === 'patch_file' ? 'raw' : ''}`}
-              title={`step ${t.index} · ${timeOf(t.ts)}`}
-              onClick={() => onJump(t.index)}
-            >
-              <span className={`codicon codicon-${VERB_ICONS[t.verb] ?? 'gear'}`} />
-              #{ordinal.get(t.index)}
-            </span>
-          ))}
-          <span className="ftCount">{at < 0 ? 0 : at + 1}/{touches.length}</span>
-          <button disabled={!next} onClick={() => next && onJump(next.index)} title="Next touch">
-            <span className="codicon codicon-chevron-right" />
-          </button>
-          <button disabled={at === touches.length - 1} onClick={() => onJump(touches.at(-1)!.index)} title="Last touch">
-            <span className="codicon codicon-debug-continue" />
-          </button>
-        </div>
-      )}
+      <HistoryBar positions={touches.map((t) => t.index)} pointer={pointer} onJump={onJump} />
 
       {!touches.length ? (
         <div className="emptyHint">no touches of this file in the session</div>
@@ -110,6 +76,7 @@ export function FileTimeline({ steps, pointer, path, speed, onJump }: {
           flashOnly
           speed={speed}
           blame={blameMarks ? { marks: blameMarks, compact: blameCompact, onJump, onToggle: () => setBlameCompact((c) => !c) } : undefined}
+          textBand={textSel?.rects.length && normPath(textSel.path) === normPath(path) ? { rects: textSel.rects } : undefined}
         />
       ) : snap?.hunks ? (
         <DiffView

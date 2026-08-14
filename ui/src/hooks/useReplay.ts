@@ -170,18 +170,21 @@ export function useReplay() {
     });
   }, [viewKey]);
 
+  // time travel of any kind — jump, step, scrub — drops both live-follow
+  // and play: you moved the playhead, so the playhead stops moving itself
   const jump = useCallback((index: number) => {
     setAnimate(null);
     setSeekTick((t) => t + 1);
     setPointers((prev) => ({ ...prev, [viewKey]: index }));
-    if (index < head) setFollow(false);
-  }, [viewKey, head]);
+    setFollow(false);
+    setPlaying(false);
+  }, [viewKey]);
 
-  // moving the pointer never exits play mode — only the pause button does
   const stepBy = useCallback((delta: number) => {
     setAnimate(null);
     setSeekTick((t) => t + 1);
     setFollow(false);
+    setPlaying(false);
     setPointers((prev) => {
       const cur = Math.min(prev[viewKey] ?? head, head);
       return { ...prev, [viewKey]: Math.max(0, Math.min(head, cur + delta)) };
@@ -195,6 +198,11 @@ export function useReplay() {
     setFollow(true);
     setPlaying(true);
   }, [viewKey, head]);
+
+  const stopLive = useCallback(() => {
+    setFollow(false);
+    setPlaying(false);
+  }, []);
 
   // All agents discovered across loaded timelines (full file, not pointer-limited).
   const agents = useMemo<AgentNode[]>(() => {
@@ -274,7 +282,7 @@ export function useReplay() {
     viewKey, switchView, agents,
     steps, pointer, head, view, animateIndex, follow, seekTick,
     playing, togglePlay, speed, setSpeed,
-    jump, stepBy, goLive,
+    jump, stepBy, goLive, stopLive,
   };
 }
 

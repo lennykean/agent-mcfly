@@ -98,7 +98,9 @@ const server = http.createServer(async (req, res) => {
       if (!git.okRoot(root)) return json(res, 400, { error: 'bad root' });
       try {
         if (url.pathname === '/api/git/status') return json(res, 200, await git.status(root));
-        if (url.pathname === '/api/git/log') return json(res, 200, await git.log(root, Number(url.searchParams.get('limit') ?? 150)));
+        if (url.pathname === '/api/git/log') {
+          return json(res, 200, await git.log(root, Number(url.searchParams.get('limit') ?? 150), Number(url.searchParams.get('skip') ?? 0)));
+        }
         if (url.pathname === '/api/git/worktrees') return json(res, 200, await git.worktrees(root));
         if (url.pathname === '/api/git/diff') {
           const file = url.searchParams.get('path') ?? '';

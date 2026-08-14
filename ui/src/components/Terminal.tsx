@@ -46,7 +46,12 @@ export function Terminal({ blocks, animatedAt, speed, seekTick = 0, visible = tr
   // pin to bottom; user scrolling up holds position until they return or time travel
   const stuck = useStickyScroll(ref, [blocks.length, animatedAt], `${seekTick}:${visible}`, visible);
   const scrollBottom = () => {
-    if (stuck.current) ref.current?.scrollTo({ top: ref.current.scrollHeight });
+    // double rAF: the freshly mounted output must LAY OUT before the pin
+    // lands, or a tall block leaves the pane mid-content
+    if (!stuck.current) return;
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (stuck.current) ref.current?.scrollTo({ top: ref.current.scrollHeight });
+    }));
   };
 
   // ponytail: render last 60 blocks only; full scrollback when someone asks

@@ -16,9 +16,11 @@ export const okRoot = (root) => {
   try { return fs.statSync(root).isDirectory(); } catch { return false; }
 };
 
-// porcelain v1 -z: "XY path\0" — renames add the original as a second record
+// porcelain v1 -z: "XY path\0" — renames add the original as a second record.
+// -uall lists the files INSIDE untracked directories: without it git emits a
+// bare "dir/" entry, which renders as a nameless row in the tree
 export async function status(root) {
-  const out = await run(root, ['status', '--porcelain=v1', '-z']);
+  const out = await run(root, ['status', '--porcelain=v1', '-z', '--untracked-files=all']);
   const entries = out.split('\0').filter(Boolean);
   const staged = [];
   const changed = [];
@@ -28,6 +30,7 @@ export async function status(root) {
     const y = e[1];
     const file = e.slice(3);
     if (x === 'R' || x === 'C') i++; // skip the rename origin record
+    if (file.endsWith('/')) continue; // a bare directory entry has no diff to show
     if (x === '?') { changed.push({ path: file, status: 'U' }); continue; }
     if (x === '!') continue; // ignored
     if (x !== ' ') staged.push({ path: file, status: x });
@@ -36,9 +39,11 @@ export async function status(root) {
   return { staged, changed };
 }
 
-export async function log(root, limit = 150) {
+export async function log(root, limit = 150, skip = 0) {
+  // the ancestry of HEAD, like the VS Code graph: merged branches show as
+  // converging lanes; branches that never contributed to HEAD stay out
   const fmt = '%H\x1f%P\x1f%an\x1f%ct\x1f%D\x1f%s';
-  const out = await run(root, ['log', '--all', '--topo-order', `-n${limit}`, `--pretty=format:${fmt}`]);
+  const out = await run(root, ['log', 'HEAD', '--topo-order', `-n${limit}`, `--skip=${skip}`, `--pretty=format:${fmt}`]);
   return out.split('\n').filter(Boolean).map((line) => {
     const [hash, parents, author, time, refs, subject] = line.split('\x1f');
     return {

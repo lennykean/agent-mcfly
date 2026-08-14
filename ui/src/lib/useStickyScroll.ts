@@ -17,11 +17,27 @@ export function useStickyScroll(
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
+    // scroll position can only RE-engage: big content mounting fires reflow
+    // scroll events that briefly measure far-from-bottom, and those must
+    // never break the pin. Only user intent disengages: wheeling up, or
+    // grabbing the scrollbar.
     const onScroll = () => {
-      stuck.current = el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM;
+      if (el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM) stuck.current = true;
+    };
+    const onWheel = (e: WheelEvent) => {
+      if (e.deltaY < 0) stuck.current = false;
+    };
+    const onDown = (e: MouseEvent) => {
+      if (e.offsetX >= el.clientWidth) stuck.current = false; // the scrollbar
     };
     el.addEventListener('scroll', onScroll, { passive: true });
-    return () => el.removeEventListener('scroll', onScroll);
+    el.addEventListener('wheel', onWheel, { passive: true });
+    el.addEventListener('mousedown', onDown);
+    return () => {
+      el.removeEventListener('scroll', onScroll);
+      el.removeEventListener('wheel', onWheel);
+      el.removeEventListener('mousedown', onDown);
+    };
   }, [ref]);
 
   // time travel or reveal: re-engage and snap

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Splitter } from './Splitter';
 import { fileIcon } from './Explorer';
+import { applySelect, clickMode } from '../lib/select';
 
 export interface GitFile { path: string; status: string }
 export interface GitSelection { path: string; area: 'staged' | 'changed' }
@@ -120,6 +121,7 @@ export function GitPane({ root, visible, selection, onSelect, commitSelection, o
   const [log, setLog] = useState<GitCommit[]>([]);
   const [wts, setWts] = useState<GitWorktree[]>([]);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [secClosed, setSecClosed] = useState<Set<string>>(new Set());
   // worktrees: two rows by default; changes and tree split the rest 50/50
   const [wtH, dragWt] = usePersistedHeight('gitWtH', 72);
   const [treePct, setTreePct] = useState(() => Number(localStorage.getItem('mcfly.gitTreePct')) || 46);
@@ -132,12 +134,28 @@ export function GitPane({ root, visible, selection, onSelect, commitSelection, o
       .then((d) => setStatus(d.error ? { staged: [], changed: [], error: d.error } : d))
       .catch(() => { /* keep last */ });
   }, [root]);
+  const LOG_PAGE = 150;
+  const [logDone, setLogDone] = useState(false);
   const refreshLog = useCallback(() => {
-    fetch(`/api/git/log?root=${encodeURIComponent(root)}&limit=150`)
+    fetch(`/api/git/log?root=${encodeURIComponent(root)}&limit=${LOG_PAGE}`)
       .then((r) => r.json())
-      .then((d) => setLog(Array.isArray(d) ? d : []))
+      .then((d) => {
+        if (!Array.isArray(d)) return;
+        setLog(d);
+        setLogDone(d.length < LOG_PAGE);
+      })
       .catch(() => { /* keep last */ });
   }, [root]);
+  const loadMoreLog = useCallback(() => {
+    fetch(`/api/git/log?root=${encodeURIComponent(root)}&limit=${LOG_PAGE}&skip=${log.length}`)
+      .then((r) => r.json())
+      .then((d) => {
+        if (!Array.isArray(d)) return;
+        setLog((cur) => [...cur, ...d]);
+        setLogDone(d.length < LOG_PAGE);
+      })
+      .catch(() => { /* retry by clicking again */ });
+  }, [root, log.length]);
   const refreshWts = useCallback(() => {
     fetch(`/api/git/worktrees?root=${encodeURIComponent(root)}`)
       .then((r) => r.json())
@@ -160,20 +178,35 @@ export function GitPane({ root, visible, selection, onSelect, commitSelection, o
   const stagedTree = useMemo(() => buildTree(status.staged), [status.staged]);
   const changedTree = useMemo(() => buildTree(status.changed), [status.changed]);
 
-  const isSelected = (path: string, area: GitSelection['area']) => selection.some((s) => s.path === path && s.area === area);
+  // visible files in render order (dirs first, collapsed subtrees skipped):
+  // the flat list shift-ranges walk over, spanning both sections
+  const SEP = '\u0000';
+  const fileKey = (area: GitSelection['area'], path: string) => `${area}${SEP}${path}`;
+  const flatFiles = useMemo(() => {
+    const out: string[] = [];
+    const walk = (n: Node, area: GitSelection['area']) => {
+      if (n.path && collapsed.has(`${area}:${n.path}`)) return;
+      n.dirs.forEach((d) => walk(d, area));
+      n.files.forEach((f) => out.push(fileKey(area, f.path)));
+    };
+    if (!secClosed.has('staged')) walk(stagedTree, 'staged');
+    if (!secClosed.has('changed')) walk(changedTree, 'changed');
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stagedTree, changedTree, collapsed, secClosed]);
+  const fileAnchor = useRef<string | null>(null);
   const clickFile = (e: React.MouseEvent, f: GitFile, area: GitSelection['area']) => {
-    if (e.ctrlKey || e.metaKey) {
-      onSelect(isSelected(f.path, area)
-        ? selection.filter((s) => !(s.path === f.path && s.area === area))
-        : [...selection, { path: f.path, area }]);
-      return;
-    }
-    // plain click: select just this one; clicking the sole selection again clears it
-    onSelect(isSelected(f.path, area) && selection.length === 1 ? [] : [{ path: f.path, area }]);
-    onOpenDiff(f, area);
+    const mode = clickMode(e);
+    const res = applySelect(flatFiles, selection.map((s) => fileKey(s.area, s.path)), fileAnchor.current, fileKey(area, f.path), mode);
+    fileAnchor.current = res.anchor;
+    onSelect(res.sel.map((k) => {
+      const i = k.indexOf(SEP);
+      return { area: k.slice(0, i) as GitSelection['area'], path: k.slice(i + 1) };
+    }));
+    if (mode === 'plain') onOpenDiff(f, area);
   };
 
-  const [secClosed, setSecClosed] = useState<Set<string>>(new Set());
+  const isSelected = (path: string, area: GitSelection['area']) => selection.some((s) => s.path === path && s.area === area);
   const toggleSec = (k: string) => setSecClosed((c) => {
     const next = new Set(c);
     if (next.has(k)) next.delete(k); else next.add(k);
@@ -208,6 +241,7 @@ export function GitPane({ root, visible, selection, onSelect, commitSelection, o
               style={{ paddingLeft: 8 + (n.path ? depth + 1 : depth) * 12 + 14 }}
               title={f.path}
               onClick={(e) => clickFile(e, f, area)}
+              onMouseDown={(e) => { if (e.shiftKey) e.preventDefault(); }}
             >
               <span className={`codicon codicon-${fileIcon(f.path)} expIcon`} />
               <span className="gitName">{f.path.split('/').pop()}</span>
@@ -227,15 +261,12 @@ export function GitPane({ root, visible, selection, onSelect, commitSelection, o
   );
 
   const commitSelected = (h: string) => commitSelection.some((c) => c.hash === h);
+  const commitAnchor = useRef<string | null>(null);
   const clickCommit = (e: React.MouseEvent, c: GitCommit) => {
-    const entry = { hash: c.hash, subject: c.subject };
-    if (e.ctrlKey || e.metaKey) {
-      onSelectCommits(commitSelected(c.hash)
-        ? commitSelection.filter((x) => x.hash !== c.hash)
-        : [...commitSelection, entry]);
-    } else {
-      onSelectCommits(commitSelected(c.hash) && commitSelection.length === 1 ? [] : [entry]);
-    }
+    const res = applySelect(log.map((x) => x.hash), commitSelection.map((x) => x.hash), commitAnchor.current, c.hash, clickMode(e));
+    commitAnchor.current = res.anchor;
+    const byHash = new Map(log.map((x) => [x.hash, x]));
+    onSelectCommits(res.sel.map((h) => ({ hash: h, subject: byHash.get(h)?.subject ?? '' })));
   };
 
   const mainWt = wts[0]?.path;
@@ -305,6 +336,7 @@ export function GitPane({ root, visible, selection, onSelect, commitSelection, o
               className={`ggRow ${commitSelected(row.c.hash) ? 'sel' : ''}`}
               title={`${row.c.hash.slice(0, 10)} · ${row.c.author} · ${new Date(row.c.time).toLocaleString()}`}
               onClick={(e) => clickCommit(e, row.c)}
+              onMouseDown={(e) => { if (e.shiftKey) e.preventDefault(); }}
             >
               <GraphCell row={row} />
               {row.c.refs.map((r) => <span key={r} className={`ggRef ${refClass(r)}`}>{refChip(r)}</span>)}
@@ -313,6 +345,9 @@ export function GitPane({ root, visible, selection, onSelect, commitSelection, o
             </div>
           ))}
           {!rows.length && <div className="emptyHint">no commits</div>}
+          {rows.length > 0 && !logDone && (
+            <div className="ggMore" onClick={loadMoreLog}>more…</div>
+          )}
         </div>
       </div>
 

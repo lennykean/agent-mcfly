@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useReplay } from './hooks/useReplay';
 import { AgentTree } from './components/AgentTree';
 import { ChatPane } from './components/ChatPane';
@@ -12,9 +12,11 @@ import { SessionPicker } from './components/SessionPicker';
 import { Wayfinder } from './components/Wayfinder';
 import { Splitter } from './components/Splitter';
 import { HumanReview } from './components/HumanReview';
+import { HistoryBar } from './components/HistoryBar';
 import type { Review, ReviewComment, SessionMeta } from './types';
 import { normPath, resolveWaypoint, type WaypointEntry } from './lib/timeline';
-import { emit, updateSnapshot, watchSelections } from './lib/workspace';
+import { emit, onEditorSelection, updateSnapshot, watchSelections } from './lib/workspace';
+import { applySelect, clickMode } from './lib/select';
 import { Terminal } from './components/Terminal';
 import { ToolDetail } from './components/ToolDetail';
 import { ToolLog } from './components/ToolLog';
@@ -137,13 +139,15 @@ export default function App() {
   }, [pwd, applyPick]);
 
   const { clearSession } = r;
-  const openFolderOnly = useCallback((newPwd: string) => {
+  // "go" in the picker: the workbench opens the folder BARE, right away —
+  // no session until one is picked. The picker stays open offering them.
+  const scopeFolder = useCallback((newPwd: string) => {
     setPwd(newPwd);
-    setPickerOpen(false);
     setUserTabs([]);
     setEditorTab('pinned');
     clearSession();
     history.pushState(null, '', `?${new URLSearchParams({ pwd: newPwd })}`);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clearSession]);
 
   // Session detection: a tool started in the live terminal announces itself by
@@ -346,6 +350,9 @@ export default function App() {
   useEffect(() => {
     const s = r.view.currentToolIndex >= 0 ? r.steps[r.view.currentToolIndex] : undefined;
     if (!s || s.kind !== 'tool') return;
+    // run_table belongs to the DATA pane even when its result fell back to
+    // an exec-shaped error — the call verb owns the pane
+    if (s.call.verb === 'data') return;
     const verb = s.result?.verb ?? s.call.verb;
     if (verb === 'exec') {
       if (autoFollow) {
@@ -401,6 +408,24 @@ export default function App() {
     setGitCommitSelRaw(s);
     emit({ kind: 'git_commit_select', commits: s });
   }, []);
+
+  // data table rows are selectable too, same gestures, agent-visible
+  const [dataSel, setDataSel] = useState<number[]>([]);
+  const dataAnchor = useRef<string | null>(null);
+  useEffect(() => { setDataSel([]); dataAnchor.current = null; }, [r.view.data?.touchedAt]);
+  const dataRowClick = useCallback((e: React.MouseEvent, i: number) => {
+    const rows = r.view.data?.table?.rows ?? [];
+    const res = applySelect(rows.map((_, idx) => String(idx)), dataSel.map(String), dataAnchor.current, String(i), clickMode(e));
+    dataAnchor.current = res.anchor;
+    const sel = res.sel.map(Number);
+    setDataSel(sel);
+    emit({ kind: 'data_select', rows: sel.map((idx) => rows[idx]) });
+  }, [r.view.data, dataSel]);
+
+  // the persistent editor text selection: survives terminal clicks, clears
+  // only on a click back inside an editor body; shown char-precise
+  const [textSel, setTextSel] = useState<{ path: string; rects: { x: number; y: number; w: number; h: number }[] } | null>(null);
+  useEffect(() => { onEditorSelection((s) => setTextSel(s ? { path: s.path, rects: s.rects } : null)); }, []);
   useEffect(() => { setExplorerSelectionRaw([]); }, [explorerRoot]);
   const [worktreeList, setWorktreeList] = useState<{ path: string; branch?: string }[]>([]);
   const gitRoot = explorerRoot ?? cwd ?? '';
@@ -656,6 +681,20 @@ export default function App() {
     ? (r.steps[r.view.currentToolIndex] as (typeof r.steps[number] & { kind: 'tool' }))
     : undefined;
 
+  // step indices where each bottom pane's content changed — the history
+  // bars walk these
+  const dataSteps = useMemo(
+    () => r.steps.flatMap((s, i) => (s.kind === 'tool' && s.call.verb === 'data' ? [i] : [])),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [r.steps, r.head],
+  );
+  const termSteps = useMemo(
+    () => r.steps.flatMap((s, i) => (
+      s.kind === 'tool' && s.call.verb !== 'data' && (s.result?.verb ?? s.call.verb) === 'exec' ? [i] : [])),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [r.steps, r.head],
+  );
+
   // the active editor view shows a file inside a linked worktree: orange
   // banner, wherever the file came from (explorer, diff, or a subagent)
   const activeViewPath = editorTab === 'pinned' ? pinned?.path
@@ -676,8 +715,12 @@ export default function App() {
       },
       explorer: { root: explorerRoot ?? cwd ?? null, selection: explorerSelection },
       worktree: explorerRoot ?? null,
+      data_selection: dataSel.length && r.view.data?.table
+        ? { title: r.view.data.title, rows: dataSel.map((i) => r.view.data!.table!.rows[i]).filter(Boolean) }
+        : null,
     });
-  }, [gitRoot, gitSelection, gitCommitSel, editorTab, userTabs, explorerRoot, explorerSelection, cwd]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gitRoot, gitSelection, gitCommitSel, editorTab, userTabs, explorerRoot, explorerSelection, cwd, dataSel]);
 
   const cols = [leftOpen ? `${sideW}px 5px` : '', '1fr', rightOpen ? `5px ${rightW}px` : ''].join(' ');
 
@@ -716,7 +759,15 @@ export default function App() {
           );
         })()}
         <span className="titleRight">
-          {r.playing && r.pointer >= r.head && <span className="liveBadge">● LIVE</span>}
+          {r.session && (
+            <button
+              className={`liveToggle ${r.follow ? 'on' : ''}`}
+              title={r.follow
+                ? 'Following the end of the session. Click to stop.'
+                : 'Jump to the end and follow new activity live.'}
+              onClick={() => (r.follow ? r.stopLive() : r.goLive())}
+            ><span className="liveDotT">●</span> LIVE</button>
+          )}
           <button
             className={`tourToggle ${autoFollow ? 'on' : ''}`}
             title={autoFollow
@@ -803,10 +854,11 @@ export default function App() {
               onOpenTimeline={(p) => { setTimelinePath(p); setEditorTab('timeline'); }}
               onCloseTimeline={() => { setTimelinePath(undefined); setEditorTab('pinned'); }}
               timelineBody={timelinePath && (
-                <FileTimeline steps={r.steps} pointer={r.pointer} path={timelinePath} speed={r.speed} onJump={r.jump} />
+                <FileTimeline steps={r.steps} pointer={r.pointer} path={timelinePath} speed={r.speed} onJump={r.jump} textSel={textSel} />
               )}
               onToggleWaypoint={toggleWaypoint}
               onCloseAll={closeAllFiles}
+              textSel={textSel}
               pinnedFlash={flashes.pinned ?? 0}
               pointer={r.pointer}
               worktreeBanner={activeWt ? {
@@ -851,10 +903,12 @@ export default function App() {
                   </div>
                 </div>
                 <div className={bottomTab === 'term' ? 'tabBody' : 'tabBody hiddenTab'}>
+                  <HistoryBar positions={termSteps} pointer={r.pointer} onJump={r.jump} />
                   <Terminal blocks={r.view.term} animatedAt={animatedTermAt} speed={r.speed} seekTick={r.seekTick} visible={bottomTab === 'term'} />
                 </div>
                 <div className={bottomTab === 'data' ? 'tabBody' : 'tabBody hiddenTab'}>
-                  <DataPane data={r.view.data} animate={r.view.data?.touchedAt === r.animateIndex} />
+                  <HistoryBar positions={dataSteps} pointer={r.pointer} onJump={r.jump} />
+                  <DataPane data={r.view.data} animate={r.view.data?.touchedAt === r.animateIndex} selection={dataSel} onRowClick={dataRowClick} />
                 </div>
                 <div className={bottomTab === 'way' ? 'tabBody' : 'tabBody hiddenTab'}>
                   <Wayfinder waypoints={r.view.waypoints} onSelect={openWaypoint} />
@@ -924,7 +978,7 @@ export default function App() {
           initialProvider={pickerSeed?.provider}
           initialFilter={pickerSeed?.filter}
           onPick={applyPick}
-          onOpenFolder={openFolderOnly}
+          onGo={scopeFolder}
           onClose={() => { setPickerOpen(false); setPickerSeed(undefined); }}
         />
       )}

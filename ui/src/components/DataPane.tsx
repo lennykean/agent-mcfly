@@ -6,7 +6,11 @@ import type { DataView } from '../lib/timeline';
 // splitter as every other pane, two lines by default), then the table — or a
 // red error plus the raw output when the result is not tabular. Renders from
 // the call on, before any result exists.
-export function DataPane({ data, animate }: { data?: DataView; animate: boolean }) {
+export function DataPane({ data, animate, selection = [], onRowClick }: {
+  data?: DataView; animate: boolean;
+  selection?: number[]; // selected row indices, reported to workspace_state
+  onRowClick?: (e: React.MouseEvent, index: number) => void;
+}) {
   const [queryH, setQueryH] = useState(() => Number(localStorage.getItem('mcfly.dataQueryH')) || 42);
   useEffect(() => { localStorage.setItem('mcfly.dataQueryH', String(queryH)); }, [queryH]);
   if (!data) return <div className="emptyHint">tabular tool results will show here</div>;
@@ -25,7 +29,12 @@ export function DataPane({ data, animate }: { data?: DataView; animate: boolean 
             <thead><tr>{data.table.columns.map((column) => <th key={column}>{column}</th>)}</tr></thead>
             <tbody>
               {data.table.rows.map((row, i) => (
-                <tr key={i}>{row.map((cell, j) => <td key={j}>{cell}</td>)}</tr>
+                <tr
+                  key={i}
+                  className={selection.includes(i) ? 'sel' : ''}
+                  onClick={(e) => onRowClick?.(e, i)}
+                  onMouseDown={(e) => { if (e.shiftKey) e.preventDefault(); }}
+                >{row.map((cell, j) => <td key={j}>{cell}</td>)}</tr>
               ))}
             </tbody>
           </table>
