@@ -373,7 +373,18 @@ export default function App() {
   // review stop); the next fold touch takes the tab back. Declared before
   // the tour effects so the clear-on-touch runs first, never after them.
   const [pinnedOverride, setPinnedOverride] = useState<string | undefined>();
-  useEffect(() => setPinnedOverride(undefined), [r.view.activePath]);
+  const prevActivePath = useRef(r.view.activePath);
+  useEffect(() => {
+    const prev = prevActivePath.current;
+    prevActivePath.current = r.view.activePath;
+    if (autoFollow) { setPinnedOverride(undefined); return; }
+    // tour off: the live tab holds the file being read; the flash announces
+    // the new touch, and clicking the pinned tab (or LIVE) releases the hold
+    if (editorTab === 'pinned' && prev && r.view.activePath && normPath(prev) !== normPath(r.view.activePath)) {
+      setPinnedOverride((cur) => cur ?? prev);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [r.view.activePath]);
   const pinned = (pinnedOverride ? r.view.tabs.find((t) => normPath(t.path) === normPath(pinnedOverride)) : undefined)
     ?? r.view.tabs.find((t) => t.path === r.view.activePath);
 
@@ -648,11 +659,17 @@ export default function App() {
     if (!root) return;
     const abs = `${root.replace(/[\\/]+$/, '')}/${f.path}`;
     const key = `diff:${area}:${abs}`;
-    fetch(`/api/git/diff?root=${encodeURIComponent(root)}&path=${encodeURIComponent(f.path)}&staged=${area === 'staged' ? '1' : '0'}`)
-      .then((res) => res.json())
-      .then((d) => {
+    const m = abs.match(/^(.*)[\\/]([^\\/]+)$/);
+    Promise.all([
+      fetch(`/api/git/diff?root=${encodeURIComponent(root)}&path=${encodeURIComponent(f.path)}&staged=${area === 'staged' ? '1' : '0'}`).then((res) => res.json()),
+      // the on-disk file rides along so gaps between hunks can expand
+      m ? fetch(`/api/fs/read?root=${encodeURIComponent(m[1])}&path=${encodeURIComponent(m[2])}`).then((res) => res.json()).catch(() => ({})) : Promise.resolve({}),
+    ])
+      .then(([d, fileData]) => {
+        const fileLines = typeof fileData?.content === 'string' ? fileData.content.replace(/\r\n/g, '\n').split('\n') : undefined;
+        if (fileLines?.at(-1) === '') fileLines.pop(); // the trailing newline is not a line
         setUserTabs((tabs) => {
-          const tab = { key, path: abs, nonce: openSeq.current++, diff: { hunks: d.hunks ?? [], area } };
+          const tab = { key, path: abs, nonce: openSeq.current++, diff: { hunks: d.hunks ?? [], area, fileLines } };
           return tabs.some((t) => t.key === key) ? tabs.map((t) => (t.key === key ? { ...t, ...tab } : t)) : [...tabs, tab];
         });
         setEditorTab(key);
@@ -765,7 +782,11 @@ export default function App() {
               title={r.follow
                 ? 'Following the end of the session. Click to stop.'
                 : 'Jump to the end and follow new activity live.'}
-              onClick={() => (r.follow ? r.stopLive() : r.goLive())}
+              onClick={() => {
+                if (r.follow) { r.stopLive(); return; }
+                setPinnedOverride(undefined); // live means the end, hold included
+                r.goLive();
+              }}
             ><span className="liveDotT">●</span> LIVE</button>
           )}
           <button
@@ -773,7 +794,10 @@ export default function App() {
             title={autoFollow
               ? 'Tour guide ON: the view takes you to files, tables, and waypoints as they happen. Click to wander freely.'
               : 'Tour guide OFF: activity flashes its tab instead of moving you. Click to be shown around.'}
-            onClick={() => setAutoFollow(!autoFollow)}
+            onClick={() => {
+              if (!autoFollow) setPinnedOverride(undefined); // tour back on: release any hold
+              setAutoFollow(!autoFollow);
+            }}
           >
             <span className={`codicon codicon-${autoFollow ? 'eye' : 'eye-closed'}`} />
           </button>
@@ -847,7 +871,11 @@ export default function App() {
               speed={r.speed}
               userTabs={userTabs}
               active={editorTab}
-              onSelect={setEditorTab}
+              onSelect={(k) => {
+                // re-clicking the pinned tab releases a tour-off hold
+                if (k === 'pinned' && editorTab === 'pinned') setPinnedOverride(undefined);
+                setEditorTab(k);
+              }}
               onClose={closeFile}
               onOpenCurrent={openAbs}
               timelinePath={timelinePath}

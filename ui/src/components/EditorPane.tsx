@@ -338,11 +338,90 @@ function ImageView({ file, animate }: { file: FileView; animate: boolean }) {
   );
 }
 
-export function DiffView({ file, animate }: { file: FileView; animate: boolean }) {
+interface DiffRow { kind: 'ctx' | 'add' | 'del'; oldNo?: number; newNo?: number; text: string; hunk: number }
+interface GapRow { kind: 'gap'; id: number; pos: 'top' | 'mid' | 'bottom'; startNew: number; endNew: number; delta: number; hunk: number }
+interface HunkRow { kind: 'hunk'; label: string; hunk: number }
+type AnyRow = DiffRow | GapRow | HunkRow;
+
+// a comment born in a diff: the new-side line number IS the real on-disk
+// line, and the context comes from the hunk's new side
+export interface DiffComment { line: number; lineEnd: number; before: string[]; anchor: string; after: string[]; body: string }
+
+// with fileLines, hunk headers become expandable gaps (VS Code style); an
+// expanded gap synthesizes real context rows from the on-disk file
+function diffRows(hunks: NonNullable<FileView['render']['hunks']>, fileLines: string[] | undefined, expanded: Set<number>): AnyRow[] {
+  const out: AnyRow[] = [];
+  let gapId = 0;
+  const pushGap = (pos: GapRow['pos'], startNew: number, endNew: number, delta: number, hunk: number) => {
+    if (endNew < startNew) return;
+    const id = gapId++;
+    if (expanded.has(id)) {
+      for (let n = startNew; n <= endNew; n++) {
+        out.push({ kind: 'ctx', oldNo: n + delta, newNo: n, text: fileLines?.[n - 1] ?? '', hunk });
+      }
+    } else {
+      out.push({ kind: 'gap', id, pos, startNew, endNew, delta, hunk });
+    }
+  };
+  let prevNewEnd = 1;
+  let prevDeltaEnd = 0;
+  hunks.forEach((h, hi2) => {
+    if (fileLines) {
+      pushGap(hi2 === 0 ? 'top' : 'mid', prevNewEnd, h.newStart - 1, h.oldStart - h.newStart, hi2);
+    } else {
+      out.push({ kind: 'hunk', label: h.oldStart >= 1 ? `@@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@` : '@@', hunk: hi2 });
+    }
+    let oldNo = h.oldStart;
+    let newNo = h.newStart;
+    for (const line of h.lines) {
+      const text = line.slice(1);
+      if (line.startsWith('+')) out.push({ kind: 'add', newNo: newNo++, text, hunk: hi2 });
+      else if (line.startsWith('-')) out.push({ kind: 'del', oldNo: oldNo++, text, hunk: hi2 });
+      else out.push({ kind: 'ctx', oldNo: oldNo++, newNo: newNo++, text, hunk: hi2 });
+    }
+    prevNewEnd = newNo;
+    prevDeltaEnd = (oldNo - 1) - (newNo - 1);
+  });
+  if (fileLines) pushGap('bottom', prevNewEnd, fileLines.length, prevDeltaEnd, hunks.length - 1);
+  return out;
+}
+
+export function DiffView({ file, animate, onComment, fileLines }: {
+  file: FileView; animate: boolean;
+  // present = review mode: lines that exist on disk (green + context) take comments
+  onComment?: (c: DiffComment) => void;
+  // present = the on-disk file: hunk gaps become expandable context
+  fileLines?: string[];
+}) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     ref.current?.scrollTo({ top: 0 });
   }, [file.path, file.touchedAt]);
+  // gutter drag over new-side numbers, same as the buffer gutter; a range
+  // stays inside one hunk so the context capture stays honest
+  const [drag, setDrag] = useState<{ hunk: number; from: number; to: number } | null>(null);
+  const [compose, setCompose] = useState<{ hunk: number; line: number; lineEnd: number } | null>(null);
+  useEffect(() => { setCompose(null); setDrag(null); }, [file.path, file.touchedAt]);
+  useEffect(() => {
+    if (!drag) return;
+    const up = () => {
+      setDrag((d) => {
+        if (d) setCompose({ hunk: d.hunk, line: Math.min(d.from, d.to), lineEnd: Math.max(d.from, d.to) });
+        return null;
+      });
+    };
+    window.addEventListener('mouseup', up);
+    return () => window.removeEventListener('mouseup', up);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drag !== null]);
+
+  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  useEffect(() => { setExpanded(new Set()); }, [file.path, file.touchedAt]);
+  const rows = useMemo(
+    () => diffRows(file.render.hunks ?? [], fileLines, expanded),
+    [file.render.hunks, fileLines, expanded],
+  );
+
   // per-line highlighting: stateless, so multi-line constructs lose their
   // color across lines — the standard trade every inline diff viewer makes.
   // The whole body is memoized so re-renders keep stable {__html} objects:
@@ -353,33 +432,112 @@ export function DiffView({ file, animate }: { file: FileView; animate: boolean }
       if (!lang) return undefined;
       try { return hljs.highlight(code, { language: lang, ignoreIllegals: true }).value; } catch { return undefined; }
     };
-    return (file.render.hunks ?? []).map((h, hi2) => (
-      <div key={hi2}>
-        <div className="codeline hunk">
-          <span className="ln" />
-          <span>{h.oldStart >= 1 ? `@@ -${h.oldStart},${h.oldLines} +${h.newStart},${h.newLines} @@` : '@@'}</span>
+    return rows.map((row, ri) => {
+      if (row.kind === 'hunk') {
+        return (
+          <div key={`h${ri}`} className="codeline hunk">
+            <span className="dln" /><span className="dln" />
+            <span>{row.label}</span>
+          </div>
+        );
+      }
+      if (row.kind === 'gap') {
+        const n = row.endNew - row.startNew + 1;
+        const icon = row.pos === 'top' ? 'fold-up' : row.pos === 'bottom' ? 'fold-down' : 'unfold';
+        return (
+          <div key={`g${row.id}`} className="codeline gapline" data-gap={row.id} title={`Show ${n} unchanged ${n === 1 ? 'line' : 'lines'}`}>
+            <span className="dln" /><span className="dln" />
+            <span className="gapAction"><span className={`codicon codicon-${icon}`} /> {n} unchanged {n === 1 ? 'line' : 'lines'}</span>
+          </div>
+        );
+      }
+      const cls = row.kind === 'add' ? 'added' : row.kind === 'del' ? 'removed' : '';
+      const html = hi(row.text);
+      const commentable = onComment && row.newNo !== undefined;
+      return (
+        <div key={ri} className={`codeline ${cls}`}>
+          <span className="dln">{row.oldNo ?? ''}</span>
+          <span
+            className={`dln${commentable ? ' dlnLive' : ''}`}
+            title={commentable ? 'Comment — drag to select a range' : undefined}
+            data-newno={row.newNo}
+            data-hunk={row.hunk}
+          >{row.newNo ?? ''}</span>
+          <span className="lc">
+            {html !== undefined
+              ? <span className="hljs" dangerouslySetInnerHTML={{ __html: html }} />
+              : row.text}
+          </span>
         </div>
-        {h.lines.map((line, li) => {
-          const cls = line.startsWith('+') ? 'added' : line.startsWith('-') ? 'removed' : '';
-          const html = hi(line.slice(1));
-          return (
-            <div key={li} className={`codeline ${cls}`}>
-              <span className="ln" />
-              <span className="lc">
-                {line[0] ?? ' '}
-                {html !== undefined
-                  ? <span className="hljs" dangerouslySetInnerHTML={{ __html: html }} />
-                  : line.slice(1)}
-              </span>
-            </div>
-          );
-        })}
-      </div>
-    ));
-  }, [file.render.hunks, file.path]);
+      );
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, file.path, onComment !== undefined]);
+
+  // drag handling by delegation so the memoized body never re-renders
+  const rowFromEvent = (e: React.MouseEvent) => {
+    const t = (e.target as Element).closest?.('.dlnLive') as HTMLElement | null;
+    if (!t || t.dataset.newno === undefined) return null;
+    return { newNo: Number(t.dataset.newno), hunk: Number(t.dataset.hunk) };
+  };
+  const onMouseDown = (e: React.MouseEvent) => {
+    const r2 = rowFromEvent(e);
+    if (!r2) return;
+    e.preventDefault();
+    setCompose(null);
+    setDrag({ hunk: r2.hunk, from: r2.newNo, to: r2.newNo });
+  };
+  const onClick = (e: React.MouseEvent) => {
+    const gapEl = (e.target as Element).closest?.('.gapline') as HTMLElement | null;
+    if (gapEl?.dataset.gap !== undefined) {
+      const id = Number(gapEl.dataset.gap);
+      setExpanded((cur) => new Set(cur).add(id));
+    }
+  };
+  const onMouseOver = (e: React.MouseEvent) => {
+    if (!drag) return;
+    const r2 = rowFromEvent(e);
+    if (r2 && r2.hunk === drag.hunk) setDrag((d) => (d ? { ...d, to: r2.newNo } : d));
+  };
+
+  const submit = (bodyText: string) => {
+    if (!onComment || !compose) return;
+    const side = rows.filter((r): r is DiffRow => r.kind !== 'hunk' && r.hunk === compose.hunk && (r as DiffRow).newNo !== undefined) as DiffRow[];
+    const at = side.findIndex((r) => r.newNo === compose.line);
+    if (at < 0) return;
+    onComment({
+      line: compose.line,
+      lineEnd: compose.lineEnd,
+      before: side.slice(Math.max(0, at - 3), at).map((r) => r.text),
+      anchor: side[at].text,
+      after: side.slice(at + 1, at + 4).map((r) => r.text),
+      body: bodyText,
+    });
+    setCompose(null);
+  };
+
+  // overlays position by row index: every diff row is one LH tall
+  const range = drag ?? (compose ? { hunk: compose.hunk, from: compose.line, to: compose.lineEnd } : null);
+  const rowIdxOfNew = (hunk: number, newNo: number) => rows.findIndex((r) => r.kind !== 'hunk' && r.hunk === hunk && (r as DiffRow).newNo === newNo);
+  let band: { top: number; height: number } | null = null;
+  if (range) {
+    const a = rowIdxOfNew(range.hunk, Math.min(range.from, range.to));
+    const b = rowIdxOfNew(range.hunk, Math.max(range.from, range.to));
+    if (a >= 0 && b >= 0) band = { top: a * LH, height: (b - a + 1) * LH };
+  }
+  const composerTop = compose ? (rowIdxOfNew(compose.hunk, compose.lineEnd) + 1) * LH + 4 : 0;
+
   return (
     <div className={`editorBody ${animate ? 'diffFlash' : ''}`} ref={ref}>
-      {body}
+      <div className="diffwrap" onMouseDown={onMouseDown} onMouseOver={onMouseOver} onClick={onClick}>
+        {body}
+        {band && <div className="rvBand" style={{ top: band.top, height: band.height }} />}
+        {compose && (
+          <div className="wpOverlayWrap" style={{ top: composerTop, transform: 'none' }}>
+            <ComposerCard onSubmit={submit} onCancel={() => setCompose(null)} />
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -394,8 +552,9 @@ export interface UserTab {
   // a waypoint whose context no longer exists in the real file: the captured
   // chunk, shown as a snapshot of the code as it was
   snapshot?: { line: number; note: string; before: string[]; anchor: string; after: string[] };
-  // a git diff tab: inline hunks, read-only, no waypoints or comments
-  diff?: { hunks: NonNullable<FileView['render']['hunks']>; area: 'staged' | 'changed' };
+  // a git diff tab: inline hunks; comments land on real file lines, and the
+  // on-disk lines let hunk gaps expand
+  diff?: { hunks: NonNullable<FileView['render']['hunks']>; area: 'staged' | 'changed'; fileLines?: string[] };
 }
 
 function ComposerCard({ onSubmit, onCancel }: { onSubmit: (body: string) => void; onCancel: () => void }) {
@@ -729,6 +888,12 @@ export function EditorPane({
               key={userTab.key}
               file={{ path: userTab.path, mode: 'diff', render: { verb: 'patch_file', hunks: userTab.diff.hunks }, touchedAt: userTab.nonce ?? 0 }}
               animate={false}
+              fileLines={userTab.diff.fileLines}
+              onComment={reviewing ? (c) => onReviewComment!({
+                path: userTab.path, line: c.line,
+                ...(c.lineEnd > c.line ? { line_end: c.lineEnd } : {}),
+                before: c.before, anchor: c.anchor, after: c.after, body: c.body,
+              }) : undefined}
             />
           ) : (
             <div className="emptyHint">no changes in this file</div>
