@@ -1360,7 +1360,7 @@ export interface UserTab {
   snapshot?: { line: number; note: string; before: string[]; anchor: string; after: string[] };
   // a git diff tab: inline hunks; comments land on real file lines, and the
   // on-disk lines let hunk gaps expand
-  diff?: { hunks: NonNullable<FileView['render']['hunks']>; area: 'staged' | 'changed'; fileLines?: string[] };
+  diff?: { hunks: NonNullable<FileView['render']['hunks']>; area: 'staged' | 'changed' | 'review'; fileLines?: string[] };
 }
 
 // a keyboard exit hands focus back to the editor body under the card, so
@@ -1728,7 +1728,7 @@ export function EditorPane({
             {t.diff ? '± ' : ''}{shortName(t.path)}{t.snapshot
               ? ' [snapshot]'
               : t.diff
-                ? <> <span className="roBadge">{t.diff.area === 'staged' ? 'staged' : 'changes'}</span></>
+                ? <> <span className="roBadge">{t.diff.area === 'staged' ? 'staged' : t.diff.area === 'review' ? 'review' : 'changes'}</span></>
                 : <> <span className="roBadge">read only</span></>}
             {tabReviewDot(t.path)}
             {(t.snapshot || t.diff) && onOpenCurrent && (

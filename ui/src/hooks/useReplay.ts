@@ -68,7 +68,9 @@ export function useReplay() {
       // a freshly loaded session starts AT the head IN play mode: pin the
       // pointer so incoming live events animate instead of snapping
       if (initial && key === 'main') {
-        setPointers((prev) => (key in prev ? prev : { ...prev, [key]: Math.max(0, tl.steps.length - 1) }));
+        // NO explicit pointer: glued to the head, so a session that loads in
+        // chunks (big files) rides straight to the true end instead of
+        // pinning at chunk one and crawling there at reading speed
         setPlaying(true);
         setFollow(true);
       }
@@ -194,15 +196,24 @@ export function useReplay() {
   const goLive = useCallback(() => {
     setAnimate(null);
     setSeekTick((t) => t + 1);
-    setPointers((prev) => ({ ...prev, [viewKey]: head }));
+    // live = GLUED: deleting the pointer entry makes the playhead ride the
+    // head instantly, even while more of the file is still streaming in
+    setPointers((prev) => {
+      if (!(viewKey in prev)) return prev;
+      const next = { ...prev };
+      delete next[viewKey];
+      return next;
+    });
     setFollow(true);
     setPlaying(true);
-  }, [viewKey, head]);
+  }, [viewKey]);
 
   const stopLive = useCallback(() => {
+    // leaving live pins the playhead where it is
+    setPointers((prev) => ({ ...prev, [viewKey]: head }));
     setFollow(false);
     setPlaying(false);
-  }, []);
+  }, [viewKey, head]);
 
   // All agents discovered across loaded timelines (full file, not pointer-limited).
   const agents = useMemo<AgentNode[]>(() => {

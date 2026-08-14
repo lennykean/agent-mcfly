@@ -80,6 +80,16 @@ export function addReply(pwd, commentId, body, author, addressed) {
   });
 }
 
+// the review checklist: a base ref plus per-path check signatures. Setting
+// a new base clears the ticks; base: null removes the checklist.
+export function setChecklist(pwd, id, patch) {
+  return mutate(pwd, id, (r) => {
+    if (patch.base === null) { delete r.checklist; return; }
+    r.checklist = { ...(r.checklist ?? {}), ...patch };
+    if (patch.base !== undefined && patch.checked === undefined) r.checklist.checked = {};
+  });
+}
+
 export function setThreadState(pwd, id, commentId, state) {
   if (!['open', 'addressed', 'resolved'].includes(state)) return null;
   return mutate(pwd, id, (r) => {

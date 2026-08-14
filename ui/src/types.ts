@@ -109,6 +109,9 @@ export interface Review {
   created: number;
   closed?: number;
   comments: ReviewComment[];
+  // the punch list: diff-from-base file checklist; checked maps path -> the
+  // content signature it had when ticked (a change auto-unchecks it)
+  checklist?: { base?: string | null; checked?: Record<string, string> };
 }
 
 export interface TailResponse {

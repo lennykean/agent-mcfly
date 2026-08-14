@@ -279,6 +279,11 @@ export default function App() {
   // the bottom and right strips get the same treatment as the left one
   const bottomStripRef = useRef<HTMLDivElement>(null);
   const rightStripRef = useRef<HTMLDivElement>(null);
+  // stable escape callbacks: inline lambdas would defeat the memo on the
+  // heavy list panes (every app render would re-reconcile thousands of rows)
+  const escapeLeft = useCallback(() => leftStripRef.current?.focus(), []);
+  const escapeBottom = useCallback(() => bottomStripRef.current?.focus(), []);
+  const escapeRight = useCallback(() => rightStripRef.current?.focus(), []);
 
   // a focused pane BODY (term/data/tool detail): plain arrows scroll its
   // content; up at the very top escalates to the strip. Left/right fall
@@ -847,6 +852,109 @@ export default function App() {
       .catch(() => { /* refresh will heal it */ });
   }, [gitRoot]);
 
+  // a review-checklist click: diff a file against the checklist's base ref
+  const openRefDiff = useCallback((relPath: string, ref: string, activate = true) => {
+    const root = gitRoot;
+    if (!root) return;
+    const abs = `${root.replace(/[\\/]+$/, '')}/${relPath}`;
+    const key = `diff:review:${abs}`;
+    const m = abs.match(/^(.*)[\\/]([^\\/]+)$/);
+    Promise.all([
+      fetch(`/api/git/refdiff?root=${encodeURIComponent(root)}&ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(relPath)}`).then((res) => res.json()),
+      m ? fetch(`/api/fs/read?root=${encodeURIComponent(m[1])}&path=${encodeURIComponent(m[2])}`).then((res) => res.json()).catch(() => ({})) : Promise.resolve({}),
+    ])
+      .then(([d, fileData]) => {
+        const fileLines = typeof fileData?.content === 'string' ? fileData.content.replace(/\r\n/g, '\n').split('\n') : undefined;
+        if (fileLines?.at(-1) === '') fileLines.pop();
+        setUserTabs((tabs) => {
+          const tab = { key, path: abs, nonce: openSeq.current++, diff: { hunks: d.hunks ?? [], area: 'review' as const, fileLines } };
+          const exists = tabs.some((t) => t.key === key);
+          if (!exists && !activate) return tabs; // a refresh only touches open tabs
+          return exists ? tabs.map((t) => (t.key === key ? { ...t, ...tab } : t)) : [...tabs, tab];
+        });
+        if (activate) setEditorTab(key);
+      })
+      .catch(() => { /* refresh will heal it */ });
+  }, [gitRoot]);
+
+  // ---- the review checklist: a punch list of files differing from a base
+  // ref. Pure tracking — ticks live on the review record; a file that
+  // changes after being ticked gets unchecked (its signature moved). ----
+  const clBase = activeReview?.checklist?.base ?? null;
+  const [clFiles, setClFiles] = useState<{ status: string; path: string; sig: string }[]>([]);
+  const [clRef, setClRef] = useState<string | null>(null);
+  const [clError, setClError] = useState<string | null>(null);
+  const clReviewId = activeReview?.id;
+  useEffect(() => {
+    if (!clBase || !gitRoot) { setClFiles([]); setClRef(null); setClError(null); return; }
+    let dead = false;
+    const load = () => fetch(`/api/git/reffiles?root=${encodeURIComponent(gitRoot)}&ref=${encodeURIComponent(clBase)}`)
+      .then((res) => res.json())
+      .then((d) => {
+        if (dead) return;
+        if (d.error) { setClError(String(d.error)); setClFiles([]); setClRef(null); return; }
+        setClError(null);
+        setClRef(d.ref ?? null);
+        setClFiles(Array.isArray(d.files) ? d.files : []);
+      })
+      .catch(() => { /* keep last */ });
+    void load();
+    const t = setInterval(load, 10000); // the diff moves as the agent works
+    return () => { dead = true; clearInterval(t); };
+  }, [clBase, gitRoot]);
+  // auto-uncheck what changed since it was ticked, and refresh its open tab
+  useEffect(() => {
+    const checked = activeReview?.checklist?.checked;
+    if (!checked || !clFiles.length || !clReviewId || !clBase) return;
+    const sigOf = new Map(clFiles.map((f) => [f.path, f.sig]));
+    const stale = Object.entries(checked).filter(([p, sig]) => sigOf.has(p) && sigOf.get(p) !== sig);
+    if (!stale.length) return;
+    const next = { ...checked };
+    for (const [p] of stale) {
+      delete next[p];
+      openRefDiff(p, clBase, false); // rediff an open tab in place
+    }
+    reviewPost('/api/review-checklist', { id: clReviewId, patch: { checked: next } });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clFiles]);
+  const checklistSetBase = useCallback((ref: string | null) => {
+    if (!clReviewId) return;
+    reviewPost('/api/review-checklist', { id: clReviewId, patch: { base: ref } });
+  }, [clReviewId, reviewPost]);
+  const checklistToggle = useCallback((p: string) => {
+    const checked = { ...(activeReview?.checklist?.checked ?? {}) };
+    if (!clReviewId) return;
+    if (checked[p] !== undefined) delete checked[p];
+    else {
+      const f = clFiles.find((x) => x.path === p);
+      if (!f) return;
+      checked[p] = f.sig;
+    }
+    reviewPost('/api/review-checklist', { id: clReviewId, patch: { checked } });
+  }, [activeReview, clReviewId, clFiles, reviewPost]);
+  const checklistToggleMany = useCallback((paths: string[], on: boolean) => {
+    if (!clReviewId) return;
+    const checked = { ...(activeReview?.checklist?.checked ?? {}) };
+    for (const p of paths) {
+      if (!on) delete checked[p];
+      else {
+        const f = clFiles.find((x) => x.path === p);
+        if (f) checked[p] = f.sig;
+      }
+    }
+    reviewPost('/api/review-checklist', { id: clReviewId, patch: { checked } });
+  }, [activeReview, clReviewId, clFiles, reviewPost]);
+  // "diff from here" on a commit: sets the checklist context on the OPEN
+  // review. Only offered when a review exists with no context yet — an
+  // existing punch list must be closed (its ✕) before starting another.
+  // Comments are untouched either way; the checklist is independent.
+  const reviewFrom = useCallback((hash: string) => {
+    if (!activeReview) return;
+    setBottomOpen(true);
+    setBottomTab('review');
+    reviewPost('/api/review-checklist', { id: activeReview.id, patch: { base: hash } });
+  }, [activeReview, reviewPost, setBottomOpen, setBottomTab]);
+
   // terminal file:line links; relative paths resolve against the project cwd
   const openFileRef = useCallback((p: string, line?: number) => {
     const abs = /^[A-Za-z]:[\\/]|^[\\/]/.test(p) ? p : cwd ? `${cwd.replace(/[\\/]+$/, '')}/${p}` : null;
@@ -916,10 +1024,13 @@ export default function App() {
     const onKey = (e: KeyboardEvent) => {
       const t = e.target;
       const el = t instanceof Element ? t : null;
-      // typing is typing: text inputs never trigger chords and never arm
-      // sequences (the leader must not eat a space mid-sentence). The live
-      // terminal's textarea is the exception — xterm releases app chords.
-      if ((t instanceof HTMLInputElement || t instanceof HTMLSelectElement || t instanceof HTMLTextAreaElement) && !el?.closest('.livePane')) return;
+      // typing is typing: TEXTUAL inputs never trigger chords and never arm
+      // sequences (the leader must not eat a space mid-sentence). Checkboxes
+      // and buttons are not typing surfaces — chords stay live on them. The
+      // live terminal's textarea is the exception — xterm releases app chords.
+      const textual = t instanceof HTMLTextAreaElement || t instanceof HTMLSelectElement
+        || (t instanceof HTMLInputElement && !['checkbox', 'radio', 'button', 'range'].includes(t.type));
+      if (textual && !el?.closest('.livePane')) return;
       const chord = actionOf(e, APP_CHORDS.filter((a) => a !== 'playHome' && a !== 'playEnd'));
       if (chord) {
         e.preventDefault();
@@ -1145,7 +1256,7 @@ export default function App() {
                   steps={r.steps} pointer={r.pointer} currentToolIndex={r.view.currentToolIndex} onJump={r.jump}
                   seekTick={r.seekTick}
                   visible={leftTab === 'tools'}
-                  onEscapeTop={() => leftStripRef.current?.focus()}
+                  onEscapeTop={escapeLeft}
                 />
               </div>
               <div className={leftTab === 'explorer' ? 'tabBody' : 'tabBody hiddenTab'}>
@@ -1156,7 +1267,7 @@ export default function App() {
                     <span className="wtBannerAction" onClick={() => setExplorerRoot(undefined)}>back to main</span>
                   </div>
                 )}
-                <Explorer key={explorerRoot ?? cwd} root={explorerRoot ?? cwd} onOpen={openFile} selection={explorerSelection} onSelect={setExplorerSelection} onEscapeTop={() => leftStripRef.current?.focus()} />
+                <Explorer key={explorerRoot ?? cwd} root={explorerRoot ?? cwd} onOpen={openFile} selection={explorerSelection} onSelect={setExplorerSelection} onEscapeTop={escapeLeft} />
               </div>
               <div className={leftTab === 'git' ? 'tabBody' : 'tabBody hiddenTab'}>
                 <GitPane
@@ -1169,7 +1280,8 @@ export default function App() {
                   onOpenDiff={openGitDiff}
                   onOpenWorktree={openWorktree}
                   currentRoot={explorerRoot ?? cwd ?? ''}
-                  onEscapeTop={() => leftStripRef.current?.focus()}
+                  onEscapeTop={escapeLeft}
+                  onReviewFrom={activeReview && !clBase ? reviewFrom : undefined}
                 />
               </div>
             </div>
@@ -1256,7 +1368,7 @@ export default function App() {
                   <DataPane data={r.view.data} animate={r.view.data?.touchedAt === r.animateIndex} selection={dataSel} onRowClick={dataRowClick} />
                 </div>
                 <div className={bottomTab === 'way' ? 'tabBody' : 'tabBody hiddenTab'} tabIndex={-1}>
-                  <Wayfinder waypoints={r.view.waypoints} onSelect={openWaypoint} onEscapeTop={() => bottomStripRef.current?.focus()} />
+                  <Wayfinder waypoints={r.view.waypoints} onSelect={openWaypoint} onEscapeTop={escapeBottom} />
                 </div>
                 <div className={bottomTab === 'review' ? 'tabBody' : 'tabBody hiddenTab'} tabIndex={-1}>
                   <HumanReview
@@ -1265,7 +1377,18 @@ export default function App() {
                     onCreate={createReview}
                     onClose={() => activeReview && reviewPost('/api/review-close', { id: activeReview.id })}
                     onOpenComment={openReviewComment}
-                    onEscapeTop={() => bottomStripRef.current?.focus()}
+                    onEscapeTop={escapeBottom}
+                    checklist={{
+                      base: clBase,
+                      refLabel: clRef,
+                      files: clFiles,
+                      checked: activeReview?.checklist?.checked ?? {},
+                      error: clError,
+                      onSetBase: checklistSetBase,
+                      onToggle: checklistToggle,
+                      onToggleMany: checklistToggleMany,
+                      onOpen: (p) => clBase && openRefDiff(p, clBase),
+                    }}
                   />
                 </div>
                 <div className={bottomTab === 'tool' ? 'tabBody' : 'tabBody hiddenTab'} tabIndex={-1} onKeyDown={scrollKeys}>
@@ -1293,7 +1416,7 @@ export default function App() {
                   onJump={r.jump}
                   onOpenAgent={openAgent}
                   visible={rightTab === 'chat'}
-                  onEscapeTop={() => rightStripRef.current?.focus()}
+                  onEscapeTop={escapeRight}
                 />
               </div>
               {/* stays mounted across tab switches so the PTY session survives */}

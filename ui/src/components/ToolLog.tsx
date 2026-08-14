@@ -33,7 +33,9 @@ const Row = memo(function Row({
 
 const FADE_MS = 240;
 
-export function ToolLog({
+// memo: the log maps EVERY step (thousands in long sessions) — unrelated
+// app renders (splitter drags, selections) must not pay that reconciliation
+export const ToolLog = memo(function ToolLog({
   steps, pointer, currentToolIndex, seekTick = 0, onJump, visible = true, onEscapeTop,
 }: {
   steps: Step[]; pointer: number; currentToolIndex: number; seekTick?: number;
@@ -159,4 +161,4 @@ export function ToolLog({
       })}
     </div>
   );
-}
+});

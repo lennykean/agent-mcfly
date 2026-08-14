@@ -70,7 +70,8 @@ const Bubble = memo(function Bubble({ step, onJump, onOpenAgent }: {
   );
 });
 
-export function ChatPane({
+// memo: the chat maps every step — unrelated app renders must not pay it
+export const ChatPane = memo(function ChatPane({
   steps, pointer, animateIndex, seekTick, onJump, onOpenAgent, visible = true, onEscapeTop,
 }: {
   steps: Step[]; pointer: number; animateIndex: number; seekTick: number;
@@ -146,4 +147,4 @@ export function ChatPane({
       </div>
     </div>
   );
-}
+});

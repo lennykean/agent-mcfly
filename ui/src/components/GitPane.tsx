@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo } from 'react';
 import { Splitter } from './Splitter';
 import { fileIcon } from './Explorer';
 import { applySelect, clickMode } from '../lib/select';
@@ -107,7 +108,10 @@ const refClass = (r: string) => (r.startsWith('tag: ') ? 'ggTag' : r.includes('/
 // GIT pane: read-only. Changes (staged/changed trees), the commit graph, and
 // worktrees. The human selects here; agents read the selection through
 // workspace_state and act in their own terminal.
-export function GitPane({ root, visible, selection, onSelect, commitSelection, onSelectCommits, onOpenDiff, onOpenWorktree, currentRoot, onEscapeTop }: {
+// memo: worktrees + changes tree + a big commit graph — unrelated app
+// renders (splitter drags, selections elsewhere) must not re-reconcile it
+export const GitPane = memo(function GitPane({ root, visible, selection, onSelect, commitSelection, onSelectCommits, onOpenDiff, onOpenWorktree, currentRoot, onEscapeTop, onReviewFrom }: {
+  onReviewFrom?: (hash: string) => void; // "diff from here" -> review checklist
   root: string;
   visible: boolean;
   selection: GitSelection[];
@@ -468,6 +472,13 @@ export function GitPane({ root, visible, selection, onSelect, commitSelection, o
               <GraphCell row={row} />
               {row.c.refs.map((r) => <span key={r} className={`ggRef ${refClass(r)}`}>{refChip(r)}</span>)}
               <span className="ggSubject">{row.c.subject}</span>
+              {onReviewFrom && (
+                <span
+                  className="codicon codicon-checklist ggAction"
+                  title="Review checklist: diff from here"
+                  onClick={(e) => { e.stopPropagation(); onReviewFrom(row.c.hash); }}
+                />
+              )}
               <span className="ggHash">{row.c.hash.slice(0, 7)}</span>
             </div>
           ))}
@@ -480,4 +491,4 @@ export function GitPane({ root, visible, selection, onSelect, commitSelection, o
 
     </div>
   );
-}
+});

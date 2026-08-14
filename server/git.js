@@ -31,6 +31,33 @@ export async function grep(root, q) {
   }
 }
 
+// ---- review checklist: what differs between a base ref and the work tree ----
+// each file carries a cheap content signature (status:size:mtime) so a
+// checked-off file that changes afterward can be auto-unchecked
+export async function resolveRef(root, ref) {
+  const out = await run(root, ['rev-parse', '--verify', '--short', `${ref}^{commit}`]);
+  return out.trim();
+}
+export async function diffFiles(root, ref) {
+  const out = await run(root, ['diff', '--name-status', '-M', ref, '--']);
+  return out.split('\n').filter(Boolean).map((l) => {
+    const parts = l.replace(/\r$/, '').split('\t');
+    const status = (parts[0] ?? '?')[0];
+    const p = (parts.length > 2 ? parts[2] : parts[1])?.replace(/\\/g, '/');
+    if (!p) return null;
+    let sig = `${status}:gone`;
+    try {
+      const s = fs.statSync(path.join(root, p));
+      sig = `${status}:${s.size}:${Math.round(s.mtimeMs)}`;
+    } catch { /* deleted in the work tree */ }
+    return { status, path: p, sig };
+  }).filter(Boolean);
+}
+export async function diffAgainstRef(root, ref, file) {
+  const out = await run(root, ['diff', ref, '--', file]);
+  return parseUnified(out);
+}
+
 // find tracked files by name substring, case-insensitive
 export async function listFiles(root, q) {
   try {

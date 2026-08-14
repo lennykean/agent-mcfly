@@ -107,6 +107,16 @@ const server = http.createServer(async (req, res) => {
           const staged = url.searchParams.get('staged') === '1';
           return json(res, 200, { hunks: await git.diff(root, file, staged) });
         }
+        // review checklist: files differing from a base ref, and their diffs
+        if (url.pathname === '/api/git/reffiles') {
+          const ref = url.searchParams.get('ref') ?? '';
+          return json(res, 200, { ref: await git.resolveRef(root, ref), files: await git.diffFiles(root, ref) });
+        }
+        if (url.pathname === '/api/git/refdiff') {
+          const ref = url.searchParams.get('ref') ?? '';
+          const file = url.searchParams.get('path') ?? '';
+          return json(res, 200, { hunks: await git.diffAgainstRef(root, ref, file) });
+        }
       } catch (e) {
         // not a repo, or git absent: the pane shows the message, nothing breaks
         return json(res, 200, { error: String(e.message ?? e).split('\n')[0] });
@@ -167,6 +177,7 @@ const server = http.createServer(async (req, res) => {
             : url.pathname === '/api/review-comment' ? review.addComment(pwd, b.id, b.comment)
             : url.pathname === '/api/review-reply' ? review.addReply(pwd, b.commentId, b.body, b.author ?? 'human', b.addressed)
             : url.pathname === '/api/review-thread-state' ? review.setThreadState(pwd, b.id, b.commentId, b.state)
+            : url.pathname === '/api/review-checklist' ? review.setChecklist(pwd, b.id, b.patch ?? {})
             : undefined;
           if (out === undefined) return json(res, 404, { error: 'unknown review action' });
           if (out === null) return json(res, 404, { error: 'not found' });

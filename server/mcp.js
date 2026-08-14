@@ -148,7 +148,7 @@ async function runWorkspaceState(args = {}) {
 const REVIEW_STATE_TOOL = {
   name: 'review_state',
   title: 'Read human reviews',
-  description: "Human code reviews for this project: threaded comments the user anchored to lines, GitHub-review style. Call it when a review is active, when the user mentions their review or comments, or before starting work the user asked to be reviewed. Reply to threads with review_reply.",
+  description: "Human code reviews for this project: threaded comments the user anchored to lines, GitHub-review style. A review may carry a checklist — the user's punch list for a target diff: base (the ref being diffed against, HEAD = uncommitted work), files (each with status and reviewed: whether the human has looked at it yet), and reviewed/total progress. Use the checklist to know what the review is ABOUT and which files still await the human's eyes. Call it when a review is active, when the user mentions their review, comments, or checklist, or before starting work the user asked to be reviewed. Reply to threads with review_reply.",
   inputSchema: {
     type: 'object', additionalProperties: false,
     properties: {
@@ -182,7 +182,7 @@ const REVIEW_REPLY_TOOL = {
   },
 };
 
-async function reviewFetch(args, route, payload) {
+function pickServer(args) {
   const servers = liveServers();
   if (!servers.length) return null;
   const cwd = path.resolve(args.cwd ?? process.cwd());
@@ -190,11 +190,45 @@ async function reviewFetch(args, route, payload) {
   // The server's pwd only picks WHICH server; reviews belong to the
   // project, so the query pwd is always the agent's own cwd.
   const byNewest = [...servers].sort((a, b) => b.started - a.started);
-  const pick = byNewest.find((s) => cwd.toLowerCase().startsWith(String(s.pwd).toLowerCase())) ?? byNewest[0];
+  return { cwd, pick: byNewest.find((s) => cwd.toLowerCase().startsWith(String(s.pwd).toLowerCase())) ?? byNewest[0] };
+}
+
+async function reviewFetch(args, route, payload) {
+  const found = pickServer(args);
+  if (!found) return null;
+  const { cwd, pick } = found;
   const res = payload
     ? await fetch(`http://127.0.0.1:${pick.port}${route}`, { method: 'POST', body: JSON.stringify({ ...payload, pwd: cwd }) })
     : await fetch(`http://127.0.0.1:${pick.port}${route}?pwd=${encodeURIComponent(cwd)}`);
   return res.json();
+}
+
+// a review with a checklist gets its TARGET DIFF resolved: which files
+// differ from the base ref right now, and which the human already reviewed
+async function enrichChecklist(review, args) {
+  const base = review.checklist?.base;
+  if (!base) return review;
+  const found = pickServer(args);
+  if (!found) return review;
+  try {
+    const d = await fetch(`http://127.0.0.1:${found.pick.port}/api/git/reffiles?root=${encodeURIComponent(review.project)}&ref=${encodeURIComponent(base)}`)
+      .then((r) => r.json());
+    if (d.error) return { ...review, checklist: { base, error: String(d.error) } };
+    const checked = review.checklist.checked ?? {};
+    const files = (d.files ?? []).map((f) => ({ status: f.status, path: f.path, reviewed: checked[f.path] !== undefined }));
+    return {
+      ...review,
+      checklist: {
+        base,
+        base_resolved: d.ref,
+        files,
+        reviewed: files.filter((f) => f.reviewed).length,
+        total: files.length,
+      },
+    };
+  } catch {
+    return review;
+  }
 }
 
 async function runReviewState(args = {}) {
@@ -202,7 +236,8 @@ async function runReviewState(args = {}) {
     const reviews = await reviewFetch(args, '/api/reviews');
     if (reviews === null) return { content: [{ type: 'text', text: 'no running mcfly server found' }], isError: true };
     const filtered = args.all ? reviews : reviews.filter((r) => r.status === 'open');
-    const result = { schema: 'mcfly.data.v1', kind: 'review_state', reviews: filtered };
+    const enriched = await Promise.all(filtered.map((r) => enrichChecklist(r, args)));
+    const result = { schema: 'mcfly.data.v1', kind: 'review_state', reviews: enriched };
     return { content: [{ type: 'text', text: `${DATA_MARKER}\n${JSON.stringify(result)}` }], structuredContent: result };
   } catch (error) {
     return { content: [{ type: 'text', text: `review lookup failed: ${error.message}` }], isError: true };
