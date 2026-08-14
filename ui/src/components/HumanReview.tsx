@@ -252,9 +252,19 @@ export function HumanReview({ active, sessionLoaded, onCreate, onClose, onOpenCo
 }) {
   const clBoxRef = useRef<HTMLDivElement | null>(null);
   const hasChecklist = !!(active && checklist?.base);
-  // the punch list column resizes like every other pane, width persisted
+  // the punch list column resizes like every other pane, width persisted.
+  // The drag tracks the ABSOLUTE pointer from its start position: clamping
+  // accumulated deltas would detach the handle at the bounds ("wiggle to
+  // unstick").
   const [clW, setClW] = useState(() => Number(localStorage.getItem('mcfly.clW')) || 120);
   useEffect(() => { localStorage.setItem('mcfly.clW', String(clW)); }, [clW]);
+  const dragBase = useRef(clW);
+  const dragAcc = useRef(0);
+  const clDragStart = () => { dragBase.current = clW; dragAcc.current = 0; };
+  const clDrag = (dx: number) => {
+    dragAcc.current += dx;
+    setClW(Math.max(100, Math.min(800, dragBase.current + dragAcc.current)));
+  };
   // up past the first comment goes back to the checklist when there is one
   const walk = useRowWalk('.rvThread', hasChecklist ? () => clBoxRef.current?.focus() : onEscapeTop);
   // no active review: Enter IS the "start review" button
@@ -313,7 +323,7 @@ export function HumanReview({ active, sessionLoaded, onCreate, onClose, onOpenCo
           />
         )}
         {active && checklist && (
-          <Splitter dir="col" onDrag={(dx) => setClW((w) => Math.max(80, Math.min(800, w + dx)))} />
+          <Splitter dir="col" onStart={clDragStart} onDrag={clDrag} />
         )}
         <div className="rvList" ref={walk.boxRef} tabIndex={-1} onKeyDown={onKeyDown} onMouseDown={walk.onMouseDown}>
           <div className="expCursor" ref={walk.barRef} style={{ display: 'none' }} />
