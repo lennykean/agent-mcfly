@@ -15,7 +15,8 @@ import { HumanReview } from './components/HumanReview';
 import { HistoryBar } from './components/HistoryBar';
 import type { Review, ReviewComment, SessionMeta } from './types';
 import { normPath, resolveWaypoint, type WaypointEntry } from './lib/timeline';
-import { actionOf, focusEditor } from './lib/keys';
+import { APP_CHORDS, actionOf, focusEditor, justArmed, setTmuxMode, setVimMode } from './lib/keys';
+import { QuickPick } from './components/QuickPick';
 import { emit, onEditorSelection, updateSnapshot, watchSelections } from './lib/workspace';
 import { applySelect, clickMode } from './lib/select';
 import { Terminal } from './components/Terminal';
@@ -248,19 +249,8 @@ export default function App() {
     ].filter(Boolean).join(' - ');
   }, [pwd, home, r.session]);
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const t = e.target;
-      if (t instanceof HTMLInputElement || t instanceof HTMLSelectElement || t instanceof HTMLTextAreaElement) return;
-      if (t instanceof Element && t.closest('.livePane')) return; // never steal keys from the live terminal
-      const action = actionOf(e, ['playPause', 'stepBack', 'stepForward']);
-      if (action === 'playPause') { e.preventDefault(); r.togglePlay(); }
-      else if (action === 'stepBack') r.stepBy(-1);
-      else if (action === 'stepForward') r.stepBy(1);
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [r]);
+  // the global key handler lives further down, after the state it drives
+  // (editor order, active path) is declared
 
   // tab strips are navigable: left/right switch panes, down (or Enter)
   // descends into the pane's focusable content, and content components
@@ -275,9 +265,42 @@ export default function App() {
     if (action === 'left') set(order[(i - 1 + order.length) % order.length]);
     else if (action === 'right') set(order[(i + 1) % order.length]);
     else if (action === 'down' || action === 'activate') {
-      const el = (e.currentTarget as HTMLElement).parentElement?.querySelector('.tabBody:not(.hiddenTab) [tabindex]') as HTMLElement | null;
+      // descend into the visible body: an inner focusable, the body itself
+      // (term/data/way/review/tool), or a live terminal's textarea
+      const body = (e.currentTarget as HTMLElement).parentElement?.querySelector('.tabBody:not(.hiddenTab)') as HTMLElement | null;
+      const el = (body?.querySelector('[tabindex]') as HTMLElement | null)
+        ?? (body?.hasAttribute('tabindex') ? body : null)
+        ?? (body?.querySelector('textarea') as HTMLElement | null);
       el?.focus();
     } else if (action === 'dismiss') (e.target as HTMLElement).blur();
+  }, []);
+
+  // the bottom and right strips get the same treatment as the left one
+  const bottomStripRef = useRef<HTMLDivElement>(null);
+  const rightStripRef = useRef<HTMLDivElement>(null);
+
+  // a focused pane BODY (term/data/tool detail): plain arrows scroll its
+  // content; up at the very top escalates to the strip. Left/right fall
+  // through to the contextual transport.
+  const scrollKeys = useCallback((e: React.KeyboardEvent) => {
+    if (e.target !== e.currentTarget) return; // inner widgets own their keys
+    const action = actionOf(e, ['up', 'down', 'pageUp', 'pageDown', 'home', 'end']);
+    if (!action) return;
+    const box = e.currentTarget as HTMLElement;
+    const sc = (box.querySelector('.term, .dataScroll, .toolDetail') ?? box) as HTMLElement;
+    if (action === 'up' && sc.scrollTop === 0) {
+      e.preventDefault();
+      e.stopPropagation();
+      bottomStripRef.current?.focus();
+      return;
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    const page = Math.max(54, sc.clientHeight - 54);
+    const delta: Record<string, number> = { up: -54, down: 54, pageUp: -page, pageDown: page };
+    if (action === 'home') sc.scrollTop = 0;
+    else if (action === 'end') sc.scrollTop = sc.scrollHeight;
+    else sc.scrollBy({ top: delta[action] ?? 0 });
   }, []);
 
   // panels are separate keyboard worlds: plain arrows never cross a panel
@@ -287,18 +310,48 @@ export default function App() {
   // you were.
   const lastSideFocus = useRef<HTMLElement | null>(null);
   const workbenchKeys = useCallback((e: React.KeyboardEvent) => {
-    const action = actionOf(e, ['panelLeft', 'panelRight']);
-    if (!action) return;
     const t = e.target as Element;
-    if (action === 'panelLeft' && !t.closest?.('.sidebar')) {
+    // real text inputs keep their ctrl+arrows (word jumps); the live
+    // terminal's textarea is the exception — xterm already released the
+    // hops that leave it, everything else never reaches here
+    if (/^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName) && !t.closest?.('.livePane')) return;
+    const action = actionOf(e, ['panelLeft', 'panelRight', 'panelUp', 'panelDown']);
+    if (!action) return;
+    // the full panel graph, by geometry: sidebar | editor / bottom | right
+    const region = t.closest?.('.sidebar') ? 'side'
+      : t.closest?.('.bottomPane') ? 'bottom'
+        : t.closest?.('.rightPane') ? 'right'
+          : 'editor';
+    const focusSide = () => {
       const back = lastSideFocus.current?.isConnected ? lastSideFocus.current : leftStripRef.current;
       back?.focus();
-    } else if (action === 'panelRight' && !t.closest?.('.editorPane')) {
-      focusEditor();
-    } else return;
+    };
+    const descend = (rootSel: string) => requestAnimationFrame(() => requestAnimationFrame(() => {
+      const body = document.querySelector(`${rootSel} .tabBody:not(.hiddenTab)`) as HTMLElement | null;
+      const el = (body?.querySelector('[tabindex]') as HTMLElement | null)
+        ?? (body?.hasAttribute('tabindex') ? body : null)
+        ?? (body?.querySelector('textarea') as HTMLElement | null);
+      el?.focus();
+    }));
+    const focusBottom = () => { setBottomOpen(true); descend('.bottomPane'); };
+    const focusRight = () => { setRightOpen(true); descend('.rightPane'); };
+    const go: Record<string, (() => void) | undefined> = {
+      'editor:panelLeft': focusSide,
+      'editor:panelRight': focusRight,
+      'editor:panelDown': focusBottom,
+      'bottom:panelUp': () => focusEditor(),
+      'bottom:panelLeft': focusSide,
+      'bottom:panelRight': focusRight,
+      'right:panelLeft': () => focusEditor(),
+      'right:panelDown': focusBottom,
+      'side:panelRight': () => focusEditor(),
+    };
+    const fn = go[`${region}:${action}`];
+    if (!fn) return;
+    fn();
     e.preventDefault();
     e.stopPropagation();
-  }, []);
+  }, [setBottomOpen, setRightOpen]);
 
   const sidebarKeys = useCallback((e: React.KeyboardEvent) => {
     const action = actionOf(e, ['panelUp', 'panelDown']);
@@ -383,6 +436,12 @@ export default function App() {
   // auto-follow: ON = the view jumps to activity (tour-guide mode); OFF = the
   // same things happen quietly, and the tab that had activity flashes instead
   const [autoFollow, setAutoFollow] = useStoredBool('autoFollow', true);
+  // vim mode: swaps the vim keymap overlay in and shows the status bar
+  const [vimMode, setVimModeState] = useStoredBool('vimMode', false);
+  useEffect(() => { setVimMode(vimMode); }, [vimMode]);
+  // tmux mode: ctrl+b prefix chords manage terminals, from inside them too
+  const [tmuxMode, setTmuxModeState] = useStoredBool('tmuxMode', false);
+  useEffect(() => { setTmuxMode(tmuxMode); }, [tmuxMode]);
   const [flashes, setFlashes] = useState<Record<string, number>>({});
   const flash = useCallback((key: string) => {
     setFlashes((f) => ({ ...f, [key]: (f[key] ?? 0) + 1 }));
@@ -426,17 +485,11 @@ export default function App() {
   // review stop); the next fold touch takes the tab back. Declared before
   // the tour effects so the clear-on-touch runs first, never after them.
   const [pinnedOverride, setPinnedOverride] = useState<string | undefined>();
-  const prevActivePath = useRef(r.view.activePath);
   useEffect(() => {
-    const prev = prevActivePath.current;
-    prevActivePath.current = r.view.activePath;
-    if (autoFollow) { setPinnedOverride(undefined); return; }
-    // tour off: the live tab holds the file being read; the flash announces
-    // the new touch, and clicking the pinned tab (or LIVE) releases the hold
-    if (editorTab === 'pinned' && prev && r.view.activePath && normPath(prev) !== normPath(r.view.activePath)) {
-      setPinnedOverride((cur) => cur ?? prev);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // the LIVE file ALWAYS follows the playhead — that tab is "what the
+    // agent is doing with files"; tour-off only stops the tab/pane yanking.
+    // A tour placement (waypoint/review pin) lasts until the next touch.
+    setPinnedOverride(undefined);
   }, [r.view.activePath]);
   const pinned = (pinnedOverride ? r.view.tabs.find((t) => normPath(t.path) === normPath(pinnedOverride)) : undefined)
     ?? r.view.tabs.find((t) => t.path === r.view.activePath);
@@ -772,6 +825,141 @@ export default function App() {
       : userTabs.find((t) => t.key === editorTab)?.path;
   const activeWt = worktreeOf(activeViewPath);
 
+  // ---- the global keyboard: app chords work everywhere (live terminal
+  // included — xterm declines them); transport keys are CONTEXTUAL: a pane
+  // with its own history bar owns prev/next/first/last while focus is in it,
+  // everywhere else they drive the session playhead ----
+  const termCtl = useRef<{ startNew: () => void; focusOrNext: (fromTerm: boolean) => void; cycle: (dir: 1 | -1) => void; confirmKill: () => void } | null>(null);
+  const [quick, setQuick] = useState<null | 'grep' | 'file'>(null);
+  const editorOrder = useMemo(
+    () => ['pinned', ...(timelinePath ? ['timeline'] : []), ...userTabs.map((t) => t.key)],
+    [timelinePath, userTabs],
+  );
+  useEffect(() => {
+    const focusTerm = () => requestAnimationFrame(() => {
+      ([...document.querySelectorAll('.livePane .xterm-helper-textarea')]
+        .find((x) => (x as HTMLElement).offsetParent !== null) as HTMLElement | undefined)?.focus();
+    });
+    // a tab jump is a jump: focus lands IN the pane, so arrows work
+    // immediately (double rAF: the tab switch has to render first)
+    const focusPane = (rootSel: string) => requestAnimationFrame(() => requestAnimationFrame(() => {
+      const body = document.querySelector(`${rootSel} .tabBody:not(.hiddenTab)`) as HTMLElement | null;
+      const inner = (body?.querySelector('[tabindex]') as HTMLElement | null)
+        ?? (body?.hasAttribute('tabindex') ? body : null)
+        ?? (body?.querySelector('textarea') as HTMLElement | null);
+      inner?.focus();
+    }));
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target;
+      const el = t instanceof Element ? t : null;
+      const chord = actionOf(e, APP_CHORDS.filter((a) => a !== 'playHome' && a !== 'playEnd'));
+      if (chord) {
+        e.preventDefault();
+        e.stopPropagation();
+        switch (chord) {
+          case 'gotoTools': setLeftOpen(true); setLeftTab('tools'); focusPane('.sidebar'); break;
+          case 'gotoExplorer': setLeftOpen(true); setLeftTab('explorer'); focusPane('.sidebar'); break;
+          case 'gotoGit': setLeftOpen(true); setLeftTab('git'); focusPane('.sidebar'); break;
+          case 'gotoChat': setRightOpen(true); setRightTab('chat'); focusPane('.rightPane'); break;
+          case 'gotoLiveTerm': setRightOpen(true); setRightTab('term'); focusTerm(); break;
+          case 'gotoAgentTerm': setBottomOpen(true); setBottomTab('term'); focusPane('.bottomPane'); break;
+          case 'gotoData': setBottomOpen(true); setBottomTab('data'); focusPane('.bottomPane'); break;
+          case 'gotoWayfinder': setBottomOpen(true); setBottomTab('way'); focusPane('.bottomPane'); break;
+          case 'gotoReview': setBottomOpen(true); setBottomTab('review'); focusPane('.bottomPane'); break;
+          case 'gotoToolDetail': setBottomOpen(true); setBottomTab('tool'); focusPane('.bottomPane'); break;
+          case 'bufferPrev':
+          case 'bufferNext': {
+            const i = Math.max(0, editorOrder.indexOf(editorTab));
+            const n = editorOrder.length;
+            setEditorTab(editorOrder[(i + (chord === 'bufferNext' ? 1 : n - 1)) % n]);
+            break;
+          }
+          case 'paneNext':
+          case 'panePrev': {
+            // cycle the tabs of whatever panel holds focus, focus following
+            const dir = chord === 'paneNext' ? 1 : -1;
+            const cycle = (order: readonly string[], cur: string, set: (t: string) => void) => {
+              const i = Math.max(0, order.indexOf(cur));
+              set(order[(i + dir + order.length) % order.length]);
+            };
+            if (el?.closest('.sidebar')) {
+              cycle(['tools', 'explorer', 'git'], leftTab, (t) => setLeftTab(t as typeof leftTab));
+              focusPane('.sidebar');
+            } else if (el?.closest('.bottomPane')) {
+              cycle(['term', 'data', 'way', 'review', 'tool'], bottomTab, (t) => setBottomTab(t as typeof bottomTab));
+              focusPane('.bottomPane');
+            } else if (el?.closest('.rightPane')) {
+              cycle(['chat', 'term'], rightTab, (t) => setRightTab(t as typeof rightTab));
+              focusPane('.rightPane');
+            } else {
+              cycle(editorOrder, editorTab, setEditorTab);
+              focusEditor();
+            }
+            break;
+          }
+          case 'openTimeline':
+            if (activeViewPath) { setTimelinePath(activeViewPath); setEditorTab('timeline'); }
+            break;
+          case 'openReal':
+            // snapshot, diff, or the LIVE view: jump to the on-disk file
+            if (activeViewPath) openAbs(activeViewPath);
+            break;
+          case 'grep': setQuick('grep'); break;
+          case 'findFile': setQuick('file'); break;
+          case 'closeTab':
+            if (editorTab === 'timeline') { setTimelinePath(undefined); setEditorTab('pinned'); }
+            else if (editorTab !== 'pinned') closeFile(editorTab);
+            break;
+          case 'termFocus':
+            setRightOpen(true); setRightTab('term');
+            termCtl.current?.focusOrNext(!!el?.closest('.livePane'));
+            focusTerm();
+            break;
+          case 'termNew':
+            setRightOpen(true); setRightTab('term');
+            termCtl.current?.startNew();
+            focusTerm();
+            break;
+          case 'termNext':
+          case 'termPrev':
+            setRightOpen(true); setRightTab('term');
+            termCtl.current?.cycle(chord === 'termNext' ? 1 : -1);
+            focusTerm();
+            break;
+          case 'termKill':
+            setRightOpen(true); setRightTab('term');
+            termCtl.current?.confirmKill();
+            break;
+          default: { // tab1..tab9: pick from the editor strip by position
+            const idx = Number(chord.slice(3)) - 1;
+            if (editorOrder[idx]) setEditorTab(editorOrder[idx]);
+          }
+        }
+        return;
+      }
+      // a leader keystroke (space, ctrl+b, g...) armed a sequence: consume
+      // it silently — it must not ALSO play/pause or reach anything else
+      if (justArmed(e)) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      if (t instanceof HTMLInputElement || t instanceof HTMLSelectElement || t instanceof HTMLTextAreaElement) return;
+      if (el?.closest('.livePane')) return; // plain keys belong to the live terminal
+      const action = actionOf(e, ['playPause', 'stepBack', 'stepForward', 'playHome', 'playEnd']);
+      if (!action) return;
+      const bar = el?.closest('.tabBody, .editorSlot')?.querySelector('.histBar');
+      const press = (title: string) => { (bar?.querySelector(`button[title="${title}"]`) as HTMLButtonElement | null)?.click(); };
+      if (action === 'playPause') { e.preventDefault(); r.togglePlay(); }
+      else if (action === 'stepBack') { if (bar) press('Previous change'); else r.stepBy(-1); }
+      else if (action === 'stepForward') { if (bar) press('Next change'); else r.stepBy(1); }
+      else if (action === 'playHome') { e.preventDefault(); if (bar) press('First change'); else r.jump(0); }
+      else if (action === 'playEnd') { e.preventDefault(); if (bar) press('Last change'); else r.jump(Math.max(0, r.steps.length - 1)); }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [r, editorOrder, editorTab, activeViewPath, openAbs, closeFile, leftTab, bottomTab, rightTab, setLeftOpen, setRightOpen, setBottomOpen, setLeftTab, setRightTab, setBottomTab]);
+
   // agents see the git surface through workspace_state: the selection, the
   // open diff, and the worktree — "commit these 3 files" resolves from here
   useEffect(() => {
@@ -853,6 +1041,24 @@ export default function App() {
             }}
           >
             <span className={`codicon codicon-${autoFollow ? 'eye' : 'eye-closed'}`} />
+          </button>
+          <button
+            className={`tourToggle ${vimMode ? 'on' : ''}`}
+            title={vimMode
+              ? 'Vim mode ON: hjkl, visual mode, yy, gg/G, / find, : commands, status bar. Click for normal keys.'
+              : 'Vim mode OFF: normal keys only. Click for vim motions and the command bar.'}
+            onClick={() => setVimModeState(!vimMode)}
+          >
+            <span className="vimBadge">vim</span>
+          </button>
+          <button
+            className={`tourToggle ${tmuxMode ? 'on' : ''}`}
+            title={tmuxMode
+              ? 'Tmux mode ON: ctrl+b c new terminal, ctrl+b n/p cycle — the shell gives up ctrl+b. Click to return it.'
+              : 'Tmux mode OFF: ctrl+b stays with the shell. Click for prefix terminal chords.'}
+            onClick={() => setTmuxModeState(!tmuxMode)}
+          >
+            <span className="vimBadge">tmux</span>
           </button>
           <span className="layoutToggles">
             <button className={leftOpen ? 'on' : ''} title="Toggle left pane" onClick={() => setLeftOpen(!leftOpen)}>◧</button>
@@ -959,6 +1165,7 @@ export default function App() {
               onReviewReply={(commentId, body) => reviewPost('/api/review-reply', { commentId, body, author: 'human' })}
               onReviewResolve={(commentId) => activeReview && reviewPost('/api/review-thread-state', { id: activeReview.id, commentId, state: 'resolved' })}
               onReviewViewOriginal={reviewViewOriginal}
+              vim={vimMode}
             />
           </div>
           {bottomOpen && (
@@ -968,7 +1175,7 @@ export default function App() {
                 dragEdit((dy / h) * 100);
               }} />
               <div className="bottomPane">
-                <div className="paneTabs">
+                <div className="paneTabs" ref={bottomStripRef} tabIndex={-1} onKeyDown={stripKeys(['term', 'data', 'way', 'review', 'tool'], bottomTab, (t) => setBottomTab(t as typeof bottomTab))}>
                   <div key={`t${flashes.term ?? 0}`} className={`paneTab ${bottomTab === 'term' ? 'active' : ''} ${flashes.term ? 'tabFlashAnim' : ''}`} onClick={() => setBottomTab('term')}>
                     AGENT TERMINAL <span className="roBadge">read only</span>
                   </div>
@@ -985,27 +1192,30 @@ export default function App() {
                     TOOL CALL
                   </div>
                 </div>
-                <div className={bottomTab === 'term' ? 'tabBody' : 'tabBody hiddenTab'}>
+                {/* tabIndex: a click parks focus here, so the transport keys
+                    (prev/next/first/last) drive THIS pane's history bar */}
+                <div className={bottomTab === 'term' ? 'tabBody' : 'tabBody hiddenTab'} tabIndex={-1} onKeyDown={scrollKeys}>
                   <HistoryBar positions={termSteps} pointer={r.pointer} onJump={r.jump} />
                   <Terminal blocks={r.view.term} animatedAt={animatedTermAt} speed={r.speed} seekTick={r.seekTick} visible={bottomTab === 'term'} />
                 </div>
-                <div className={bottomTab === 'data' ? 'tabBody' : 'tabBody hiddenTab'}>
+                <div className={bottomTab === 'data' ? 'tabBody' : 'tabBody hiddenTab'} tabIndex={-1} onKeyDown={scrollKeys}>
                   <HistoryBar positions={dataSteps} pointer={r.pointer} onJump={r.jump} />
                   <DataPane data={r.view.data} animate={r.view.data?.touchedAt === r.animateIndex} selection={dataSel} onRowClick={dataRowClick} />
                 </div>
-                <div className={bottomTab === 'way' ? 'tabBody' : 'tabBody hiddenTab'}>
-                  <Wayfinder waypoints={r.view.waypoints} onSelect={openWaypoint} />
+                <div className={bottomTab === 'way' ? 'tabBody' : 'tabBody hiddenTab'} tabIndex={-1}>
+                  <Wayfinder waypoints={r.view.waypoints} onSelect={openWaypoint} onEscapeTop={() => bottomStripRef.current?.focus()} />
                 </div>
-                <div className={bottomTab === 'review' ? 'tabBody' : 'tabBody hiddenTab'}>
+                <div className={bottomTab === 'review' ? 'tabBody' : 'tabBody hiddenTab'} tabIndex={-1}>
                   <HumanReview
                     active={activeReview}
                     sessionLoaded={!!r.session}
                     onCreate={createReview}
                     onClose={() => activeReview && reviewPost('/api/review-close', { id: activeReview.id })}
                     onOpenComment={openReviewComment}
+                    onEscapeTop={() => bottomStripRef.current?.focus()}
                   />
                 </div>
-                <div className={bottomTab === 'tool' ? 'tabBody' : 'tabBody hiddenTab'}>
+                <div className={bottomTab === 'tool' ? 'tabBody' : 'tabBody hiddenTab'} tabIndex={-1} onKeyDown={scrollKeys}>
                   <ToolDetail step={currentTool} />
                 </div>
               </div>
@@ -1017,7 +1227,7 @@ export default function App() {
           <>
             <Splitter dir="col" onDrag={(dx) => dragRight(-dx)} />
             <div className="rightPane">
-              <div className="paneTabs">
+              <div className="paneTabs" ref={rightStripRef} tabIndex={-1} onKeyDown={stripKeys(['chat', 'term'], rightTab, (t) => setRightTab(t as typeof rightTab))}>
                 <div className={`paneTab ${rightTab === 'chat' ? 'active' : ''}`} onClick={() => setRightTab('chat')}>CHAT</div>
                 <div className={`paneTab ${rightTab === 'term' ? 'active' : ''}`} onClick={() => setRightTab('term')}>LIVE TERMINAL</div>
               </div>
@@ -1030,6 +1240,7 @@ export default function App() {
                   onJump={r.jump}
                   onOpenAgent={openAgent}
                   visible={rightTab === 'chat'}
+                  onEscapeTop={() => rightStripRef.current?.focus()}
                 />
               </div>
               {/* stays mounted across tab switches so the PTY session survives */}
@@ -1046,6 +1257,7 @@ export default function App() {
                     cwd: s.pwd, updated_at: 0, size: 0,
                   })}
                   onFollowResolve={(p) => void followResolve({ title: p.title, cwd: p.cwd || pwd || '' })}
+                  ctl={termCtl}
                 />
               </div>
             </div>
@@ -1063,6 +1275,45 @@ export default function App() {
           onPick={applyPick}
           onGo={scopeFolder}
           onClose={() => { setPickerOpen(false); setPickerSeed(undefined); }}
+        />
+      )}
+
+      {quick && (
+        <QuickPick
+          key={quick}
+          title={quick === 'grep' ? 'grep' : 'find file'}
+          placeholder={quick === 'grep' ? 'regex…' : 'file name…'}
+          onQuery={async (q) => {
+            const root = explorerRoot ?? cwd;
+            if (!root || !q.trim()) return [];
+            const kind = quick === 'grep' ? 'grep' : 'files';
+            const res = await fetch(`/api/${kind}?root=${encodeURIComponent(root)}&q=${encodeURIComponent(q)}`)
+              .then((r2) => r2.json())
+              .catch(() => []);
+            if (!Array.isArray(res)) return [];
+            return quick === 'grep'
+              ? (res as { path: string; line: number; text: string }[]).map((m) => ({
+                label: `${m.path}:${m.line}`, detail: m.text.trim().slice(0, 160), path: m.path, line: m.line,
+              }))
+              : (res as string[]).map((p) => ({ label: p, path: p }));
+          }}
+          onPick={(it) => {
+            setQuick(null);
+            const root = explorerRoot ?? cwd;
+            if (!root) return;
+            openAbs(`${root}/${it.path}`, it.line);
+            // the caret follows the pick: onto the match line (grep) or the
+            // top of the file (find file). Fired twice — the tab mounts async.
+            if (it.line) {
+              const line = it.line;
+              const go = () => window.dispatchEvent(new CustomEvent('mcfly:goline', { detail: line }));
+              setTimeout(go, 300);
+              setTimeout(go, 900);
+            } else {
+              focusEditor(it.path.split('/').pop());
+            }
+          }}
+          onClose={() => setQuick(null)}
         />
       )}
     </div>

@@ -1,3 +1,5 @@
+import { actionOf } from '../lib/keys';
+import { useRowWalk } from '../lib/rowwalk';
 import type { Review, ReviewComment } from '../types';
 
 const timeOf = (ts: number) => new Date(ts).toLocaleTimeString();
@@ -10,13 +12,25 @@ const StateChip = ({ state }: { state: ReviewComment['state'] }) => (
 
 // HUMAN REVIEW (bottom panel): the human's red pen. One open review per
 // session; comments are threads the agent answers through the MCP.
-export function HumanReview({ active, sessionLoaded, onCreate, onClose, onOpenComment }: {
+export function HumanReview({ active, sessionLoaded, onCreate, onClose, onOpenComment, onEscapeTop }: {
   active: Review | null;
   sessionLoaded: boolean;
   onCreate: () => void;
   onClose: () => void;
   onOpenComment: (review: Review, comment: ReviewComment) => void;
+  onEscapeTop?: () => void;
 }) {
+  const walk = useRowWalk('.rvThread', onEscapeTop);
+  // no active review: Enter IS the "start review" button
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (!active && actionOf(e, ['activate'])) {
+      e.preventDefault();
+      e.stopPropagation();
+      if (sessionLoaded) onCreate();
+      return;
+    }
+    walk.onKeyDown(e);
+  };
   const rows = (review: Review) => review.comments.map((c) => (
     <div key={c.id} className="rvThread" onClick={() => onOpenComment(review, c)}>
       <div className="rvRow">
@@ -52,7 +66,8 @@ export function HumanReview({ active, sessionLoaded, onCreate, onClose, onOpenCo
           </>
         )}
       </div>
-      <div className="rvList">
+      <div className="rvList" ref={walk.boxRef} tabIndex={-1} onKeyDown={onKeyDown} onMouseDown={walk.onMouseDown}>
+        <div className="expCursor" ref={walk.barRef} style={{ display: 'none' }} />
         {active && rows(active)}
         {active && active.comments.length === 0 && (
           <div className="emptyHint">no comments yet — click a line number in any file</div>

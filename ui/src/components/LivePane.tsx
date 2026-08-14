@@ -4,6 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
 import { emitTerminalSelection, updateSnapshot } from '../lib/workspace';
+import { termReleasedChord } from '../lib/keys';
 
 interface Config { tools: string[]; token: string; platform?: string }
 
@@ -106,9 +107,12 @@ function PtySession({ tool, token, cwd, platform, attachId, steal, visible, onPt
     // Ctrl+V: xterm would encode it as ^V for the pty, swallowing the paste.
     // Decline to handle it so the browser's native paste reaches xterm's
     // textarea instead (VS Code intercepts the same way). Ctrl+Shift+V
-    // already pastes natively.
-    term.attachCustomKeyEventHandler((e) =>
-      !(e.type === 'keydown' && e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'v'));
+    // already pastes natively. App chords (tab jumps, terminal switch/new)
+    // are declined the same way: the window handler owns them.
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type === 'keydown' && termReleasedChord(e)) return false;
+      return !(e.type === 'keydown' && e.ctrlKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'v');
+    });
 
     // image paste: no text for xterm to insert, so route by tool.
     // claude reads the OS clipboard itself — and the browser's clipboard IS
@@ -266,7 +270,7 @@ interface TermEntry {
 // terminal stays mounted while backgrounded; '+' opens the picker (attach an
 // existing PTY from the gallery, or start a new tool in the open folder).
 // Refresh detaches all (PTYs persist server-side; re-adopt via the gallery).
-export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFileRef, onFollowSession, onFollowResolve }: {
+export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFileRef, onFollowSession, onFollowResolve, ctl }: {
   cwd?: string;
   currentSession?: { provider: string; id: string } | null;
   onToolStart?: (tool: string) => void;
@@ -274,6 +278,8 @@ export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFile
   onOpenFileRef?: (path: string, line?: number) => void;
   onFollowSession?: (session: { provider: string; id: string; pwd: string }) => void;
   onFollowResolve?: (pty: { title?: string | null; cwd: string }) => void;
+  // keyboard chords reach in from the app: focus/cycle terminals, start new
+  ctl?: React.MutableRefObject<{ startNew: () => void; focusOrNext: (fromTerm: boolean) => void; cycle: (dir: 1 | -1) => void; confirmKill: () => void } | null>;
 }) {
   const [config, setConfig] = useState<Config | null>(null);
   const [error, setError] = useState<string>();
@@ -364,8 +370,60 @@ export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFile
   // this window included; clicking those just switches to their tab
   const tabOf = (ptyId: string) => terms.find((e) => e.ptyId === ptyId);
 
+  // the terminal chords: termNew starts a shell; termFocus focuses the
+  // active terminal, and pressed again FROM a terminal it cycles the tabs
+  useEffect(() => {
+    if (!ctl) return;
+    ctl.current = {
+      startNew: () => startNew('_'),
+      focusOrNext: (fromTerm: boolean) => {
+        if (!terms.length) return; // the picker is already the view
+        if (fromTerm && active !== null && terms.length > 1) {
+          const i = terms.findIndex((t) => t.key === active);
+          setActive(terms[(i + 1) % terms.length].key);
+        } else if (active === null) {
+          setActive(terms[0].key);
+        }
+      },
+      cycle: (dir: 1 | -1) => {
+        if (!terms.length) return;
+        const i = Math.max(0, terms.findIndex((t) => t.key === active));
+        setActive(terms[(i + dir + terms.length) % terms.length].key);
+      },
+      confirmKill: () => { if (active !== null) setConfirmKill(active); },
+    };
+  });
+
+  // tmux-style kill confirmation: an inline y/n strip, keys captured at the
+  // window so the shell never sees them
+  const [confirmKill, setConfirmKill] = useState<number | null>(null);
+  useEffect(() => {
+    if (confirmKill === null) return;
+    const on = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.key.toLowerCase() === 'y') {
+        killTerm(confirmKill);
+        setConfirmKill(null);
+      } else if (e.key.toLowerCase() === 'n' || e.key === 'Escape') {
+        setConfirmKill(null);
+      }
+    };
+    window.addEventListener('keydown', on, true);
+    return () => window.removeEventListener('keydown', on, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [confirmKill]);
+
   return (
     <div className="livePane">
+      {confirmKill !== null && (
+        <div className="tmuxConfirm">
+          kill terminal “{(() => {
+            const t = terms.find((x) => x.key === confirmKill);
+            return t ? (t.tool === '_' ? 'shell' : t.tool) : '?';
+          })()}”? <b>y</b> / <b>n</b>
+        </div>
+      )}
       <div className="liveTabs">
         {terms.map((e) => (
           <span key={e.key} className={`liveTab ${active === e.key ? 'active' : ''}`} onClick={() => setActive(e.key)}>

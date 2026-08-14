@@ -112,6 +112,19 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, { error: String(e.message ?? e).split('\n')[0] });
       }
     }
+    // quick pickers: grep the repo, find a file by name (tracked files)
+    if (url.pathname === '/api/grep' || url.pathname === '/api/files') {
+      const root = url.searchParams.get('root') ?? process.cwd();
+      const q = url.searchParams.get('q') ?? '';
+      if (!git.okRoot(root) || !q.trim()) return json(res, 200, []);
+      try {
+        return json(res, 200, url.pathname === '/api/grep'
+          ? await git.grep(root, q)
+          : await git.listFiles(root, q));
+      } catch {
+        return json(res, 200, []);
+      }
+    }
     // human review: session-scoped threaded comments; the human writes from
     // the UI, agents read and reply through the MCP
     if (url.pathname === '/api/reviews') {

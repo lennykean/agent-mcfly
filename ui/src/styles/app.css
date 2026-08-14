@@ -262,6 +262,33 @@ pre, code { font-family: var(--font-mono); }
 /* tool log */
 .toolLog { flex: 1; overflow-y: auto; font-size: 12px; font-family: var(--font-mono); position: relative; outline: none; }
 .logFadeOut { opacity: 0; transition: opacity 0.22s ease; }
+.chat { outline: none; }
+.tabBody { outline: none; }
+/* keyboard focus is a place — show it, or an empty pane looks like a dead
+   chord. Mouse clicks stay ring-free via :focus-visible. */
+.tabBody:focus-visible, .chat:focus-visible, .rvList:focus-visible, .wfList:focus-visible,
+.explorer:focus-visible, .gitPane:focus-visible, .toolLog:focus-visible, .agentTree:focus-visible {
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 22%);
+}
+.msg.kbSel { outline: 1px solid rgb(255 255 255 / 30%); outline-offset: -1px; }
+/* the vim status bar: mode indicator + find prompt. NOT the transport blue —
+   this bar is editor state, not playback */
+.statusBar { height: 22px; display: flex; align-items: center; gap: 8px; padding: 0 8px; background: var(--bg-panel-alt); color: var(--fg); border-top: 1px solid var(--border-light); font-size: 12px; font-family: var(--font-mono); flex: 0 0 auto; }
+.sbMode { font-weight: 600; letter-spacing: 0.5px; color: var(--yellow); }
+.vimBadge { font-size: 10px; font-weight: 700; letter-spacing: 0.5px; font-family: var(--font-mono); }
+/* tmux kill-pane confirmation strip */
+.tmuxConfirm { padding: 3px 10px; background: rgb(234 179 8 / 20%); color: var(--yellow); border-bottom: 1px solid rgb(234 179 8 / 40%); font-size: 12px; font-family: var(--font-mono); flex: 0 0 auto; }
+.tmuxConfirm b { color: #fff; }
+/* quick pickers float without dimming the app */
+.quickPickOverlay { position: fixed; inset: 0; display: flex; align-items: flex-start; justify-content: center; padding-top: 10vh; z-index: 10; }
+.quickPick { pointer-events: auto; width: 720px; }
+.sbFind { display: flex; align-items: center; gap: 6px; }
+.sbSlash { opacity: 0.8; }
+.sbInput { background: var(--bg-inset); border: 1px solid var(--border-light); color: inherit; font: inherit; outline: none; padding: 0 6px; width: 240px; border-radius: 2px; }
+.sbInput.bad { background: rgb(190 40 40 / 55%); }
+.sbCount { opacity: 0.9; font-size: 11px; }
+.findBand { position: absolute; background: rgb(234 179 8 / 26%); outline: 1px solid rgb(234 179 8 / 45%); outline-offset: -1px; pointer-events: none; z-index: 1; }
+.findBand.cur { background: rgb(234 179 8 / 55%); }
 .logRow { display: flex; gap: 5px; align-items: center; padding: 2px 8px; cursor: pointer; white-space: nowrap; overflow: hidden; color: var(--fg-dim); }
 .logRow:hover { background: #2a2d2e; }
 .logRow.current { background: var(--accent-bg); color: #fff; opacity: 1; }
@@ -318,7 +345,7 @@ pre.code.hljs { padding: 0; background: transparent; }
 
 /* ---- wayfinder (bottom panel): context-anchored waypoints ---- */
 .wayfinder { flex: 1; display: flex; min-height: 0; }
-.wfList { flex: 1; overflow-y: auto; min-width: 0; }
+.wfList { flex: 1; overflow-y: auto; min-width: 0; position: relative; outline: none; }
 .wfRow { display: flex; align-items: center; gap: 8px; padding: 4px 12px; cursor: pointer; font-size: 12px; white-space: nowrap; }
 .wfRow:hover { background: #2b2b2b; }
 .wfRow.active { background: var(--accent-bg); }
@@ -342,7 +369,7 @@ pre.code.hljs { padding: 0; background: transparent; }
 .rvBar { display: flex; align-items: center; gap: 12px; padding: 6px 12px; border-bottom: 1px solid var(--border); flex: 0 0 auto; }
 .rvTitle { font-size: 12px; color: var(--fg); font-family: var(--font-mono); }
 .rvHint { font-size: 11px; color: var(--fg-dim); font-style: italic; margin-left: auto; }
-.rvList { flex: 1; overflow-y: auto; min-height: 0; }
+.rvList { flex: 1; overflow-y: auto; min-height: 0; position: relative; outline: none; }
 .rvThread { cursor: pointer; padding: 3px 0; }
 .rvThread:hover { background: #2b2b2b; }
 .rvRow { display: flex; align-items: center; gap: 8px; padding: 2px 12px; font-size: 12px; white-space: nowrap; }

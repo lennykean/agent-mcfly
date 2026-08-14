@@ -84,11 +84,13 @@ let editorSels: EditorSel[] = [];
 let editorSelCb: ((sels: EditorSel[]) => void) | undefined;
 export function onEditorSelection(cb: typeof editorSelCb) { editorSelCb = cb; }
 let lastDownEditorPath: string | null | false = false; // false = outside any editor
+let lastDownAt = 0; // clears only apply to entries OLDER than the click
 
 export function watchSelections() {
   document.addEventListener('mousedown', (e) => {
     const body = e.target instanceof Element ? e.target.closest('.editorBody') : null;
     lastDownEditorPath = body ? body.getAttribute('data-path') : false;
+    lastDownAt = Date.now();
   }, true);
   document.addEventListener('selectionchange', () => {
     clearTimeout(selTimer);
@@ -97,11 +99,13 @@ export function watchSelections() {
       if (!sel || sel.isCollapsed) {
         // a collapsed selection only counts as "cleared" when the user
         // clicked back inside an editor, and it clears only THAT file's
-        // entry; the terminal must not steal it
+        // entry; the terminal must not steal it. Entries made AFTER the
+        // click (keyboard visual mode races this debounce) survive.
         if (lastDownEditorPath !== false) {
+          const fresh = (s: EditorSel) => Date.parse(s.at) > lastDownAt;
           editorSels = lastDownEditorPath
-            ? editorSels.filter((s) => s.path !== lastDownEditorPath)
-            : [];
+            ? editorSels.filter((s) => s.path !== lastDownEditorPath || fresh(s))
+            : editorSels.filter(fresh);
           postSels();
         }
         return;
@@ -160,6 +164,13 @@ export function watchSelections() {
       postSels();
     }, 600);
   });
+}
+
+// the current selection entry for a file, if any — surfaces use it to act
+// on "the highlighted lines" (review comments, etc.)
+export function editorSelFor(path: string): EditorSel | undefined {
+  const norm = (s: string) => s.replace(/\\/g, '/').toLowerCase();
+  return editorSels.find((s) => norm(s.path) === norm(path));
 }
 
 // keyboard-built selections (shift+arrows from the caret) report through the

@@ -16,6 +16,34 @@ export const okRoot = (root) => {
   try { return fs.statSync(root).isDirectory(); } catch { return false; }
 };
 
+// grep the work tree (tracked files) with an extended regex; "no matches"
+// exits 1, which is an empty result, not an error
+export async function grep(root, q) {
+  try {
+    const out = await run(root, ['grep', '-n', '-I', '--no-color', '-E', '--', q]);
+    return out.split('\n').filter(Boolean).slice(0, 500).map((l) => {
+      // CRLF work trees: the \r would block the $ anchor (JS "." skips \r)
+      const m = l.replace(/\r$/, '').match(/^(.+?):(\d+):(.*)$/);
+      return m && { path: m[1], line: Number(m[2]), text: m[3].slice(0, 400) };
+    }).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+// find tracked files by name substring, case-insensitive
+export async function listFiles(root, q) {
+  try {
+    const out = await run(root, ['ls-files']);
+    const needle = q.toLowerCase();
+    return out.split('\n').filter(Boolean)
+      .filter((p) => p.toLowerCase().includes(needle))
+      .slice(0, 200);
+  } catch {
+    return [];
+  }
+}
+
 // porcelain v1 -z: "XY path\0" — renames add the original as a second record.
 // -uall lists the files INSIDE untracked directories: without it git emits a
 // bare "dir/" entry, which renders as a nameless row in the tree

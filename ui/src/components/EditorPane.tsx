@@ -4,8 +4,8 @@ import powershell from 'highlight.js/lib/languages/powershell';
 import 'highlight.js/styles/vs2015.css';
 import { TYPE_CPS, normPath, resolveWaypoint, type FileView, type WaypointEntry } from '../lib/timeline';
 import { Md } from './ChatPane';
-import { reportEditorSelection, updateSnapshot } from '../lib/workspace';
-import { EXTEND, actionOf } from '../lib/keys';
+import { editorSelFor, reportEditorSelection, updateSnapshot } from '../lib/workspace';
+import { EXTEND, actionOf, focusEditor, notify, resolve } from '../lib/keys';
 import type { Review, ReviewComment } from '../types';
 
 hljs.registerLanguage('powershell', powershell);
@@ -45,6 +45,60 @@ const expand = (s: string, col: number) => {
 };
 // a block cursor sits ON a character, never past the end of the line
 const maxCol = (s: string) => Math.max(0, s.length - 1);
+
+// the find drive: EditorPane's status bar owns the query, the active view
+// matches/highlights/cycles. Smart case like vim: capitals make it sensitive.
+export interface FindDrive {
+  query: string;
+  tick: number; // Enter bumps it; the view advances the current match
+  dir: 1 | -1;
+  onState: (cur: number, total: number) => void;
+}
+const makeFindRe = (q: string) => {
+  try { return new RegExp(q, /[A-Z]/.test(q) ? 'g' : 'gi'); } catch { return null; }
+};
+const FIND_CAP = 2000;
+// motions that a count (vim 5j) repeats; everything else ignores counts
+const COUNTABLE = new Set(['up', 'down', 'left', 'right', 'pageUp', 'pageDown', 'wordNext', 'wordPrev', 'wordEnd']);
+
+// vim word motions over an abstract list of text units (lines, or a diff's
+// content rows). Three character classes like vim: whitespace, word, other.
+const CLS = (ch: string | undefined) => (ch === undefined || /\s/.test(ch) ? 0 : /\w/.test(ch) ? 1 : 2);
+function wordMove(kind: 'w' | 'b' | 'e', texts: string[], u: number, col: number): { u: number; col: number } {
+  const textAt = (i: number) => texts[i] ?? '';
+  const maxU = texts.length - 1;
+  const p = { u, col };
+  const at = () => CLS(textAt(p.u)[p.col]);
+  const adv = () => {
+    if (p.col < maxCol(textAt(p.u)) ) { p.col++; return true; }
+    if (p.u < maxU) { p.u++; p.col = 0; return true; }
+    return false;
+  };
+  const back = () => {
+    if (p.col > 0) { p.col--; return true; }
+    if (p.u > 0) { p.u--; p.col = maxCol(textAt(p.u)); return true; }
+    return false;
+  };
+  if (kind === 'w') {
+    const c0 = at();
+    if (c0 !== 0) { do { if (!adv()) return p; } while (at() === c0); }
+    while (at() === 0) { if (!adv()) return p; }
+    return p;
+  }
+  if (kind === 'b') {
+    if (!back()) return p;
+    while (at() === 0) { if (!back()) return p; }
+    const c1 = at();
+    while (p.col > 0 && CLS(textAt(p.u)[p.col - 1]) === c1) p.col--;
+    return p;
+  }
+  // 'e': end of the next word
+  if (!adv()) return p;
+  while (at() === 0) { if (!adv()) return p; }
+  const c2 = at();
+  while (CLS(textAt(p.u)[p.col + 1]) === c2) p.col++;
+  return p;
+}
 const colFromX = (s: string, xChars: number) => {
   let x = 0;
   for (let i = 0; i < s.length; i++) {
@@ -75,9 +129,11 @@ function charWidth(): number {
 // to be typed live — in full color. A region band flashes and fades after.
 export interface BlameMark { text: string; title: string; step: number }
 
-export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, marks, onCompose, composer, reviewMarks, thread, scrollTo, textBand }: {
+export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, marks, onCompose, composer, reviewMarks, thread, scrollTo, textBand, find, onVisualMode }: {
   file: FileView; animate: boolean; speed: number;
   flashOnly?: boolean;
+  find?: FindDrive;
+  onVisualMode?: (m: null | 'char' | 'line' | 'normal') => void;
   blame?: { marks: (BlameMark | null)[]; compact?: boolean; onJump: (step: number) => void; onToggle?: () => void };
   waypoint?: { line: number; note: string; open: boolean; onToggle: () => void };
   // tour-driven scroll target; human expand/collapse must never move the view
@@ -176,6 +232,11 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
     wishCol.current = expand(text, col);
     caretRef.current = { line, col };
     selAnchor.current = null;
+    setVisual(null); // a click is normal mode
+    // keyboard selections are synthetic — no selectionchange fires to clear
+    // them, so the click-clears-this-file contract is enforced here
+    clearKbLocal();
+    reportEditorSelection({ path: file.path, clear: true });
     paintCaret();
     ref.current?.focus();
   };
@@ -183,6 +244,85 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
   // as a mouse drag: bands, snapshot entry, recency. The anchor is where the
   // extension started; a plain (unshifted) move collapses it.
   const selAnchor = useRef<{ line: number; col: number } | null>(null);
+  const visual = useRef<null | 'char' | 'line'>(null); // vim visual mode: sticky shift
+  // reported mode: with a live caret, "no visual mode" is NORMAL mode
+  const setVisual = (m: null | 'char' | 'line') => {
+    visual.current = m;
+    onVisualMode?.(m ?? (caretRef.current ? 'normal' : null));
+  };
+  useEffect(() => () => onVisualMode?.(null), []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---- find: match, highlight, cycle ----
+  const [findCur, setFindCur] = useState(-1);
+  const findMatches = useMemo(() => {
+    const re = find?.query ? makeFindRe(find.query) : null;
+    if (!re) return [];
+    const out: { line: number; c0: number; c1: number }[] = [];
+    for (let i = 0; i < contentLines.length && out.length < FIND_CAP; i++) {
+      re.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(contentLines[i])) && out.length < FIND_CAP) {
+        out.push({ line: i + startLine, c0: m.index, c1: m.index + Math.max(1, m[0].length) });
+        if (!m[0].length) re.lastIndex++;
+      }
+    }
+    return out;
+  }, [find?.query, contentLines, startLine]);
+  useEffect(() => { setFindCur(-1); }, [find?.query]);
+  useEffect(() => { find?.onState(findCur >= 0 ? findCur + 1 : 0, findMatches.length); }, [findMatches.length, findCur]); // eslint-disable-line react-hooks/exhaustive-deps
+  const findLastTick = useRef<number | null>(null);
+  useEffect(() => {
+    if (!find) { findLastTick.current = null; return; }
+    if (findLastTick.current === null) { findLastTick.current = find.tick; return; } // arm on open
+    if (find.tick === findLastTick.current) return;
+    findLastTick.current = find.tick;
+    if (!findMatches.length) return;
+    // advance from the caret position (wrapping), vim-style
+    const c = caretRef.current;
+    let idx: number;
+    if (find.dir === 1) {
+      idx = findMatches.findIndex((m) => !c || m.line > c.line || (m.line === c.line && m.c0 > c.col));
+      if (idx < 0) idx = 0;
+    } else {
+      const ri = [...findMatches].reverse().findIndex((m) => !c || m.line < c.line || (m.line === c.line && m.c0 < c.col));
+      idx = ri < 0 ? findMatches.length - 1 : findMatches.length - 1 - ri;
+    }
+    const m = findMatches[idx];
+    const text = contentLines[m.line - startLine] ?? '';
+    wishCol.current = expand(text, m.c0);
+    caretRef.current = { line: m.line, col: Math.min(m.c0, maxCol(text)) };
+    paintCaret();
+    caretSeeVisible(m.line);
+    setFindCur(idx);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [find?.tick]);
+  // :N (command bar) goes to a line in the VISIBLE view
+  useEffect(() => {
+    const on = (ev: Event) => {
+      if (!ref.current || ref.current.offsetParent === null) return; // hidden view
+      const n = (ev as CustomEvent).detail as number;
+      const line = Math.max(startLine, Math.min(startLine + total - 1, n));
+      wishCol.current = 0;
+      caretRef.current = { line, col: 0 };
+      paintCaret();
+      caretSeeVisible(line);
+      ref.current.focus();
+    };
+    window.addEventListener('mcfly:goline', on);
+    return () => window.removeEventListener('mcfly:goline', on);
+  });
+  // extension paints bands IMPERATIVELY per keystroke (reporting through app
+  // state on every press is what made visual mode laggy) and debounces the
+  // real report until the movement rests
+  const kbBandsEl = useRef<HTMLDivElement>(null);
+  const kbTimer = useRef<number>(undefined);
+  const kbFlush = useRef<(() => void) | null>(null);
+  const flushKbSel = () => { clearTimeout(kbTimer.current); const f = kbFlush.current; kbFlush.current = null; f?.(); };
+  const clearKbLocal = () => {
+    clearTimeout(kbTimer.current);
+    kbFlush.current = null;
+    if (kbBandsEl.current) kbBandsEl.current.innerHTML = '';
+  };
   const reportKbSel = () => {
     const a = selAnchor.current;
     const c = caretRef.current;
@@ -190,16 +330,19 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
     if (!a || !c || !pre) return;
     const fwd = a.line < c.line || (a.line === c.line && a.col <= c.col);
     const [s, e2] = fwd ? [a, c] : [c, a];
-    if (s.line === e2.line && s.col === e2.col) { reportEditorSelection({ path: file.path, clear: true }); return; }
     const cw = charWidth();
     const rects: { x: number; y: number; w: number; h: number }[] = [];
     const parts: string[] = [];
+    let textLen = 0;
     for (let L = s.line; L <= e2.line; L++) {
       const text = contentLines[L - startLine] ?? '';
-      const c0 = L === s.line ? s.col : 0;
-      // the block caret sits ON a character: the far end's char is included
-      const c1 = L === e2.line ? Math.min(text.length, e2.col + 1) : text.length;
-      parts.push(text.slice(c0, c1));
+      // visual-line mode takes whole lines; the block caret sits ON a
+      // character, so the far end's char is included
+      const c0 = visual.current === 'line' ? 0 : L === s.line ? s.col : 0;
+      const c1 = visual.current === 'line' ? text.length
+        : L === e2.line ? Math.min(text.length, e2.col + 1) : text.length;
+      if (textLen < 2100) { const p = text.slice(c0, c1); parts.push(p); textLen += p.length + 1; }
+      if (rects.length >= 300) continue; // band cap, like the mouse path
       rects.push({
         x: pre.offsetLeft + expand(text, c0) * cw,
         y: (L - startLine) * LH,
@@ -207,9 +350,40 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
         h: LH,
       });
     }
-    reportEditorSelection({ path: file.path, lines: [s.line, e2.line], text: parts.join('\n'), rects });
+    const host = kbBandsEl.current;
+    if (host) {
+      host.innerHTML = '';
+      for (const rc of rects) {
+        const d = document.createElement('div');
+        d.className = 'textSelBand';
+        d.style.cssText = `left:${rc.x}px;top:${rc.y}px;width:${rc.w}px;height:${rc.h}px`;
+        host.appendChild(d);
+      }
+    }
+    kbFlush.current = () => {
+      if (kbBandsEl.current) kbBandsEl.current.innerHTML = ''; // the reported band takes over
+      reportEditorSelection({ path: file.path, lines: [s.line, e2.line], text: parts.join('\n'), rects });
+    };
+    clearTimeout(kbTimer.current);
+    kbTimer.current = window.setTimeout(flushKbSel, 150);
   };
   const moveCaret = (e: React.KeyboardEvent) => {
+    // cards floating over the code (composer, thread) own their keystrokes
+    if ((e.target as Element).closest?.('.wpCard, textarea, input, button')) return;
+    // comment on the highlighted lines (or the caret line) in the review
+    if (onCompose && actionOf(e, ['comment'])) {
+      flushKbSel(); // a debounced visual selection must land before we read it
+      const sel = editorSelFor(file.path);
+      const c0 = caretRef.current;
+      const range = sel?.lines?.length ? [Math.min(...sel.lines), Math.max(...sel.lines)]
+        : c0 ? [c0.line, c0.line] : null;
+      if (range) {
+        e.preventDefault();
+        e.stopPropagation();
+        onCompose(range[0], range[1]);
+        return;
+      }
+    }
     const c = caretRef.current;
     if (!c) {
       // a focused body must always have a pointer: the first key places it
@@ -221,10 +395,30 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
       e.stopPropagation();
       return;
     }
-    const raw = actionOf(e, ['extendUp', 'extendDown', 'extendLeft', 'extendRight', 'extendHome', 'extendEnd', 'docHome', 'docEnd', 'up', 'down', 'left', 'right', 'pageUp', 'pageDown', 'home', 'end', 'dismiss']);
+    const res = resolve(e, ['extendUp', 'extendDown', 'extendLeft', 'extendRight', 'extendHome', 'extendEnd', 'visual', 'visualLine', 'wordNext', 'wordPrev', 'wordEnd', 'yank', 'copy', 'docHome', 'docEnd', 'up', 'down', 'left', 'right', 'pageUp', 'pageDown', 'home', 'end', 'dismiss']);
+    const raw = res?.action;
     if (!raw) return;
-    const extending = raw in EXTEND;
-    const action = extending ? EXTEND[raw as keyof typeof EXTEND] : raw;
+    if (raw === 'copy') {
+      flushKbSel(); // a debounced visual selection must land before we read it
+      const sel = editorSelFor(file.path);
+      if (!sel?.text) return; // no entry: native copy proceeds
+      e.preventDefault();
+      e.stopPropagation();
+      void navigator.clipboard.writeText(sel.text);
+      notify(`copied ${sel.text.length} chars`);
+      return;
+    }
+    if (raw === 'yank') {
+      const text = contentLines[c.line - startLine] ?? '';
+      e.preventDefault();
+      e.stopPropagation();
+      void navigator.clipboard.writeText(`${text}\n`);
+      notify('yanked line');
+      return;
+    }
+    // visual mode is a sticky shift: every plain movement extends
+    const extending = raw in EXTEND || (visual.current !== null && raw !== 'dismiss');
+    const action = raw in EXTEND ? EXTEND[raw as keyof typeof EXTEND] : raw;
     if (extending && !selAnchor.current) selAnchor.current = { ...c };
     const el = ref.current;
     const pageLines = el ? Math.max(4, Math.floor(el.clientHeight / LH) - 2) : 20;
@@ -232,7 +426,28 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
     let { line, col } = c;
     const lineText = () => contentLines[line - startLine] ?? '';
     let vertical = false;
+    const times = COUNTABLE.has(action) ? (res?.count ?? 1) : 1;
+    for (let rep = 0; rep < times; rep++) {
     switch (action) {
+      case 'visual':
+      case 'visualLine': {
+        const mode = action === 'visual' ? 'char' : 'line';
+        if (visual.current === mode) setVisual(null); // toggle off, selection persists
+        else {
+          setVisual(mode);
+          selAnchor.current = { line, col };
+          reportKbSel(); // the caret's char (or line) highlights immediately
+        }
+        break;
+      }
+      case 'wordNext':
+      case 'wordPrev':
+      case 'wordEnd': {
+        const m = wordMove(action === 'wordNext' ? 'w' : action === 'wordPrev' ? 'b' : 'e', contentLines, line - startLine, col);
+        line = m.u + startLine;
+        col = m.col;
+        break;
+      }
       case 'up': line = Math.max(startLine, line - 1); vertical = true; break;
       case 'down': line = Math.min(last, line + 1); vertical = true; break;
       case 'pageUp': line = Math.max(startLine, line - pageLines); vertical = true; break;
@@ -250,24 +465,30 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
       case 'docHome': line = startLine; col = 0; break;
       case 'docEnd': line = last; col = maxCol(contentLines[last - startLine] ?? ''); break;
       case 'dismiss':
-        caretRef.current = null;
-        selAnchor.current = null;
-        paintCaret();
-        updateSnapshot({ cursor: null });
-        (e.target as HTMLElement).blur();
-        break;
+        // the escape ladder: leave visual mode, then clear this file's
+        // selection, then NOTHING — escape never dumps you back to scroll
+        e.preventDefault();
+        e.stopPropagation();
+        if (visual.current) { setVisual(null); flushKbSel(); }
+        else if (editorSelFor(file.path)) {
+          clearKbLocal();
+          selAnchor.current = null;
+          reportEditorSelection({ path: file.path, clear: true });
+        }
+        return;
+    }
     }
     e.preventDefault();
     e.stopPropagation();
-    if (action === 'dismiss') return;
     const text = contentLines[line - startLine] ?? '';
     if (vertical) col = colFromX(text, wishCol.current);
     col = Math.min(col, maxCol(text));
     if (!vertical) wishCol.current = expand(text, col);
     caretRef.current = { line, col };
     // a plain move drops the ANCHOR (the next shift starts fresh) but the
-    // selection itself persists, exactly like mouse bands do
-    if (extending) reportKbSel();
+    // selection itself persists, exactly like mouse bands do. Re-checked
+    // AFTER the switch: the visual cases toggle the mode itself.
+    if (raw in EXTEND || visual.current !== null) reportKbSel();
     else selAnchor.current = null;
     paintCaret();
     caretSeeVisible(line);
@@ -354,10 +575,12 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
       onFocus={() => {
         // keyboard entry ('open' or panel hop): a caret must exist to move;
         // a caret already placed is WHERE YOU WERE — keep it
-        if (caretRef.current) return;
-        wishCol.current = 0;
-        caretRef.current = { line: startLine, col: 0 };
-        paintCaret();
+        if (!caretRef.current) {
+          wishCol.current = 0;
+          caretRef.current = { line: startLine, col: 0 };
+          paintCaret();
+        }
+        setVisual(visual.current); // re-announce the mode to the status bar
       }}
     >
       <div className="codewrap" style={{ minHeight: total * LH }}>
@@ -462,6 +685,18 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
         {textBand?.rects.map((rc, i) => (
           <div key={`ts${i}`} className="textSelBand" style={{ left: rc.x, top: rc.y, width: rc.w, height: rc.h }} />
         ))}
+        <div ref={kbBandsEl} />
+        {find && findMatches.map((m, i) => {
+          const text = contentLines[m.line - startLine] ?? '';
+          const cw = charWidth();
+          const x = (preRef.current?.offsetLeft ?? 0) + expand(text, m.c0) * cw;
+          return (
+            <div
+              key={`f${i}`} className={`findBand${i === findCur ? ' cur' : ''}`}
+              style={{ left: x, top: (m.line - startLine) * LH, width: Math.max(3, (expand(text, m.c1) - expand(text, m.c0)) * cw), height: LH }}
+            />
+          );
+        })}
         {dragSel && (
           <div className="rvBand" style={{ top: (Math.min(dragSel.from, dragSel.to) - startLine) * LH, height: (Math.abs(dragSel.to - dragSel.from) + 1) * LH }} />
         )}
@@ -560,7 +795,9 @@ function diffRows(hunks: NonNullable<FileView['render']['hunks']>, fileLines: st
   return out;
 }
 
-export function DiffView({ file, animate, onComment, fileLines, textBand }: {
+export function DiffView({ file, animate, onComment, fileLines, textBand, find, onVisualMode }: {
+  find?: FindDrive;
+  onVisualMode?: (m: null | 'char' | 'line' | 'normal') => void;
   file: FileView; animate: boolean;
   // present = review mode: lines that exist on disk (green + context) take comments
   onComment?: (c: DiffComment) => void;
@@ -698,6 +935,11 @@ export function DiffView({ file, animate, onComment, fileLines, textBand }: {
     dWish.current = expand(rowText(idx), col);
     dCaret.current = { row: idx, col };
     dAnchor.current = null;
+    setDVisual(null); // a click is normal mode
+    // keyboard selections are synthetic — no selectionchange fires to clear
+    // them, so the click-clears-this-file contract is enforced here
+    clearKbLocal();
+    reportEditorSelection({ path: file.path, clear: true });
     paintDCaret();
     ref.current?.focus();
   };
@@ -713,10 +955,95 @@ export function DiffView({ file, animate, onComment, fileLines, textBand }: {
     dWish.current = 0;
     dCaret.current = { row: first, col: 0 };
     paintDCaret();
+    setDVisual(dVisual.current); // announce NORMAL to the status bar
   };
   // shift+arrows select from the diff caret, same pipeline as a mouse drag;
   // gap and hunk rows contribute no text and no band
   const dAnchor = useRef<{ row: number; col: number } | null>(null);
+  const dVisual = useRef<null | 'char' | 'line'>(null); // vim visual mode: sticky shift
+  // reported mode: with a live caret, "no visual mode" is NORMAL mode
+  const setDVisual = (m: null | 'char' | 'line') => {
+    dVisual.current = m;
+    onVisualMode?.(m ?? (dCaret.current ? 'normal' : null));
+  };
+  useEffect(() => () => onVisualMode?.(null), []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ---- find over the CONTENT rows ----
+  const [findCur, setFindCur] = useState(-1);
+  const findMatches = useMemo(() => {
+    const re = find?.query ? makeFindRe(find.query) : null;
+    if (!re) return [];
+    const out: { row: number; c0: number; c1: number }[] = [];
+    rows.forEach((r2, i) => {
+      if (r2.kind === 'hunk' || r2.kind === 'gap' || out.length >= FIND_CAP) return;
+      const t = (r2 as DiffRow).text;
+      re.lastIndex = 0;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(t)) && out.length < FIND_CAP) {
+        out.push({ row: i, c0: m.index, c1: m.index + Math.max(1, m[0].length) });
+        if (!m[0].length) re.lastIndex++;
+      }
+    });
+    return out;
+  }, [find?.query, rows]);
+  useEffect(() => { setFindCur(-1); }, [find?.query]);
+  useEffect(() => { find?.onState(findCur >= 0 ? findCur + 1 : 0, findMatches.length); }, [findMatches.length, findCur]); // eslint-disable-line react-hooks/exhaustive-deps
+  const findLastTick = useRef<number | null>(null);
+  useEffect(() => {
+    if (!find) { findLastTick.current = null; return; }
+    if (findLastTick.current === null) { findLastTick.current = find.tick; return; } // arm on open
+    if (find.tick === findLastTick.current) return;
+    findLastTick.current = find.tick;
+    if (!findMatches.length) return;
+    const c = dCaret.current;
+    let idx: number;
+    if (find.dir === 1) {
+      idx = findMatches.findIndex((m) => !c || m.row > c.row || (m.row === c.row && m.c0 > c.col));
+      if (idx < 0) idx = 0;
+    } else {
+      const ri = [...findMatches].reverse().findIndex((m) => !c || m.row < c.row || (m.row === c.row && m.c0 < c.col));
+      idx = ri < 0 ? findMatches.length - 1 : findMatches.length - 1 - ri;
+    }
+    const m = findMatches[idx];
+    dWish.current = expand(rowText(m.row), m.c0);
+    dCaret.current = { row: m.row, col: Math.min(m.c0, maxCol(rowText(m.row))) };
+    paintDCaret();
+    dSeeVisible(m.row);
+    setFindCur(idx);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [find?.tick]);
+  // :N (command bar): land on the row carrying that new-side line
+  useEffect(() => {
+    const on = (ev: Event) => {
+      if (!ref.current || ref.current.offsetParent === null) return; // hidden view
+      const n = (ev as CustomEvent).detail as number;
+      let target = -1;
+      for (let i = 0; i < rows.length; i++) {
+        if (!isContent(i)) continue;
+        target = i;
+        const no = (rows[i] as DiffRow).newNo;
+        if (no !== undefined && no >= n) break;
+      }
+      if (target < 0) return;
+      dWish.current = 0;
+      dCaret.current = { row: target, col: 0 };
+      paintDCaret();
+      dSeeVisible(target);
+      ref.current.focus();
+    };
+    window.addEventListener('mcfly:goline', on);
+    return () => window.removeEventListener('mcfly:goline', on);
+  });
+  // same anti-lag scheme as CodeView: paint now, report when movement rests
+  const kbBandsEl = useRef<HTMLDivElement>(null);
+  const kbTimer = useRef<number>(undefined);
+  const kbFlush = useRef<(() => void) | null>(null);
+  const flushKbSel = () => { clearTimeout(kbTimer.current); const f = kbFlush.current; kbFlush.current = null; f?.(); };
+  const clearKbLocal = () => {
+    clearTimeout(kbTimer.current);
+    kbFlush.current = null;
+    if (kbBandsEl.current) kbBandsEl.current.innerHTML = '';
+  };
   const reportDKbSel = () => {
     const a = dAnchor.current;
     const c = dCaret.current;
@@ -724,39 +1051,87 @@ export function DiffView({ file, animate, onComment, fileLines, textBand }: {
     if (!a || !c || !wrap) return;
     const fwd = a.row < c.row || (a.row === c.row && a.col <= c.col);
     const [s, e2] = fwd ? [a, c] : [c, a];
-    if (s.row === e2.row && s.col === e2.col) { reportEditorSelection({ path: file.path, clear: true }); return; }
     const cw = charWidth();
     const rects: { x: number; y: number; w: number; h: number }[] = [];
     const parts: string[] = [];
+    let textLen = 0;
     let first: DiffRow | null = null;
     let last: DiffRow | null = null;
     for (let R = s.row; R <= e2.row; R++) {
       if (!isContent(R)) continue;
       const text = rowText(R);
-      const c0 = R === s.row ? s.col : 0;
-      // the block caret sits ON a character: the far end's char is included
-      const c1 = R === e2.row ? Math.min(text.length, e2.col + 1) : text.length;
-      parts.push(text.slice(c0, c1));
-      const lc = (wrap.children[R] as HTMLElement | undefined)?.querySelector('.lc') as HTMLElement | null;
-      rects.push({
-        x: (lc?.offsetLeft ?? 0) + expand(text, c0) * cw,
-        y: R * LH,
-        w: Math.max(cw / 2, (expand(text, c1) - expand(text, c0)) * cw),
-        h: LH,
-      });
+      // visual-line mode takes whole rows; the block caret sits ON a
+      // character, so the far end's char is included
+      const c0 = dVisual.current === 'line' ? 0 : R === s.row ? s.col : 0;
+      const c1 = dVisual.current === 'line' ? text.length
+        : R === e2.row ? Math.min(text.length, e2.col + 1) : text.length;
+      if (textLen < 2100) { const p = text.slice(c0, c1); parts.push(p); textLen += p.length + 1; }
+      if (rects.length < 300) {
+        const lc = (wrap.children[R] as HTMLElement | undefined)?.querySelector('.lc') as HTMLElement | null;
+        rects.push({
+          x: (lc?.offsetLeft ?? 0) + expand(text, c0) * cw,
+          y: R * LH,
+          w: Math.max(cw / 2, (expand(text, c1) - expand(text, c0)) * cw),
+          h: LH,
+        });
+      }
       first ??= rows[R] as DiffRow;
       last = rows[R] as DiffRow;
     }
-    reportEditorSelection({
-      path: file.path,
-      lines: first?.newNo !== undefined && last?.newNo !== undefined ? [first.newNo, last.newNo] : undefined,
-      old_lines: first?.oldNo !== undefined && last?.oldNo !== undefined ? [first.oldNo, last.oldNo] : undefined,
-      view: 'diff',
-      text: parts.join('\n'),
-      rects,
-    });
+    const host = kbBandsEl.current;
+    if (host) {
+      host.innerHTML = '';
+      for (const rc of rects) {
+        const d = document.createElement('div');
+        d.className = 'textSelBand';
+        d.style.cssText = `left:${rc.x}px;top:${rc.y}px;width:${rc.w}px;height:${rc.h}px`;
+        host.appendChild(d);
+      }
+    }
+    kbFlush.current = () => {
+      if (kbBandsEl.current) kbBandsEl.current.innerHTML = '';
+      reportEditorSelection({
+        path: file.path,
+        lines: first?.newNo !== undefined && last?.newNo !== undefined ? [first.newNo, last.newNo] : undefined,
+        old_lines: first?.oldNo !== undefined && last?.oldNo !== undefined ? [first.oldNo, last.oldNo] : undefined,
+        view: 'diff',
+        text: parts.join('\n'),
+        rects,
+      });
+    };
+    clearTimeout(kbTimer.current);
+    kbTimer.current = window.setTimeout(flushKbSel, 150);
   };
   const dMoveCaret = (e: React.KeyboardEvent) => {
+    // cards floating over the diff (composer, thread) own their keystrokes
+    if ((e.target as Element).closest?.('.wpCard, textarea, input, button')) return;
+    // comment on the highlighted new-side lines (or the caret row's line)
+    if (onComment && actionOf(e, ['comment'])) {
+      flushKbSel(); // a debounced visual selection must land before we read it
+      const sel = editorSelFor(file.path);
+      let a: number | undefined;
+      let b: number | undefined;
+      if (sel?.lines?.length) { a = Math.min(...sel.lines); b = Math.max(...sel.lines); }
+      else {
+        const c0 = dCaret.current;
+        const row = c0 ? rows[c0.row] : undefined;
+        const n = row && row.kind !== 'hunk' && row.kind !== 'gap' ? (row as DiffRow).newNo : undefined;
+        if (n !== undefined) { a = n; b = n; }
+      }
+      const rowA = a !== undefined
+        ? rows.find((r2) => r2.kind !== 'hunk' && r2.kind !== 'gap' && (r2 as DiffRow).newNo === a)
+        : undefined;
+      if (rowA && a !== undefined && b !== undefined) {
+        // comments anchor within one hunk: clamp the far end to it
+        const maxNew = Math.max(...rows
+          .filter((r2) => r2.kind !== 'hunk' && r2.kind !== 'gap' && r2.hunk === rowA.hunk)
+          .map((r2) => (r2 as DiffRow).newNo ?? -1));
+        e.preventDefault();
+        e.stopPropagation();
+        setCompose({ hunk: rowA.hunk, line: a, lineEnd: Math.min(b, maxNew) });
+        return;
+      }
+    }
     const c = dCaret.current;
     if (!c) {
       // a focused body must always have a pointer: the first key places it
@@ -766,16 +1141,61 @@ export function DiffView({ file, animate, onComment, fileLines, textBand }: {
       e.stopPropagation();
       return;
     }
-    const raw = actionOf(e, ['extendUp', 'extendDown', 'extendLeft', 'extendRight', 'extendHome', 'extendEnd', 'up', 'down', 'left', 'right', 'pageUp', 'pageDown', 'home', 'end', 'dismiss']);
+    const res = resolve(e, ['extendUp', 'extendDown', 'extendLeft', 'extendRight', 'extendHome', 'extendEnd', 'visual', 'visualLine', 'wordNext', 'wordPrev', 'wordEnd', 'yank', 'copy', 'docHome', 'docEnd', 'up', 'down', 'left', 'right', 'pageUp', 'pageDown', 'home', 'end', 'dismiss']);
+    const raw = res?.action;
     if (!raw) return;
-    const extending = raw in EXTEND;
-    const action = extending ? EXTEND[raw as keyof typeof EXTEND] : raw;
+    if (raw === 'copy') {
+      flushKbSel(); // a debounced visual selection must land before we read it
+      const sel = editorSelFor(file.path);
+      if (!sel?.text) return; // no entry: native copy proceeds
+      e.preventDefault();
+      e.stopPropagation();
+      void navigator.clipboard.writeText(sel.text);
+      notify(`copied ${sel.text.length} chars`);
+      return;
+    }
+    if (raw === 'yank') {
+      e.preventDefault();
+      e.stopPropagation();
+      void navigator.clipboard.writeText(`${rowText(c.row)}\n`);
+      notify('yanked line');
+      return;
+    }
+    // visual mode is a sticky shift: every plain movement extends
+    const extending = raw in EXTEND || (dVisual.current !== null && raw !== 'dismiss');
+    const action = raw in EXTEND ? EXTEND[raw as keyof typeof EXTEND] : raw;
     if (extending && !dAnchor.current) dAnchor.current = { ...c };
     const el = ref.current;
     const pageLines = el ? Math.max(4, Math.floor(el.clientHeight / LH) - 2) : 20;
     let { row, col } = c;
     let vertical = false;
+    const times = COUNTABLE.has(action) ? (res?.count ?? 1) : 1;
+    for (let rep = 0; rep < times; rep++) {
     switch (action) {
+      case 'visual':
+      case 'visualLine': {
+        const mode = action === 'visual' ? 'char' : 'line';
+        if (dVisual.current === mode) setDVisual(null); // toggle off, selection persists
+        else {
+          setDVisual(mode);
+          dAnchor.current = { row, col };
+          reportDKbSel();
+        }
+        break;
+      }
+      case 'wordNext':
+      case 'wordPrev':
+      case 'wordEnd': {
+        // word motion over the CONTENT rows only (hunks/gaps are not text)
+        const content = rows.map((_, i2) => i2).filter((i2) => isContent(i2));
+        const u = content.indexOf(row);
+        if (u >= 0) {
+          const m = wordMove(action === 'wordNext' ? 'w' : action === 'wordPrev' ? 'b' : 'e', content.map((i2) => rowText(i2)), u, col);
+          row = content[m.u];
+          col = m.col;
+        }
+        break;
+      }
       case 'up': row = dNextContent(row, -1); vertical = true; break;
       case 'down': row = dNextContent(row, 1); vertical = true; break;
       case 'pageUp': for (let n = 0; n < pageLines; n++) row = dNextContent(row, -1); vertical = true; break;
@@ -790,24 +1210,42 @@ export function DiffView({ file, animate, onComment, fileLines, textBand }: {
         break;
       case 'home': col = 0; break;
       case 'end': col = maxCol(rowText(row)); break;
-      case 'dismiss':
-        dCaret.current = null;
-        dAnchor.current = null;
-        paintDCaret();
-        updateSnapshot({ cursor: null });
-        (e.target as HTMLElement).blur();
+      case 'docHome': {
+        const first = rows.findIndex((_, i2) => isContent(i2));
+        if (first >= 0) { row = first; col = 0; }
         break;
+      }
+      case 'docEnd': {
+        for (let i2 = rows.length - 1; i2 >= 0; i2--) {
+          if (isContent(i2)) { row = i2; break; }
+        }
+        col = maxCol(rowText(row));
+        break;
+      }
+      case 'dismiss':
+        // the escape ladder: leave visual mode, then clear this file's
+        // selection, then NOTHING — escape never dumps you back to scroll
+        e.preventDefault();
+        e.stopPropagation();
+        if (dVisual.current) { setDVisual(null); flushKbSel(); }
+        else if (editorSelFor(file.path)) {
+          clearKbLocal();
+          dAnchor.current = null;
+          reportEditorSelection({ path: file.path, clear: true });
+        }
+        return;
+    }
     }
     e.preventDefault();
     e.stopPropagation();
-    if (action === 'dismiss') return;
     if (vertical) col = colFromX(rowText(row), dWish.current);
     col = Math.min(col, maxCol(rowText(row)));
     if (!vertical) dWish.current = expand(rowText(row), col);
     dCaret.current = { row, col };
     // a plain move drops the ANCHOR (the next shift starts fresh) but the
-    // selection itself persists, exactly like mouse bands do
-    if (extending) reportDKbSel();
+    // selection itself persists, exactly like mouse bands do. Re-checked
+    // AFTER the switch: the visual cases toggle the mode itself.
+    if (raw in EXTEND || dVisual.current !== null) reportDKbSel();
     else dAnchor.current = null;
     paintDCaret();
     dSeeVisible(row);
@@ -815,6 +1253,7 @@ export function DiffView({ file, animate, onComment, fileLines, textBand }: {
   useEffect(() => {
     dCaret.current = null;
     dAnchor.current = null;
+    setDVisual(null);
     if (dCaretEl.current) dCaretEl.current.style.display = 'none';
     // an open-into-diff can land focus BEFORE the rows settle: this reset
     // must not leave a focused body with no pointer — re-place the caret
@@ -878,13 +1317,25 @@ export function DiffView({ file, animate, onComment, fileLines, textBand }: {
   return (
     <div
       className={`editorBody ${animate ? 'diffFlash' : ''}`} ref={ref} tabIndex={-1} onKeyDown={dMoveCaret} data-path={file.path} data-start-line={1}
-      onFocus={() => { if (!dCaret.current) dInitCaret(); }}
+      onFocus={() => { if (!dCaret.current) dInitCaret(); else setDVisual(dVisual.current); }}
     >
       <div className="diffwrap" ref={wrapRef} onMouseDown={onMouseDown} onMouseOver={onMouseOver} onClick={(e) => { onClick(e); dPlaceCaret(e); }}>
         {body}
         {textBand?.rects.map((rc, i) => (
           <div key={`ts${i}`} className="textSelBand" style={{ left: rc.x, top: rc.y, width: rc.w, height: rc.h }} />
         ))}
+        <div ref={kbBandsEl} />
+        {find && findMatches.map((m, i) => {
+          const text = rowText(m.row);
+          const cw = charWidth();
+          const lc = (wrapRef.current?.children[m.row] as HTMLElement | undefined)?.querySelector('.lc') as HTMLElement | null;
+          return (
+            <div
+              key={`f${i}`} className={`findBand${i === findCur ? ' cur' : ''}`}
+              style={{ left: (lc?.offsetLeft ?? 0) + expand(text, m.c0) * cw, top: m.row * LH, width: Math.max(3, (expand(text, m.c1) - expand(text, m.c0)) * cw), height: LH }}
+            />
+          );
+        })}
         <div className="userCaret" ref={dCaretEl} style={{ display: 'none' }} />
         {band && <div className="rvBand" style={{ top: band.top, height: band.height }} />}
         {compose && (
@@ -912,15 +1363,20 @@ export interface UserTab {
   diff?: { hunks: NonNullable<FileView['render']['hunks']>; area: 'staged' | 'changed'; fileLines?: string[] };
 }
 
+// a keyboard exit hands focus back to the editor body under the card, so
+// the caret keeps working after the card unmounts
+const refocusEditor = (e: { currentTarget: EventTarget }) =>
+  ((e.currentTarget as HTMLElement).closest('.editorBody') as HTMLElement | null)?.focus();
+
 function ComposerCard({ onSubmit, onCancel }: { onSubmit: (body: string) => void; onCancel: () => void }) {
   const [body, setBody] = useState('');
   return (
-    <div className="wpCard rvCard">
+    <div className="wpCard rvCard" onKeyDown={(e) => { if (actionOf(e, ['dismiss'])) { e.stopPropagation(); refocusEditor(e); onCancel(); } }}>
       <div className="wpCardHead"><span className="codicon codicon-comment" /> new review comment</div>
       <textarea
         className="rvInput" autoFocus rows={3} value={body} placeholder="What should change here?"
         onChange={(e) => setBody(e.target.value)}
-        onKeyDown={(e) => { if (e.key === 'Enter' && e.ctrlKey && body.trim()) onSubmit(body.trim()); }}
+        onKeyDown={(e) => { if (e.key === 'Enter' && e.ctrlKey && body.trim()) { refocusEditor(e); onSubmit(body.trim()); } }}
       />
       <div className="rvActions">
         <button disabled={!body.trim()} onClick={() => onSubmit(body.trim())}>comment</button>
@@ -936,7 +1392,7 @@ function ThreadCard({ comment, stale, onReply, onResolve, onViewOriginal, onClos
 }) {
   const [body, setBody] = useState('');
   return (
-    <div className="wpCard rvCard">
+    <div className="wpCard rvCard" onKeyDown={(e) => { if (actionOf(e, ['dismiss'])) { e.stopPropagation(); refocusEditor(e); onClose(); } }}>
       <div className="wpCardHead">
         <span className="codicon codicon-comment" /> {comment.author}
         <span className={`rvChip rv-${comment.state}`}>{comment.state}</span>
@@ -963,7 +1419,7 @@ function ThreadCard({ comment, stale, onReply, onResolve, onViewOriginal, onClos
   );
 }
 
-function FileBody({ file, animate, speed, onCompose, composer, waypoint, reviewMarks, thread, scrollTo, textBand }: {
+function FileBody({ file, animate, speed, onCompose, composer, waypoint, reviewMarks, thread, scrollTo, textBand, find, onVisualMode }: {
   file: FileView; animate: boolean; speed: number;
   onCompose?: (line: number, lineEnd: number) => void;
   composer?: { line: number; lineEnd: number; onSubmit: (body: string) => void; onCancel: () => void };
@@ -972,12 +1428,14 @@ function FileBody({ file, animate, speed, onCompose, composer, waypoint, reviewM
   thread?: ComponentProps<typeof CodeView>['thread'];
   scrollTo?: { line: number; nonce: number };
   textBand?: { rects: { x: number; y: number; w: number; h: number }[] };
+  find?: FindDrive;
+  onVisualMode?: (m: null | 'char' | 'line' | 'normal') => void;
 }) {
   return file.mode === 'diff'
-    ? <DiffView key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} textBand={textBand} />
+    ? <DiffView key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} textBand={textBand} find={find} onVisualMode={onVisualMode} />
     : file.mode === 'image'
       ? <ImageView key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} />
-      : <CodeView key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} speed={speed} onCompose={onCompose} composer={composer} waypoint={waypoint} reviewMarks={reviewMarks} thread={thread} scrollTo={scrollTo} textBand={textBand} />;
+      : <CodeView key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} speed={speed} onCompose={onCompose} composer={composer} waypoint={waypoint} reviewMarks={reviewMarks} thread={thread} scrollTo={scrollTo} textBand={textBand} find={find} onVisualMode={onVisualMode} />;
 }
 
 // context capture for a review comment: the anchor line and its surroundings,
@@ -999,8 +1457,10 @@ export function EditorPane({
   timelinePath, onOpenTimeline, onCloseTimeline, timelineBody, onToggleWaypoint, onCloseAll,
   waypoints, onOpenSnapshot, onActivateWaypoint, pinnedFlash = 0, pointer = 0, worktreeBanner, textSel,
   activeReview, focusThreadId, onReviewComment, onReviewReply, onReviewResolve, onReviewViewOriginal,
+  vim = false,
 }: {
   pinned?: FileView; animate: boolean; speed: number; pointer?: number;
+  vim?: boolean; // vim mode: vim keys active, status bar always on, : commands
   // the active view shows a file inside a linked worktree: say so, in orange
   worktreeBanner?: { label: string; onOpen?: () => void };
   onCloseAll?: () => void;
@@ -1033,6 +1493,68 @@ export function EditorPane({
   const userTab = active !== 'pinned' && active !== 'timeline' ? userTabs.find((t) => t.key === active) : undefined;
 
   // ---- human review state for the active view ----
+  // ---- the vim status bar: mode indicator, and the find prompt (regex,
+  // highlights, Enter cycles). The bar is a generic prompt slot — the next
+  // keymap plugs into it the same way. ----
+  const [visualMode, setVisualMode] = useState<null | 'char' | 'line' | 'normal'>(null);
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState('');
+  const [findDrive, setFindDrive] = useState<{ tick: number; dir: 1 | -1 }>({ tick: 0, dir: 1 });
+  const [findState, setFindState] = useState({ cur: 0, total: 0 });
+  const findInputRef = useRef<HTMLInputElement>(null);
+  const findBad = useMemo(() => {
+    if (!findQuery) return false;
+    try { new RegExp(findQuery); return false; } catch { return true; }
+  }, [findQuery]);
+  const find: FindDrive | undefined = findOpen && findQuery ? {
+    query: findQuery,
+    tick: findDrive.tick,
+    dir: findDrive.dir,
+    onState: (cur, total) => setFindState((s) => (s.cur === cur && s.total === total ? s : { cur, total })),
+  } : undefined;
+  // the : command bar (vim mode): numbers go to a line; everything else is
+  // not a command yet
+  const [cmdOpen, setCmdOpen] = useState(false);
+  const [cmdText, setCmdText] = useState('');
+  const cmdInputRef = useRef<HTMLInputElement>(null);
+  const runCmd = () => {
+    const s = cmdText.trim();
+    setCmdOpen(false);
+    setCmdText('');
+    focusEditor();
+    if (/^\d+$/.test(s)) window.dispatchEvent(new CustomEvent('mcfly:goline', { detail: Number(s) }));
+    else if (s) notify(`not a command: ${s}`);
+  };
+
+  const paneKeys = (e: React.KeyboardEvent) => {
+    const a = actionOf(e, ['find', 'command']);
+    if (!a) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (a === 'find') {
+      setCmdOpen(false);
+      setFindOpen(true);
+      requestAnimationFrame(() => findInputRef.current?.focus());
+    } else {
+      setFindOpen(false);
+      setCmdOpen(true);
+      requestAnimationFrame(() => cmdInputRef.current?.focus());
+    }
+  };
+
+  // transient feedback (yanked line, copied N chars) over the mode text
+  const [sbNotice, setSbNotice] = useState<string | null>(null);
+  useEffect(() => {
+    let t: number;
+    const on = (e: Event) => {
+      setSbNotice((e as CustomEvent).detail);
+      clearTimeout(t);
+      t = window.setTimeout(() => setSbNotice(null), 1500);
+    };
+    window.addEventListener('mcfly:notice', on);
+    return () => { window.removeEventListener('mcfly:notice', on); clearTimeout(t); };
+  }, []);
+
   const [composeAt, setComposeAt] = useState<{ path: string; line: number; lineEnd: number; step?: number; content: string; startLine: number } | null>(null);
   const [openThreadId, setOpenThreadId] = useState<string | undefined>();
   useEffect(() => { setOpenThreadId(focusThreadId); }, [focusThreadId]);
@@ -1163,7 +1685,7 @@ export function EditorPane({
   );
 
   return (
-    <div className="editorPane">
+    <div className="editorPane" onKeyDown={paneKeys}>
       <div className="tabs">
         <div
           key={`pf${pinnedFlash}`}
@@ -1248,6 +1770,8 @@ export function EditorPane({
               animate={false}
               fileLines={userTab.diff.fileLines}
               textBand={textBandFor(userTab.path)}
+              find={find}
+              onVisualMode={setVisualMode}
               onComment={reviewing ? (c) => onReviewComment!({
                 path: userTab.path, line: c.line,
                 ...(c.lineEnd > c.line ? { line_end: c.lineEnd } : {}),
@@ -1325,6 +1849,8 @@ export function EditorPane({
             } : undefined}
             scrollTo={scrollTo}
             textBand={textBandFor(userTab.path)}
+            find={find}
+            onVisualMode={setVisualMode}
           />
         )
       ) : pinned ? (
@@ -1351,9 +1877,64 @@ export function EditorPane({
           } : undefined}
           scrollTo={scrollTo}
           textBand={textBandFor(pinned.path)}
+          find={find}
+          onVisualMode={setVisualMode}
         />
       ) : (
         <div className="emptyHint">files the agent reads will open here</div>
+      )}
+      {(vim || findOpen || cmdOpen) && (
+        <div className="statusBar">
+          {cmdOpen ? (
+            <span className="sbFind">
+              <span className="sbSlash">:</span>
+              <input
+                ref={cmdInputRef}
+                className="sbInput"
+                value={cmdText}
+                placeholder="line number"
+                onChange={(e) => setCmdText(e.target.value)}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === 'Enter') runCmd();
+                  else if (actionOf(e, ['dismiss'])) {
+                    setCmdOpen(false);
+                    setCmdText('');
+                    focusEditor();
+                  }
+                }}
+              />
+            </span>
+          ) : findOpen ? (
+            <span className="sbFind">
+              <span className="sbSlash">/</span>
+              <input
+                ref={findInputRef}
+                className={`sbInput${findBad ? ' bad' : ''}`}
+                value={findQuery}
+                placeholder="regex"
+                onChange={(e) => setFindQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  e.stopPropagation();
+                  if (e.key === 'Enter') setFindDrive((d) => ({ tick: d.tick + 1, dir: e.shiftKey ? -1 : 1 }));
+                  else if (actionOf(e, ['dismiss'])) {
+                    setFindOpen(false);
+                    focusEditor(); // back to the caret, not scroll mode
+                  }
+                }}
+              />
+              <span className="sbCount">
+                {findState.total
+                  ? findState.cur ? `${findState.cur}/${findState.total}` : `${findState.total} matches`
+                  : findQuery && !findBad ? 'no matches' : ''}
+              </span>
+            </span>
+          ) : (
+            <span className="sbMode">
+              {sbNotice ?? (visualMode === 'char' ? '-- VISUAL --' : visualMode === 'line' ? '-- VISUAL LINE --' : visualMode === 'normal' ? '-- NORMAL --' : '')}
+            </span>
+          )}
+        </div>
       )}
     </div>
   );
