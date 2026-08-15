@@ -16,7 +16,7 @@ import { HistoryBar } from './components/HistoryBar';
 import type { TermCtl } from './components/LivePane';
 import type { Review, ReviewComment, SessionMeta } from './types';
 import { normPath, resolveWaypoint, type WaypointEntry } from './lib/timeline';
-import { APP_CHORDS, actionOf, focusEditor, justArmed, termReleasedChord } from './lib/keys';
+import { APP_CHORDS, actionOf, focusEditor, justArmed, setDeferredSink, termReleasedChord, type Action } from './lib/keys';
 import { QuickPick } from './components/QuickPick';
 import type { McflySettings } from './components/Settings';
 import { emit, onEditorSelection, updateSnapshot, watchSelections } from './lib/workspace';
@@ -130,6 +130,14 @@ export default function Workbench({
   const activeRef = useRef(active);
   activeRef.current = active;
   const appRef = useRef<HTMLDivElement>(null);
+  // deferred chords (a shadowed binding firing on timeout, e.g. <leader>g
+  // under <leader>gg) land here; only the visible workbench owns the sink
+  const runChordRef = useRef<(a: Action) => void>(() => {});
+  useEffect(() => {
+    if (!active) return;
+    setDeferredSink((res) => runChordRef.current(res.action));
+    return () => setDeferredSink(null);
+  }, [active]);
   const [sideW, dragSide] = usePanelSize('sideW', 300, 180, 640);
   const [rightW, dragRight] = usePanelSize('chatW', 420, 260, 1000);
   const [editPct, dragEdit] = usePanelSize('editPct', 60, 15, 90);
@@ -1167,6 +1175,22 @@ export default function Workbench({
         ?? (body?.querySelector('textarea') as HTMLElement | null);
       inner?.focus();
     }));
+    // the chord actions, callable from the keydown path AND the resolver's
+    // deferred sink (a shadowed binding firing on timeout — <leader>g).
+    // el = the focused element for context-sensitive chords; the sink path
+    // has none, which only degrades pane cycling to the editor default.
+    const runChord = (chord: Action, el?: Element | null) => {
+      switch (chord) {
+        case 'gotoAgents':
+          setLeftOpen(true);
+          requestAnimationFrame(() => requestAnimationFrame(() => {
+            (appRef.current?.querySelector('.agentTree') as HTMLElement | null)?.focus();
+          }));
+          break;
+        default: runChordInner(chord, el);
+      }
+    };
+    runChordRef.current = runChord;
     const onKey = (e: KeyboardEvent) => {
       if (!activeRef.current) return; // only the visible workbench listens
       const t = e.target;
@@ -1185,6 +1209,13 @@ export default function Workbench({
       if (chord) {
         e.preventDefault();
         e.stopPropagation();
+        runChord(chord, el);
+        return;
+      }
+      onKeyRest(e, el);
+    };
+    // the original chord switch, hoisted so runChord above reaches it
+    function runChordInner(chord: Action, el?: Element | null) {
         switch (chord) {
           case 'gotoTools': setLeftOpen(true); setLeftTab('tools'); focusPane('.sidebar'); break;
           case 'gotoExplorer': setLeftOpen(true); setLeftTab('explorer'); focusPane('.sidebar'); break;
@@ -1265,8 +1296,8 @@ export default function Workbench({
             if (editorOrder[idx]) setEditorTab(editorOrder[idx]);
           }
         }
-        return;
-      }
+    }
+    function onKeyRest(e: KeyboardEvent, el: Element | null) {
       // a leader keystroke (space, ctrl+b, g...) armed a sequence: consume
       // it silently — it must not ALSO play/pause or reach anything else
       if (justArmed(e)) {
@@ -1292,7 +1323,7 @@ export default function Workbench({
       else if (action === 'stepForward') { if (bar) press('Next change'); else r.stepBy(1); }
       else if (action === 'playHome') { e.preventDefault(); if (bar) press('First change'); else r.jump(0); }
       else if (action === 'playEnd') { e.preventDefault(); if (bar) press('Last change'); else r.jump(Math.max(0, r.steps.length - 1)); }
-    };
+    }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [r, editorOrder, editorTab, activeViewPath, openAbs, closeFile, leftTab, bottomTab, rightTab, setLeftOpen, setRightOpen, setBottomOpen, setLeftTab, setRightTab, setBottomTab, onOpenSettings, termCtl]);
@@ -1569,7 +1600,7 @@ export default function Workbench({
               <div className="bottomPane">
                 <div className="paneTabs" ref={bottomStripRef} tabIndex={-1} onKeyDown={stripKeys(['term', 'data', 'way', 'review', 'tool'], bottomTab, (t) => setBottomTab(t as typeof bottomTab))}>
                   <div key={`t${flashes.term ?? 0}`} className={`paneTab ${bottomTab === 'term' ? 'active' : ''} ${flashes.term ? 'tabFlashAnim' : ''}`} onClick={() => setBottomTab('term')}>
-                    AGENT TERMINAL <span className="roBadge">read only</span>
+                    AGENT TERMINAL
                   </div>
                   <div key={`d${flashes.data ?? 0}`} className={`paneTab ${bottomTab === 'data' ? 'active' : ''} ${flashes.data ? 'tabFlashAnim' : ''}`} onClick={() => setBottomTab('data')}>
                     DATA

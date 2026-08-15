@@ -903,6 +903,9 @@ export function DiffView({ file, animate, onComment, fileLines, textBand, find, 
   const dBlink = useRef<number>(undefined);
   const wrapRef = useRef<HTMLDivElement>(null);
   const isContent = (i: number) => rows[i] && rows[i].kind !== 'hunk' && rows[i].kind !== 'gap';
+  // the caret STOPS on collapsed gaps (soft select; right expands) — only
+  // hunk headers are skipped over
+  const isStop = (i: number) => !!rows[i] && rows[i].kind !== 'hunk';
   const rowText = (i: number) => (isContent(i) ? (rows[i] as DiffRow).text : '');
   const paintDCaret = () => {
     const el = dCaretEl.current;
@@ -910,6 +913,16 @@ export function DiffView({ file, animate, onComment, fileLines, textBand, find, 
     const wrap = wrapRef.current;
     if (!el || !wrap) return;
     if (!c) { el.style.display = 'none'; return; }
+    if (rows[c.row]?.kind === 'gap') {
+      // a collapsed region: soft-select the whole row instead of a block char
+      el.classList.add('rowSel');
+      el.style.display = 'block';
+      el.style.top = `${c.row * LH}px`;
+      el.style.left = '0px';
+      el.style.width = `${wrap.clientWidth}px`;
+      return;
+    }
+    el.classList.remove('rowSel');
     const rowEl = wrap.children[c.row] as HTMLElement | undefined;
     const lc = rowEl?.querySelector('.lc') as HTMLElement | null;
     if (!lc) { el.style.display = 'none'; return; }
@@ -953,10 +966,13 @@ export function DiffView({ file, animate, onComment, fileLines, textBand, find, 
   };
   const dNextContent = (from: number, dir: 1 | -1) => {
     for (let i = from + dir; i >= 0 && i < rows.length; i += dir) {
-      if (isContent(i)) return i;
+      if (isStop(i)) return i;
     }
     return from;
   };
+  // rows change under the caret (gap expansion): repaint in place — the
+  // caret lands on the first revealed line, same index
+  useEffect(() => { if (dCaret.current) paintDCaret(); }, [rows]); // eslint-disable-line react-hooks/exhaustive-deps
   const dInitCaret = () => {
     const first = rows.findIndex((_, i2) => isContent(i2));
     if (first < 0) return;
@@ -1167,6 +1183,15 @@ export function DiffView({ file, animate, onComment, fileLines, textBand, find, 
       e.stopPropagation();
       void navigator.clipboard.writeText(`${rowText(c.row)}\n`);
       notify('yanked line');
+      return;
+    }
+    // soft-selected collapsed region: the expand action (right) opens it in
+    // place — the caret lands on the first revealed line
+    const gapRow = rows[c.row];
+    if (gapRow?.kind === 'gap' && (raw === 'right' || raw === 'end')) {
+      e.preventDefault();
+      e.stopPropagation();
+      setExpanded((prev) => new Set(prev).add(gapRow.id));
       return;
     }
     // visual mode is a sticky shift: every plain movement extends

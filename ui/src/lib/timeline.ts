@@ -339,9 +339,24 @@ export function fileChain(steps: Step[], path: string): { touches: FileTouch[]; 
   return { touches, snapshots };
 }
 
+// the harness notes a shell restart inside a result ("Shell cwd was reset
+// to ..."): the agent's REAL terminal started over, so the virtual one does
+// too — the marker block opens the new era, and rewinding still shows the
+// old shell's history
+const SHELL_RESET = /Shell cwd was reset to /;
+
 export function foldState(steps: Step[], pointer: number): ViewState {
   const byPath = new Map<string, FileView>();
   const term: TermBlock[] = [];
+  const pushTerm = (b: TermBlock) => {
+    if (SHELL_RESET.test(b.stdout) || SHELL_RESET.test(b.stderr)) {
+      term.length = 0;
+      // the CLEAR is the signal now — the marker line itself is noise
+      const strip = (t: string) => t.split('\n').filter((l) => !SHELL_RESET.test(l)).join('\n').replace(/\n+$/, '');
+      b = { ...b, stdout: strip(b.stdout), stderr: strip(b.stderr) };
+    }
+    term.push(b);
+  };
   let data: DataView | undefined;
   const waypoints: WaypointEntry[] = [];
   let currentToolIndex = -1;
@@ -384,7 +399,7 @@ export function foldState(steps: Step[], pointer: number): ViewState {
         if (r?.verb === 'read_file' && path) {
           byPath.set(path, { path, mode: r.image_src ? 'image' : 'file', render: r, touchedAt: i });
         }
-        if (s.call.command) term.push({ command: s.call.command, stdout: r?.stdout ?? '', stderr: r?.stderr ?? '', interrupted: !!r?.interrupted, at: i });
+        if (s.call.command) pushTerm({ command: s.call.command, stdout: r?.stdout ?? '', stderr: r?.stderr ?? '', interrupted: !!r?.interrupted, at: i });
         break;
       }
       case 'patch_file': {
@@ -403,7 +418,7 @@ export function foldState(steps: Step[], pointer: number): ViewState {
         break;
       }
       case 'exec': {
-        term.push({
+        pushTerm({
           command: s.call.command ?? '',
           stdout: r?.stdout ?? '',
           stderr: r?.stderr ?? '',

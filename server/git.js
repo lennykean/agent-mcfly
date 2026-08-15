@@ -100,11 +100,12 @@ export async function status(root) {
 
 export async function log(root, limit = 150, skip = 0) {
   // the ancestry of HEAD, like the VS Code graph: merged branches show as
-  // converging lanes; branches that never contributed to HEAD stay out
-  const fmt = '%H\x1f%P\x1f%an\x1f%ct\x1f%D\x1f%s';
+  // converging lanes; branches that never contributed to HEAD stay out.
+  // %B is the FULL message (multiline), so records split on \x1e, not lines.
+  const fmt = '%x1e%H\x1f%P\x1f%an\x1f%ct\x1f%D\x1f%s\x1f%B';
   const out = await run(root, ['log', 'HEAD', '--topo-order', `-n${limit}`, `--skip=${skip}`, `--pretty=format:${fmt}`]);
-  return out.split('\n').filter(Boolean).map((line) => {
-    const [hash, parents, author, time, refs, subject] = line.split('\x1f');
+  return out.split('\x1e').filter((r) => r.trim()).map((rec) => {
+    const [hash, parents, author, time, refs, subject, body] = rec.split('\x1f');
     return {
       hash,
       parents: parents ? parents.split(' ') : [],
@@ -112,6 +113,7 @@ export async function log(root, limit = 150, skip = 0) {
       time: Number(time) * 1000,
       refs: refs ? refs.split(', ').filter(Boolean) : [],
       subject: subject ?? '',
+      body: (body ?? '').replace(/\r/g, '').trim(),
     };
   });
 }

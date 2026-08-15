@@ -14,7 +14,7 @@ export type Action =
   | 'bufferPrev' | 'bufferNext' | 'paneNext' | 'panePrev'
   | 'tab1' | 'tab2' | 'tab3' | 'tab4' | 'tab5' | 'tab6' | 'tab7' | 'tab8' | 'tab9'
   | 'gotoTools' | 'gotoExplorer' | 'gotoGit' | 'gotoChat' | 'gotoLiveTerm'
-  | 'gotoAgentTerm' | 'gotoData' | 'gotoWayfinder' | 'gotoReview' | 'gotoToolDetail'
+  | 'gotoAgentTerm' | 'gotoAgents' | 'gotoData' | 'gotoWayfinder' | 'gotoReview' | 'gotoToolDetail'
   | 'openTimeline' | 'openReal' | 'grep' | 'findFile' | 'closeTab' | 'showKeys'
   | 'termFocus' | 'termNew' | 'termNext' | 'termPrev' | 'termKill';
 
@@ -101,6 +101,7 @@ const DEFAULT: Record<Action, Binding[]> = {
   gotoChat: [{ key: 'KeyC', alt: true, shift: true }],
   gotoLiveTerm: [{ key: 'KeyV', alt: true, shift: true }],
   gotoAgentTerm: [{ key: 'KeyA', alt: true, shift: true }],
+  gotoAgents: [{ key: 'KeyN', alt: true, shift: true }],
   // Dark Reader ships claiming shift+alt+D — S (spreadsheet) also answers
   gotoData: [{ key: 'KeyD', alt: true, shift: true }, { key: 'KeyS', alt: true, shift: true }],
   gotoWayfinder: [{ key: 'KeyW', alt: true, shift: true }],
@@ -133,7 +134,7 @@ const DEFAULT: Record<Action, Binding[]> = {
 export const APP_CHORDS: Action[] = [
   'termFocus', 'termNew', 'termNext', 'termPrev', 'termKill',
   'gotoTools', 'gotoExplorer', 'gotoGit', 'gotoChat', 'gotoLiveTerm',
-  'gotoAgentTerm', 'gotoData', 'gotoWayfinder', 'gotoReview', 'gotoToolDetail',
+  'gotoAgentTerm', 'gotoAgents', 'gotoData', 'gotoWayfinder', 'gotoReview', 'gotoToolDetail',
   'bufferPrev', 'bufferNext', 'paneNext', 'panePrev',
   'tab1', 'tab2', 'tab3', 'tab4', 'tab5', 'tab6', 'tab7', 'tab8', 'tab9',
   'openTimeline', 'openReal', 'grep', 'findFile', 'closeTab', 'showKeys', 'playHome', 'playEnd',
@@ -167,6 +168,12 @@ export const termReleasedChord = (e: { key: string; code?: string; ctrlKey: bool
     // the tmux prefix leaves the shell, and so does the key right after it
     if (matches(e, tmuxPrefix)) return true;
     if (seqPending && Date.now() - seqPending.at < SEQ_MS && matches(seqPending.chords[0], tmuxPrefix)) return true;
+  }
+  // ctrl+h / ctrl+j are the ESCAPE directions (panel left/down) — the
+  // panels win over ^H/^J, whose shell duties Backspace and Enter cover.
+  // ^L (clear) and ^K (kill-line) are precious and stay with the shell.
+  if (e.ctrlKey && !e.altKey && !e.shiftKey && (e.code === 'KeyH' || e.code === 'KeyJ')) {
+    return wouldFire(e, ['panelLeft', 'panelDown']);
   }
   if (e.ctrlKey && !e.altKey && (e.code ?? '').startsWith('Key')) return false;
   if (wouldFire(e, APP_CHORDS)) return true;
@@ -273,13 +280,15 @@ const buildVIM = (): Partial<Record<Action, Binding[]>> => {
     closeTab: [{ key: 'F4', ctrl: true }, [L, { key: 'KeyQ' }]],
     showKeys: [{ key: 'F1' }, [L, { key: '?', shift: true }], [L, { key: '?' }]],
     // every pane has a bespoke leader jump (alt+shift chords stay too).
-    // git is <leader>b (branches) — g belongs to <leader>gg play-home.
+    // <leader>g (git) coexists with <leader>gg (play-home) through the
+    // resolver's deferred matching, vim timeoutlen style.
     gotoTools: [{ key: 'KeyL', alt: true, shift: true }, [L, { key: 'KeyT' }]],
     gotoExplorer: [{ key: 'KeyE', alt: true, shift: true }, [L, { key: 'KeyE' }]],
-    gotoGit: [{ key: 'KeyG', alt: true, shift: true }, [L, { key: 'KeyB' }]],
+    gotoGit: [{ key: 'KeyG', alt: true, shift: true }, [L, { key: 'KeyG' }]],
     gotoChat: [{ key: 'KeyC', alt: true, shift: true }, [L, { key: 'KeyC' }]],
     gotoLiveTerm: [{ key: 'KeyV', alt: true, shift: true }, [L, { key: 'Backquote' }]],
-    gotoAgentTerm: [{ key: 'KeyA', alt: true, shift: true }, [L, { key: 'KeyA' }]],
+    gotoAgentTerm: [{ key: 'KeyA', alt: true, shift: true }, [L, { key: 'KeyZ' }]],
+    gotoAgents: [{ key: 'KeyN', alt: true, shift: true }, [L, { key: 'KeyA' }]],
     gotoData: [{ key: 'KeyD', alt: true, shift: true }, { key: 'KeyS', alt: true, shift: true }, [L, { key: 'KeyD' }]],
     gotoWayfinder: [{ key: 'KeyW', alt: true, shift: true }, [L, { key: 'KeyW' }]],
     gotoReview: [{ key: 'KeyR', alt: true, shift: true }, { key: 'KeyU', alt: true, shift: true }, [L, { key: 'KeyR' }]],
@@ -401,6 +410,17 @@ let countPending: { n: number; at: number; stamp: number } | null = null;
 const SEQ_MS = 800;
 const COUNT_MS = 3000;
 
+// vim timeoutlen: a completed binding that is ALSO the prefix of a longer
+// one (<leader>g vs <leader>gg) does not fire at once — it waits SEQ_MS for
+// the continuation and fires through this sink if none arrives. The window
+// handler registers the sink; there is one, like the pending buffer.
+let deferred: { res: Resolved; timer: number } | null = null;
+let deferredSink: ((r: Resolved) => void) | null = null;
+export function setDeferredSink(fn: ((r: Resolved) => void) | null) { deferredSink = fn; }
+const cancelDeferred = () => {
+  if (deferred) { clearTimeout(deferred.timer); deferred = null; }
+};
+
 export interface Resolved { action: Action; count: number; capture?: string }
 
 export function resolve(e: ChordEvent, actions: Action[]): Resolved | null {
@@ -425,9 +445,26 @@ export function resolve(e: ChordEvent, actions: Action[]): Resolved | null {
       for (const b of TABLE[a]) {
         if (!Array.isArray(b)) continue;
         if (b.length === attempt.length && attempt.every((ev, i) => matches(ev, b[i]))) {
-          seqPending = null;
+          cancelDeferred();
           const capIdx = b.findIndex((c) => c.capture);
-          return { action: a, count: takeCount(), ...(capIdx >= 0 ? { capture: attempt[capIdx].key } : {}) };
+          const res: Resolved = { action: a, count: takeCount(), ...(capIdx >= 0 ? { capture: attempt[capIdx].key } : {}) };
+          // the whole TABLE decides shadowing — the longer binding may be
+          // probed by a different handler than this one
+          const shadowed = (Object.keys(TABLE) as Action[]).some((a2) => TABLE[a2].some((b2) =>
+            Array.isArray(b2) && b2.length > attempt.length && attempt.every((ev, i) => matches(ev, b2[i]))));
+          if (shadowed) {
+            deferred = {
+              res,
+              timer: window.setTimeout(() => {
+                deferred = null;
+                seqPending = null;
+                deferredSink?.(res);
+              }, SEQ_MS),
+            };
+            return 'prefix'; // stays pending; the continuation can still win
+          }
+          seqPending = null;
+          return res;
         }
         if (b.length > attempt.length && attempt.every((ev, i) => matches(ev, b[i]))) isPrefix = true;
       }
@@ -455,12 +492,16 @@ export function resolve(e: ChordEvent, actions: Action[]): Resolved | null {
         if (Array.isArray(b) && b.length >= attempt.length && attempt.every((ev, i) => matches(ev, b[i]))) return null;
       }
     }
+    // a TRUE dead end (no binding anywhere continues this): a deferred
+    // shorter match is abandoned, not fired late under the user's typing
+    cancelDeferred();
   }
   // single chords — a real match retires any pending state
   for (const a of actions) {
     for (const b of TABLE[a]) {
       if (!Array.isArray(b) && matches(e, b)) {
         seqPending = null;
+        cancelDeferred();
         return { action: a, count: takeCount() };
       }
     }

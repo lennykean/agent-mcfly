@@ -7,7 +7,7 @@ import { actionOf, focusEditor, synthClick } from '../lib/keys';
 
 export interface GitFile { path: string; status: string }
 export interface GitSelection { path: string; area: 'staged' | 'changed' }
-interface GitCommit { hash: string; parents: string[]; author: string; time: number; refs: string[]; subject: string }
+interface GitCommit { hash: string; parents: string[]; author: string; time: number; refs: string[]; subject: string; body?: string }
 interface GitWorktree { path: string; head?: string; branch?: string; bare?: boolean; detached?: boolean }
 
 const STATUS_COLOR: Record<string, string> = { M: '#e2c08d', U: '#73c991', A: '#73c991', D: '#f14c4c', R: '#4ec9b0', C: '#4ec9b0', T: '#e2c08d' };
@@ -467,7 +467,7 @@ export const GitPane = memo(function GitPane({ root, visible, selection, onSelec
             <div
               key={row.c.hash}
               className={`ggRow ${commitSelected(row.c.hash) ? 'sel' : ''}`}
-              title={`${row.c.hash.slice(0, 10)} · ${row.c.author} · ${new Date(row.c.time).toLocaleString()}`}
+              title={`${row.c.hash.slice(0, 10)} · ${row.c.author} · ${new Date(row.c.time).toLocaleString()}${row.c.body && row.c.body !== row.c.subject ? `\n\n${row.c.body}` : `\n\n${row.c.subject}`}`}
               onClick={(e) => clickCommit(e, row.c)}
               onMouseDown={(e) => { if (e.shiftKey) e.preventDefault(); }}
             >

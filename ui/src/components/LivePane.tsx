@@ -67,8 +67,11 @@ function parseFileRef(text: string): { path: string; line?: number } | null {
 // Control frames from the server are \x00-prefixed JSON; everything else is
 // terminal data. 'taken' = another window stole the terminal (tmux attach -d).
 // Stays mounted while hidden so backgrounded terminals keep their sockets.
-function PtySession({ tool, token, cwd, platform, attachId, steal, visible, onPtyId, onExit, onTakeBack, onOpenFileRef }: {
+function PtySession({ tool, token, cwd, platform, attachId, steal, visible, focusArm, onPtyId, onExit, onTakeBack, onOpenFileRef }: {
   tool: string; token: string; cwd?: string; platform?: string; attachId?: string; steal?: boolean; visible: boolean;
+  // false while a reveal is PROGRAMMATIC (sync following a workspace
+  // switch) — revealing must not steal focus from what the user is doing
+  focusArm?: React.MutableRefObject<boolean>;
   onPtyId: (id: string) => void; onExit: () => void; onTakeBack: () => void;
   onOpenFileRef?: (path: string, line?: number) => void;
 }) {
@@ -238,9 +241,15 @@ function PtySession({ tool, token, cwd, platform, attachId, steal, visible, onPt
     };
   }, [tool, token, cwd, platform, attachId, steal]);
 
-  // focus when this terminal's tab is revealed
+  // focus when this terminal's tab is revealed BY THE USER (clicks, chords);
+  // a sync-driven reveal keeps the user's focus where it is. The disarm is
+  // CONSUMED here (exactly one reveal follows each disarm) — a timer could
+  // re-arm before a slow render's effects run and let the steal through.
   useEffect(() => {
-    if (visible) termRef.current?.focus();
+    if (!visible) return;
+    if (focusArm && !focusArm.current) { focusArm.current = true; return; }
+    termRef.current?.focus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
 
   return (
@@ -323,6 +332,8 @@ export function LiveTerm({ cwd, projects, currentSession, linkedRoots, onToolSta
   const [ptys, setPtys] = useState<LivePty[]>([]);
   const [confirmSteal, setConfirmSteal] = useState<string>();
   const nextKey = useRef(1);
+  // armed = a revealed terminal may take focus; sync-driven reveals disarm
+  const focusArm = useRef(true);
 
   useEffect(() => {
     fetch('/api/config')
@@ -450,7 +461,12 @@ export function LiveTerm({ cwd, projects, currentSession, linkedRoots, onToolSta
           const s = sessionOf(e.ptyId);
           return !!s && s.provider === provider && s.id === id;
         });
-        if (hit) setActive(hit.key);
+        if (hit && hit.key !== active) {
+          // programmatic reveal: show the tab, do NOT steal focus — the
+          // revealed session's effect consumes this and re-arms
+          focusArm.current = false;
+          setActive(hit.key);
+        }
         return !!hit;
       },
     };
@@ -552,6 +568,7 @@ export function LiveTerm({ cwd, projects, currentSession, linkedRoots, onToolSta
               attachId={e.attachId}
               steal={e.steal}
               visible={active === e.key}
+              focusArm={focusArm}
               onPtyId={(id) => {
                 setTerms((t) => t.map((x) => (x.key === e.key ? { ...x, ptyId: id } : x)));
                 // fresh = started here, not adopted/taken back — only fresh
@@ -606,7 +623,6 @@ export function LiveTerm({ cwd, projects, currentSession, linkedRoots, onToolSta
                       <span className="tileName">
                         {p.tool === '_' ? 'shell' : p.tool} · {p.cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop()}
                       </span>
-                      {isWatched(p.session) && <span className="tileBadge watchBadge">watching</span>}
                       <span className={`tileBadge ${p.attached && !own ? 'busy' : ''}`}>
                         {own ? 'this window' : p.attached ? 'in use' : 'detached'}
                       </span>
