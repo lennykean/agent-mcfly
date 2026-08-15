@@ -10,7 +10,7 @@ export interface TreeAgent {
   label: string;
   agentType?: string;
   color?: string; // the root's hue; rows get a tinted background
-  root?: boolean; // a top-level agent (broadcast icon, closable)
+  root?: boolean; // a top-level agent (closable)
   // a workspace GROUP row: pure grouping, informational — it cannot be
   // opened or selected, only collapsed
   kind?: 'workspace';
@@ -143,7 +143,7 @@ export function AgentTree({
               onClick={(e) => { e.stopPropagation(); toggle(node.key); }}
             />
           ) : <span className="agentChevron" />}
-          <span className={`codicon ${node.kind === 'workspace' ? 'codicon-folder' : node.root ? 'codicon-broadcast' : 'codicon-hubot'} agentIcon`} />
+          <span className={`codicon ${node.kind === 'workspace' ? 'codicon-folder' : 'codicon-hubot'} agentIcon`} />
           <span className="agentLabel">
             {node.agentType ? `[${node.agentType}] ` : ''}
             {node.label}
