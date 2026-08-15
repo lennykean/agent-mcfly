@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import http from 'node:http';
+import path from 'node:path';
 import { DATA_MARKER, dataEnvelope, highlightResult, parseLineSpec, parseTsv } from './mcfly-data.js';
+import { checklistFiles, findWorkspaceState } from './mcp.js';
 
 test('validates strict TSV and serves it through MCP stdio', () => {
   assert.deepEqual(parseTsv('name\tcount\nalpha\t2\n'), {
@@ -77,4 +80,42 @@ test('parses line specs strictly', () => {
   assert.equal(parseLineSpec('5-2'), null);
   assert.equal(parseLineSpec('a,b'), null);
   assert.equal(parseLineSpec(''), null);
+});
+
+test('workspace routing skips unrelated server scopes', async () => {
+  const project = path.join(process.cwd(), 'repo');
+  const wrongScope = `${project}-old`;
+  const host = async (scope, marker) => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ scope, snapshot: { marker }, events: [] }));
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    return server;
+  };
+  const wrong = await host(wrongScope, 'wrong');
+  const right = await host(project, 'right');
+  const root = await host('/', 'root');
+  try {
+    const servers = [
+      { port: wrong.address().port, pwd: wrongScope, started: 2 },
+      { port: right.address().port, pwd: project, started: 1 },
+    ];
+    const found = await findWorkspaceState(servers, project);
+    assert.equal(found.pick.port, right.address().port);
+    assert.equal(found.data.snapshot.marker, 'right');
+    assert.equal(await findWorkspaceState([servers[0]], project), null);
+    const rooted = await findWorkspaceState([{ port: root.address().port, pwd: '/', started: 1 }], '/repo/child');
+    assert.equal(rooted.data.snapshot.marker, 'root');
+  } finally {
+    await Promise.all([wrong, right, root].map((server) => new Promise((resolve) => server.close(resolve))));
+  }
+});
+
+test('checklist review state requires the current file signature', () => {
+  const files = [{ status: 'M', path: 'same.js', sig: 'M:10:2' }, { status: 'M', path: 'changed.js', sig: 'M:20:3' }];
+  assert.deepEqual(checklistFiles(files, { 'same.js': 'M:10:2', 'changed.js': 'M:19:1' }), [
+    { status: 'M', path: 'same.js', reviewed: true },
+    { status: 'M', path: 'changed.js', reviewed: false },
+  ]);
 });

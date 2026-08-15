@@ -5,25 +5,16 @@
 
 type Ev = Record<string, unknown> & { kind: string };
 
-// multi-root: each workspace (project pwd) owns a snapshot; the shell points
-// this module at the ACTIVE workspace and only the active one reports. The
-// server stores snapshots per scope so an agent in project A still sees what
-// the user last had open there while they work in project B.
+// multi-root: each workspace (project pwd) owns its reporting state. Callers
+// pass the owning scope explicitly so a root switch cannot relabel queued work.
 const snapshots = new Map<string, Record<string, unknown>>();
-let scope = '';
-let snapshot: Record<string, unknown> = snapFor('');
 function snapFor(key: string) {
   let s = snapshots.get(key);
   if (!s) { s = {}; snapshots.set(key, s); }
   return s;
 }
-export function setWorkspaceScope(pwd: string | null | undefined) {
-  const key = pwd ?? '';
-  if (key === scope) return;
-  scope = key;
-  snapshot = snapFor(key);
-}
-let events: (Ev & { ts: number })[] = [];
+const events = new Map<string, (Ev & { ts: number })[]>();
+const dirtyScopes = new Set<string>();
 let timer: number | undefined;
 let lastFlush = 0;
 
@@ -41,7 +32,8 @@ const SEL_KINDS: [kind: string, root: string, get: (v: unknown) => unknown][] = 
   ['cursor', 'cursor', (v) => v],
 ];
 
-export function updateSnapshot(part: Record<string, unknown>) {
+export function updateSnapshot(scope: string, part: Record<string, unknown>) {
+  const snapshot = snapFor(scope);
   const at = (snapshot.selected_at ??= {}) as Record<string, string>;
   for (const [kind, root, get] of SEL_KINDS) {
     if (!(root in part)) continue;
@@ -55,15 +47,18 @@ export function updateSnapshot(part: Record<string, unknown>) {
     at[kind] = own ?? new Date().toISOString();
   }
   Object.assign(snapshot, part);
-  queue();
+  queue(scope);
 }
 
-export function emit(ev: Ev) {
-  events.push({ ts: Date.now(), ...ev });
-  queue();
+export function emit(scope: string, ev: Ev) {
+  const pending = events.get(scope) ?? [];
+  pending.push({ ts: Date.now(), ...ev });
+  events.set(scope, pending);
+  queue(scope);
 }
 
-function queue() {
+function queue(scope: string) {
+  dirtyScopes.add(scope);
   clearTimeout(timer);
   const wait = Math.max(400, 1000 - (Date.now() - lastFlush));
   timer = window.setTimeout(flush, wait);
@@ -76,13 +71,19 @@ function flush() {
   const body = [...document.querySelectorAll('.editorPane .editorBody')]
     .find((el) => el instanceof HTMLElement && el.offsetParent !== null);
   if (body) {
+    const visibleScope = body.closest<HTMLElement>('[data-workspace-scope]')?.dataset.workspaceScope ?? '';
     const start = Number(body.getAttribute('data-start-line') ?? 1);
     const top = Math.floor(body.scrollTop / 18) + start;
-    snapshot.visible_lines = [top, top + Math.ceil(body.clientHeight / 18)];
+    snapFor(visibleScope).visible_lines = [top, top + Math.ceil(body.clientHeight / 18)];
+    dirtyScopes.add(visibleScope);
   }
-  const payload = JSON.stringify({ scope, snapshot, events });
-  events = [];
-  void fetch('/api/workspace-events', { method: 'POST', body: payload }).catch(() => { /* best effort */ });
+  const pending = [...dirtyScopes];
+  dirtyScopes.clear();
+  for (const scope of pending) {
+    const payload = JSON.stringify({ scope, snapshot: snapFor(scope), events: events.get(scope) ?? [] });
+    events.delete(scope);
+    void fetch('/api/workspace-events', { method: 'POST', body: payload }).catch(() => { /* best effort */ });
+  }
 }
 
 // ---- selection capture: editor (path + lines + text) and terminal (text) ----
@@ -99,10 +100,23 @@ let selTimer: number | undefined;
 // after the native selection dies.
 export interface EditorSel { path: string; lines?: number[]; text: string; at: string; rects: { x: number; y: number; w: number; h: number }[] }
 const SEL_MAX = 8;
-let editorSels: EditorSel[] = [];
-let editorSelCb: ((sels: EditorSel[]) => void) | undefined;
-export function onEditorSelection(cb: typeof editorSelCb) { editorSelCb = cb; }
-let lastDownEditorPath: string | null | false = false; // false = outside any editor
+const editorSels = new Map<string, EditorSel[]>();
+type EditorSelCb = (sels: EditorSel[]) => void;
+const editorSelCbs = new Map<string, Set<EditorSelCb>>();
+const selsFor = (scope: string) => editorSels.get(scope) ?? [];
+const pathKey = (p: string) => (/^[a-zA-Z]:[\\/]|\\|^\/\//.test(p) ? p.replace(/\//g, '\\').toLowerCase() : p);
+const samePath = (a: string, b: string) => pathKey(a) === pathKey(b);
+export function onEditorSelection(scope: string, cb: EditorSelCb) {
+  const cbs = editorSelCbs.get(scope) ?? new Set<EditorSelCb>();
+  cbs.add(cb);
+  editorSelCbs.set(scope, cbs);
+  cb(selsFor(scope));
+  return () => {
+    cbs.delete(cb);
+    if (!cbs.size) editorSelCbs.delete(scope);
+  };
+}
+let lastDownEditor: { scope: string; path: string | null } | false = false; // false = outside any editor
 let lastDownAt = 0; // clears only apply to entries OLDER than the click
 
 let watching = false;
@@ -112,7 +126,10 @@ export function watchSelections() {
   watching = true;
   document.addEventListener('mousedown', (e) => {
     const body = e.target instanceof Element ? e.target.closest('.editorBody') : null;
-    lastDownEditorPath = body ? body.getAttribute('data-path') : false;
+    lastDownEditor = body ? {
+      scope: body.closest<HTMLElement>('[data-workspace-scope]')?.dataset.workspaceScope ?? '',
+      path: body.getAttribute('data-path'),
+    } : false;
     lastDownAt = Date.now();
   }, true);
   document.addEventListener('selectionchange', () => {
@@ -124,21 +141,25 @@ export function watchSelections() {
         // clicked back inside an editor, and it clears only THAT file's
         // entry; the terminal must not steal it. Entries made AFTER the
         // click (keyboard visual mode races this debounce) survive.
-        if (lastDownEditorPath !== false) {
+        if (lastDownEditor !== false) {
+          const down = lastDownEditor;
+          const current = selsFor(down.scope);
           const fresh = (s: EditorSel) => Date.parse(s.at) > lastDownAt;
-          editorSels = lastDownEditorPath
-            ? editorSels.filter((s) => s.path !== lastDownEditorPath || fresh(s))
-            : editorSels.filter(fresh);
-          postSels();
+          const next = down.path
+            ? current.filter((s) => !samePath(s.path, down.path!) || fresh(s))
+            : current.filter(fresh);
+          editorSels.set(down.scope, next);
+          postSels(down.scope);
         }
         return;
       }
       const text = sel.toString();
       if (!text.trim()) return;
       const node = sel.anchorNode instanceof Element ? sel.anchorNode : sel.anchorNode?.parentElement;
+      const selectionScope = node?.closest<HTMLElement>('[data-workspace-scope]')?.dataset.workspaceScope ?? '';
       // a waypoint note card floats OVER code: its text is not on any line
       if (node?.closest('.wpCard')) {
-        emit({ kind: 'select', where: 'waypoint-note', text: text.slice(0, SELECT_CAP) });
+        emit(selectionScope, { kind: 'select', where: 'waypoint-note', text: text.slice(0, SELECT_CAP) });
         return;
       }
       const editorBody = node?.closest('.editorBody');
@@ -177,34 +198,35 @@ export function watchSelections() {
           .map((rc) => ({ x: rc.left - w.left, y: rc.top - w.top, w: rc.width, h: rc.height }))
           .filter((rc) => rc.w > 1);
       }
-      emit(ev);
+      emit(selectionScope, ev);
       const entry: EditorSel & Record<string, unknown> = {
         path: String(ev.path), lines: ev.lines as number[] | undefined, text: String(ev.text),
         at: new Date().toISOString(), rects,
         ...(ev.view === 'diff' ? { view: 'diff', old_lines: ev.old_lines ?? null } : {}),
       };
-      editorSels = [...editorSels.filter((s) => s.path !== entry.path), entry].slice(-SEL_MAX);
-      postSels();
+      editorSels.set(selectionScope, [...selsFor(selectionScope).filter((s) => !samePath(s.path, entry.path)), entry].slice(-SEL_MAX));
+      postSels(selectionScope);
     }, 600);
   });
 }
 
 // the current selection entry for a file, if any — surfaces use it to act
 // on "the highlighted lines" (review comments, etc.)
-export function editorSelFor(path: string): EditorSel | undefined {
-  const norm = (s: string) => s.replace(/\\/g, '/').toLowerCase();
-  return editorSels.find((s) => norm(s.path) === norm(path));
+export function editorSelFor(scope: string, path: string): EditorSel | undefined {
+  return selsFor(scope).find((s) => samePath(s.path, path));
 }
 
 // keyboard-built selections (shift+arrows from the caret) report through the
 // same pipeline as mouse drags: same entries, same recency, same bands
 export function reportEditorSelection(
+  scope: string,
   sel: { path: string; clear: true } | { path: string; lines?: number[]; old_lines?: number[]; view?: 'diff'; text: string; rects: EditorSel['rects'] },
 ) {
+  const current = selsFor(scope);
   if ('clear' in sel) {
-    if (!editorSels.some((s) => s.path === sel.path)) return;
-    editorSels = editorSels.filter((s) => s.path !== sel.path);
-    postSels();
+    if (!current.some((s) => samePath(s.path, sel.path))) return;
+    editorSels.set(scope, current.filter((s) => !samePath(s.path, sel.path)));
+    postSels(scope);
     return;
   }
   if (!sel.text.trim()) return;
@@ -212,21 +234,22 @@ export function reportEditorSelection(
     path: sel.path, lines: sel.lines, text: sel.text.slice(0, SELECT_CAP), at: new Date().toISOString(), rects: sel.rects,
     ...(sel.view === 'diff' ? { view: 'diff', old_lines: sel.old_lines ?? null } : {}),
   };
-  editorSels = [...editorSels.filter((s) => s.path !== entry.path), entry].slice(-SEL_MAX);
-  postSels();
+  editorSels.set(scope, [...current.filter((s) => !samePath(s.path, entry.path)), entry].slice(-SEL_MAX));
+  postSels(scope);
 }
 
 // agents get the list without rects (view geometry is noise to them) plus a
 // text_selection alias for the newest entry; the UI callback gets rects
-function postSels() {
-  const wire = editorSels.map(({ rects: _r, ...s }) => s);
-  updateSnapshot({ text_selections: wire.length ? wire : null, text_selection: wire.at(-1) ?? null });
-  editorSelCb?.(editorSels);
+function postSels(scope: string) {
+  const selections = selsFor(scope);
+  const wire = selections.map(({ rects: _r, ...s }) => s);
+  updateSnapshot(scope, { text_selections: wire.length ? wire : null, text_selection: wire.at(-1) ?? null });
+  for (const cb of editorSelCbs.get(scope) ?? []) cb(selections);
 }
 
-export function emitTerminalSelection(tool: string, text: string) {
+export function emitTerminalSelection(scope: string, tool: string, text: string) {
   if (!text.trim()) return;
-  emit({ kind: 'select', where: 'terminal', tool, text: text.slice(0, SELECT_CAP) });
+  emit(scope, { kind: 'select', where: 'terminal', tool, text: text.slice(0, SELECT_CAP) });
   // terminal selections persist in the snapshot too, until replaced
-  updateSnapshot({ terminal_selection: { tool, text: text.slice(0, SELECT_CAP) } });
+  updateSnapshot(scope, { terminal_selection: { tool, text: text.slice(0, SELECT_CAP) } });
 }

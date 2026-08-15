@@ -11,13 +11,18 @@ const ROOT = path.join(os.homedir(), '.mcfly', 'reviews');
 
 const slug = (pwd) => String(pwd).replace(/[:\\/]+/g, '-').replace(/^-+|-+$/g, '').toLowerCase();
 const dirFor = (pwd) => path.join(ROOT, slug(pwd));
+const projectId = (pwd) => {
+  const resolved = path.resolve(String(pwd));
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+};
 
 function readAll(pwd) {
   try {
+    const project = projectId(pwd);
     return fs.readdirSync(dirFor(pwd))
       .filter((f) => f.endsWith('.json'))
       .map((f) => { try { return JSON.parse(fs.readFileSync(path.join(dirFor(pwd), f), 'utf8')); } catch { return null; } })
-      .filter(Boolean)
+      .filter((review) => review && projectId(review.project) === project)
       .sort((a, b) => b.created - a.created);
   } catch { return []; }
 }

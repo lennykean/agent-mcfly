@@ -19,10 +19,10 @@ export interface TreeAgent {
 
 // The agents list is its OWN panel, not a tab of the strip below it: plain
 // arrows walk (soft select), left/right collapse/expand subagent subtrees at
-// any depth, Enter switches views — but no arrow leaves the panel; crossing
-// panels takes the panelUp/panelDown chord, handled by the sidebar above.
+// any depth, Enter switches views, and Up past the first row reaches the
+// header action. Crossing into another panel still takes panelUp/panelDown.
 export function AgentTree({
-  agents, viewKey, collapsed, onToggle, onSelect, onCloseRoot, onOpenTerminal,
+  agents, viewKey, collapsed, onToggle, onSelect, onCloseRoot, onOpenTerminal, onEscapeTop,
 }: {
   agents: TreeAgent[]; viewKey: string;
   // collapse state is CONTROLLED: every mounted workbench renders this same
@@ -33,6 +33,8 @@ export function AgentTree({
   onCloseRoot?: (key: string) => void;
   // when set, workspace group rows offer a terminal icon: new shell there
   onOpenTerminal?: (key: string) => void;
+  // ArrowUp from the first row moves to the AGENTS header action.
+  onEscapeTop?: () => void;
 }) {
   const children = (parent: string | null) => agents.filter((a) => a.parentKey === parent);
   const byKey = new Map(agents.map((a) => [a.key, a]));
@@ -54,15 +56,32 @@ export function AgentTree({
   };
   const onKeyDown = (e: React.KeyboardEvent) => {
     const rows = rowsNow();
-    if (!rows.length) return;
     const action = actionOf(e, ['up', 'down', 'left', 'right', 'home', 'end', 'activate', 'dismiss']);
     if (!action) return;
+    if (!rows.length) {
+      if (action === 'up' && onEscapeTop) {
+        e.preventDefault();
+        e.stopPropagation();
+        onEscapeTop();
+      }
+      return;
+    }
     let i = Math.max(0, Math.min(cursor.current, rows.length - 1));
     const key = rows[i]?.dataset.key ?? '';
     const node = byKey.get(key);
     const kids = node ? children(node.key).length > 0 : false;
     switch (action) {
-      case 'up': i = Math.max(0, i - 1); break;
+      case 'up':
+        if (i === 0 && onEscapeTop) {
+          e.preventDefault();
+          e.stopPropagation();
+          cursor.current = -1;
+          paintBar();
+          onEscapeTop();
+          return;
+        }
+        i = Math.max(0, i - 1);
+        break;
       case 'down': i = Math.min(rows.length - 1, cursor.current < 0 ? 0 : i + 1); break;
       case 'home': i = 0; break;
       case 'end': i = rows.length - 1; break;

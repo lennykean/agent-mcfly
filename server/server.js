@@ -35,9 +35,14 @@ const ALLOWED_HOSTS = new Set([`localhost:${PORT}`, `127.0.0.1:${PORT}`, `[::1]:
 const wsSnapshots = new Map(); // scope -> { ...snapshot, updated }
 const wsRing = [];
 const WS_RING_CAP = 500;
-const normScope = (p) => String(p ?? '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
-// the scope covering a project dir: the longest scope the project sits under
-// (or that sits under the project); no match falls back to the newest scope
+const normScope = (p) => {
+  const source = String(p ?? '').replace(/\\/g, '/');
+  const normalized = source === '/' ? source : source.replace(/\/+$/, '');
+  return /^(?:[a-z]:\/|\/\/)/i.test(normalized) ? normalized.toLowerCase() : normalized;
+};
+// the scope covering a project dir: the longest scope the project sits under.
+// An explicit project never falls through
+// to another workspace; bare requests keep the newest-snapshot behavior.
 function pickScope(project) {
   const keys = [...wsSnapshots.keys()];
   if (!keys.length) return null;
@@ -45,9 +50,9 @@ function pickScope(project) {
   if (want) {
     const hits = keys.filter((k) => {
       const n = normScope(k);
-      return n && (want === n || want.startsWith(`${n}/`) || n.startsWith(`${want}/`));
+      return n && (want === n || want.startsWith(n.endsWith('/') ? n : `${n}/`));
     }).sort((a, b) => b.length - a.length);
-    if (hits.length) return hits[0];
+    return hits[0] ?? null;
   }
   return keys.sort((a, b) => (wsSnapshots.get(b).updated ?? 0) - (wsSnapshots.get(a).updated ?? 0))[0];
 }

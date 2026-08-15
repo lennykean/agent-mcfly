@@ -30,6 +30,8 @@ export interface CallRender {
   verb: RenderVerb;
   title?: string;
   path?: string;
+  source_path?: string; // original path for a move/rename
+  removed?: boolean;
   command?: string;
   agent_type?: string;
 }
@@ -45,6 +47,8 @@ export interface PatchHunk {
 export interface ResultRender {
   verb: RenderVerb;
   path?: string;
+  source_path?: string; // original path for a move/rename
+  removed?: boolean;
   content?: string;
   start_line?: number;
   total_lines?: number;

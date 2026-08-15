@@ -123,28 +123,48 @@ function liveServers() {
   } catch { return []; }
 }
 
+const workspacePath = (p) => {
+  const source = String(p ?? '').replace(/\\/g, '/');
+  const normalized = source === '/' ? source : source.replace(/\/+$/, '');
+  return /^(?:[a-z]:\/|\/\/)/i.test(normalized) ? normalized.toLowerCase() : normalized;
+};
+
+const scopeOwns = (scope, project) => {
+  const have = workspacePath(scope);
+  const want = workspacePath(project);
+  return Boolean(have && want && (have === want || want.startsWith(have.endsWith('/') ? have : `${have}/`)));
+};
+
+export async function findWorkspaceState(servers, project, params = new URLSearchParams()) {
+  const qs = new URLSearchParams(params);
+  qs.set('project', project);
+  for (const pick of [...servers].sort((a, b) => b.started - a.started)) {
+    try {
+      const res = await fetch(`http://127.0.0.1:${pick.port}/api/workspace-state?${qs}`);
+      const data = await res.json();
+      // Validate the returned scope too: older servers fell back to an
+      // unrelated recent scope when they had no match.
+      if (scopeOwns(data.scope, project)) return { pick, data };
+    } catch { /* stale registry entry; try the next live server */ }
+  }
+  return null;
+}
+
 async function runWorkspaceState(args = {}) {
   const servers = liveServers();
   if (!servers.length) {
     return { content: [{ type: 'text', text: 'no running mcfly server found' }], isError: true };
   }
-  const cwd = path.resolve(args.cwd ?? process.cwd()).toLowerCase();
-  const byNewest = [...servers].sort((a, b) => b.started - a.started);
-  const pick = byNewest.find((s) => cwd.startsWith(String(s.pwd).toLowerCase())) ?? byNewest[0];
+  const cwd = path.resolve(args.cwd ?? process.cwd());
   const qs = new URLSearchParams();
-  // multi-root workbenches keep one snapshot per project; ask for OURS
-  qs.set('project', path.resolve(args.cwd ?? process.cwd()));
   if (args.history) qs.set('history', String(args.history));
   if (Array.isArray(args.kinds) && args.kinds.length) qs.set('kinds', args.kinds.join(','));
   if (args.since_seconds) qs.set('since_seconds', String(args.since_seconds));
-  try {
-    const res = await fetch(`http://127.0.0.1:${pick.port}/api/workspace-state?${qs}`);
-    const data = await res.json();
-    const result = { schema: 'mcfly.data.v1', kind: 'workspace_state', server: { port: pick.port, pwd: pick.pwd }, ...data };
-    return { content: [{ type: 'text', text: `${DATA_MARKER}\n${JSON.stringify(result)}` }], structuredContent: result };
-  } catch (error) {
-    return { content: [{ type: 'text', text: `mcfly server on port ${pick.port} did not answer: ${error.message}` }], isError: true };
-  }
+  const found = await findWorkspaceState(servers, cwd, qs);
+  if (!found) return { content: [{ type: 'text', text: `no McFly workspace found for ${cwd}` }], isError: true };
+  const { pick, data } = found;
+  const result = { schema: 'mcfly.data.v1', kind: 'workspace_state', server: { port: pick.port, pwd: pick.pwd }, ...data };
+  return { content: [{ type: 'text', text: `${DATA_MARKER}\n${JSON.stringify(result)}` }], structuredContent: result };
 }
 
 const REVIEW_STATE_TOOL = {
@@ -192,7 +212,7 @@ function pickServer(args) {
   // The server's pwd only picks WHICH server; reviews belong to the
   // project, so the query pwd is always the agent's own cwd.
   const byNewest = [...servers].sort((a, b) => b.started - a.started);
-  return { cwd, pick: byNewest.find((s) => cwd.toLowerCase().startsWith(String(s.pwd).toLowerCase())) ?? byNewest[0] };
+  return { cwd, pick: byNewest.find((s) => scopeOwns(s.pwd, cwd)) ?? byNewest[0] };
 }
 
 async function reviewFetch(args, route, payload) {
@@ -216,8 +236,7 @@ async function enrichChecklist(review, args) {
     const d = await fetch(`http://127.0.0.1:${found.pick.port}/api/git/reffiles?root=${encodeURIComponent(review.project)}&ref=${encodeURIComponent(base)}`)
       .then((r) => r.json());
     if (d.error) return { ...review, checklist: { base, error: String(d.error) } };
-    const checked = review.checklist.checked ?? {};
-    const files = (d.files ?? []).map((f) => ({ status: f.status, path: f.path, reviewed: checked[f.path] !== undefined }));
+    const files = checklistFiles(d.files, review.checklist.checked);
     return {
       ...review,
       checklist: {
@@ -231,6 +250,10 @@ async function enrichChecklist(review, args) {
   } catch {
     return review;
   }
+}
+
+export function checklistFiles(files = [], checked = {}) {
+  return files.map((f) => ({ status: f.status, path: f.path, reviewed: checked?.[f.path] === f.sig }));
 }
 
 async function runReviewState(args = {}) {

@@ -27,13 +27,17 @@ function resolveId(id) {
 // slugified cwd (C:\Users\X\proj -> C--Users-X-proj, drive case varies).
 const slug = (p) => p.replace(/[:\\/.]/g, '-');
 
+export function projectSlugMatches(cwd, projectDir) {
+  const want = slug(cwd);
+  return /^(?:[a-z]:[\\/]|[\\/]{2})/i.test(cwd) ? projectDir.toLowerCase() === want.toLowerCase() : projectDir === want;
+}
+
 export function listForCwd(cwd) {
-  const want = slug(cwd).toLowerCase();
   let projects = [];
   try { projects = fs.readdirSync(ROOT, { withFileTypes: true }); } catch { return []; }
   const out = [];
   for (const proj of projects) {
-    if (!proj.isDirectory() || proj.name.toLowerCase() !== want) continue;
+    if (!proj.isDirectory() || !projectSlugMatches(cwd, proj.name)) continue;
     out.push(...listDir(path.join(ROOT, proj.name), proj.name));
   }
   out.sort((a, b) => b.updated_at - a.updated_at);

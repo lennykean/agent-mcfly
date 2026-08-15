@@ -11,8 +11,8 @@ const timeOf = (ts?: number) => (ts ? new Date(ts).toLocaleTimeString() : '');
 // reconstructed state (with blame) where the chain is clean, or the raw patch
 // where it isn't. Selection is a PROJECTION of the global playhead: navigating
 // here seeks the whole session (log, terminal, chat follow).
-export function FileTimeline({ steps, pointer, path, speed, onJump, textSel }: {
-  steps: Step[]; pointer: number; path: string; speed: number; onJump: (index: number) => void;
+export function FileTimeline({ workspaceScope, steps, pointer, path, speed, onJump, textSel }: {
+  workspaceScope: string; steps: Step[]; pointer: number; path: string; speed: number; onJump: (index: number) => void;
   textSel?: { path: string; rects: { x: number; y: number; w: number; h: number }[] }[];
 }) {
   // steps mutates in place; length grows on append, and a pending tool step is
@@ -63,8 +63,11 @@ export function FileTimeline({ steps, pointer, path, speed, onJump, textSel }: {
         <div className="emptyHint">the playhead is before this file's first touch</div>
       ) : snap?.image ? (
         <div className="emptyHint">image read — see the pinned tab at this step</div>
+      ) : snap?.removed ? (
+        <div className="emptyHint">file removed at this step</div>
       ) : snap?.content !== undefined ? (
         <CodeView
+          workspaceScope={workspaceScope}
           key={selected}
           file={{
             path,
@@ -80,6 +83,7 @@ export function FileTimeline({ steps, pointer, path, speed, onJump, textSel }: {
         />
       ) : snap?.hunks ? (
         <DiffView
+          workspaceScope={workspaceScope}
           key={selected}
           file={{ path, mode: 'diff', render: { verb: 'patch_file', hunks: snap.hunks }, touchedAt: selected }}
           animate={false}

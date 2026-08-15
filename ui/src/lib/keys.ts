@@ -16,7 +16,7 @@ export type Action =
   | 'gotoTools' | 'gotoExplorer' | 'gotoGit' | 'gotoChat' | 'gotoLiveTerm'
   | 'gotoAgentTerm' | 'gotoAgents' | 'gotoData' | 'gotoWayfinder' | 'gotoReview' | 'gotoToolDetail'
   | 'openTimeline' | 'openReal' | 'grep' | 'findFile' | 'closeTab' | 'showKeys'
-  | 'termFocus' | 'termNew' | 'termNext' | 'termPrev' | 'termKill';
+  | 'termFocus' | 'termProjects' | 'termNew' | 'termNext' | 'termPrev' | 'termKill';
 
 // a chord is one key with exact modifiers; `capture: true` makes a chord
 // match ANY printable key and hand the character to the action (f{char},
@@ -121,6 +121,7 @@ const DEFAULT: Record<Action, Binding[]> = {
   // VS Code muscle memory: ctrl+` focuses/cycles terminals, ctrl+shift+` news;
   // ctrl+\ is the same jump (in a shell this outbids SIGQUIT — deliberate)
   termFocus: [{ key: 'Backquote', ctrl: true }, { key: 'Backslash', ctrl: true }],
+  termProjects: [],
   termNew: [{ key: 'Backquote', ctrl: true, shift: true }],
   // cycling/kill actions carry no BASE bindings: tmux mode supplies the prefix
   termNext: [],
@@ -132,7 +133,7 @@ const DEFAULT: Record<Action, Binding[]> = {
 // terminal — xterm declines these so they bubble to the window handler.
 // panel hops are absent on purpose: ctrl+arrows are shell word-jumps.
 export const APP_CHORDS: Action[] = [
-  'termFocus', 'termNew', 'termNext', 'termPrev', 'termKill',
+  'termFocus', 'termProjects', 'termNew', 'termNext', 'termPrev', 'termKill',
   'gotoTools', 'gotoExplorer', 'gotoGit', 'gotoChat', 'gotoLiveTerm',
   'gotoAgentTerm', 'gotoAgents', 'gotoData', 'gotoWayfinder', 'gotoReview', 'gotoToolDetail',
   'bufferPrev', 'bufferNext', 'paneNext', 'panePrev',
@@ -317,6 +318,7 @@ const buildVIM = (): Partial<Record<Action, Binding[]>> => {
 const buildTMUX = (): Partial<Record<Action, Binding[]>> => {
   const P = tmuxPrefix;
   return {
+    termProjects: [[P, { key: 'KeyW' }]],
     termNew: [{ key: 'Backquote', ctrl: true, shift: true }, [P, { key: 'KeyC' }]],
     termNext: [[P, { key: 'KeyN' }]],
     termPrev: [[P, { key: 'KeyP' }]],

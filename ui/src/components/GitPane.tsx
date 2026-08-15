@@ -4,6 +4,7 @@ import { Splitter } from './Splitter';
 import { fileIcon } from './Explorer';
 import { applySelect, clickMode } from '../lib/select';
 import { actionOf, focusEditor, synthClick } from '../lib/keys';
+import { normPath } from '../lib/timeline';
 
 export interface GitFile { path: string; status: string }
 export interface GitSelection { path: string; area: 'staged' | 'changed' }
@@ -409,7 +410,7 @@ export const GitPane = memo(function GitPane({ root, visible, selection, onSelec
         {head('WORKTREES', null, refreshWts)}
         <div className="gitWtScroll">
           {wts.map((w) => {
-            const cur = w.path.replace(/\//g, '\\').toLowerCase() === currentRoot.replace(/\//g, '\\').toLowerCase();
+            const cur = normPath(w.path) === normPath(currentRoot);
             return (
               <div
                 key={w.path}

@@ -141,7 +141,7 @@ export function Settings({ settings, initialPage = 'settings', keysVersion = 0, 
                 onSave={(v) => onSave({ vimLeader: v })}
               />
             )}
-            {toggleRow('tmux style terminal', 'prefix chords: c new terminal, n/p cycle, x kill — the shell gives up the prefix',
+            {toggleRow('tmux style terminal', 'prefix chords: w projects, c new terminal, n/p cycle, x kill — the shell gives up the prefix',
               !!settings.tmux, (v) => (v ? enableMode('tmux') : onSave({ tmux: false })))}
             {settings.tmux && (
               <LeaderInput

@@ -3,7 +3,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { bashReadResult, inferBashRead, inferBashTool, scanHead } from './claude-code.js';
+import { bashReadResult, inferBashRead, inferBashTool, projectSlugMatches, scanHead } from './claude-code.js';
+
+test('project directory matching folds Windows paths but preserves POSIX case', () => {
+  assert.equal(projectSlugMatches('C:\\Repo\\App', 'C--repo-app'), true);
+  assert.equal(projectSlugMatches('//Server/Share/App', '--server-share-app'), true);
+  assert.equal(projectSlugMatches('/repo/App', '-repo-App'), true);
+  assert.equal(projectSlugMatches('/repo/App', '-repo-app'), false);
+});
 
 test('finds Claude titles written after the transcript head', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcfly-'));

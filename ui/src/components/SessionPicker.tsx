@@ -5,9 +5,9 @@ interface ProviderInfo { provider: string; count: number }
 
 const PROVIDER_LABELS: Record<string, string> = { 'claude-code': 'claude', codex: 'codex' };
 
-// Open-session flow: pwd -> go (scopes the workbench to the folder) ->
-// agent type -> type-ahead over that project's sessions; picking a session
-// is optional. The ... button browses folders through the server.
+// Open-session flow: choose a folder -> confirm session history -> agent type
+// -> type-ahead over that project's sessions. Opening only the project is a
+// separate action. The ... button browses folders through the server.
 export function SessionPicker({ initialPwd, initialProvider, initialFilter, onPick, onGo, onClose }: {
   initialPwd: string;
   initialProvider?: string; // pre-select this agent and load its sessions
@@ -19,19 +19,14 @@ export function SessionPicker({ initialPwd, initialProvider, initialFilter, onPi
   // the currently-open project wins; last-used pwd only seeds a bare open
   const [pwd, setPwd] = useState(() => initialPwd || localStorage.getItem('mcfly.lastPwd') || '');
 
-  // Escape ALWAYS cancels the dialog, wherever focus sits (window capture:
-  // the inputs and the app's key engine never see it)
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const projectRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
-    const on = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
-      e.preventDefault();
-      e.stopPropagation();
-      onCloseRef.current();
-    };
-    window.addEventListener('keydown', on, true);
-    return () => window.removeEventListener('keydown', on, true);
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    dialog.showModal();
+    projectRef.current?.focus();
+    return () => { if (dialog.open) dialog.close(); };
   }, []);
   const [providers, setProviders] = useState<ProviderInfo[] | null>(null);
   const [provider, setProvider] = useState<string>();
@@ -40,6 +35,8 @@ export function SessionPicker({ initialPwd, initialProvider, initialFilter, onPi
   const [hi, setHi] = useState(0);
   const [scanning, setScanning] = useState(false);
   const filterRef = useRef<HTMLInputElement>(null);
+  const providerLoad = useRef(0);
+  const sessionLoad = useRef(0);
 
   // server-backed folder browser (the native dialog cannot give real paths)
   const [browse, setBrowse] = useState<string | null>(null);
@@ -64,49 +61,67 @@ export function SessionPicker({ initialPwd, initialProvider, initialFilter, onPi
 
   const loadProviders = (dir: string) => {
     if (!dir.trim()) return;
+    const load = ++providerLoad.current;
     setScanning(true);
     setProviders(null);
     setProvider(undefined);
     setSessions(null);
+    sessionLoad.current++;
     fetch(`/api/providers?pwd=${encodeURIComponent(dir)}`)
       .then((r) => r.json())
-      .then((d) => setProviders(Array.isArray(d) ? d : []))
-      .catch(() => setProviders([]))
-      .finally(() => setScanning(false));
+      .then((d) => { if (load === providerLoad.current) setProviders(Array.isArray(d) ? d : []); })
+      .catch(() => { if (load === providerLoad.current) setProviders([]); })
+      .finally(() => { if (load === providerLoad.current) setScanning(false); });
+  };
+
+  const hideProviders = () => {
+    providerLoad.current++;
+    setScanning(false);
+    setProviders(null);
+    setProvider(undefined);
+    setSessions(null);
+    sessionLoad.current++;
+  };
+
+  const openSessionsIn = (raw: string) => {
+    const dir = raw.trim().replace(/[\\/]+$/, '');
+    if (!dir) return;
+    setPwd(dir);
+    setBrowse(null);
+    loadProviders(dir);
   };
 
   const loadSessions = (prov: string) => {
+    const load = ++sessionLoad.current;
     setProvider(prov);
     setSessions(null);
     setFilter('');
     setHi(0);
     fetch(`/api/sessions?pwd=${encodeURIComponent(pwd)}&provider=${encodeURIComponent(prov)}`)
       .then((r) => r.json())
-      .then((d) => setSessions(Array.isArray(d) ? d : []))
-      .catch(() => setSessions([]));
+      .then((d) => { if (load === sessionLoad.current) setSessions(Array.isArray(d) ? d : []); })
+      .catch(() => { if (load === sessionLoad.current) setSessions([]); });
   };
 
   useEffect(() => {
     const dir = initialPwd || localStorage.getItem('mcfly.lastPwd');
-    if (dir) { setPwd(dir); return; } // the pwd effect below loads it
+    if (dir) { setPwd(dir); return; }
     fetch('/api/config').then((r) => r.json()).then((d) => {
       if (typeof d.pwd === 'string') setPwd((current) => current || d.pwd);
     }).catch(() => {});
   }, [initialPwd]); // eslint-disable-line react-hooks/exhaustive-deps
-  // the project field is LIVE: editing it reloads that folder's agents and
-  // sessions right here in the dialog (debounced while typing) — changing
-  // projects must never require "opening" the folder first
-  const loadedDir = useRef<string | undefined>(undefined);
+
+  // Follow-resolve already carries an explicit provider intent, so it keeps
+  // its direct jump. A normal picker waits for the folder confirmation.
+  const seededLoad = useRef(false);
   useEffect(() => {
+    if (seededLoad.current || !initialProvider) return;
     const dir = pwd.trim().replace(/[\\/]+$/, '');
-    if (!dir || dir === loadedDir.current) return;
-    const t = setTimeout(() => {
-      loadedDir.current = dir;
-      loadProviders(dir);
-    }, 450);
-    return () => clearTimeout(t);
+    if (!dir) return;
+    seededLoad.current = true;
+    loadProviders(dir);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pwd]);
+  }, [pwd, initialProvider]);
   useEffect(() => { if (sessions) filterRef.current?.focus(); }, [sessions]);
 
   // seeded open (follow-resolve): jump straight to the agent's sessions,
@@ -132,48 +147,51 @@ export function SessionPicker({ initialPwd, initialProvider, initialFilter, onPi
   useEffect(() => { setHi((h) => Math.min(h, Math.max(0, shown.length - 1))); }, [shown.length]);
 
   return (
-    <div className="pickerOverlay" onClick={onClose}>
-      <div className="pickerModal" onClick={(e) => e.stopPropagation()}>
+    <dialog
+      ref={dialogRef}
+      className="pickerOverlay"
+      aria-labelledby="session-picker-title"
+      onCancel={(e) => { e.preventDefault(); onClose(); }}
+      onClick={onClose}
+    >
+      <div className="pickerModal" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
         <div className="pickerHead">
-          open a session
-          <button className="pickerClose" onClick={onClose}>✕</button>
+          <span id="session-picker-title">open a session</span>
+          <button className="pickerClose" aria-label="Close session picker" onClick={onClose}>✕</button>
         </div>
 
         <div className="pickerRow">
           <span className="pickerLabel">project</span>
           <input
+            ref={projectRef}
             className="pickerInput"
+            aria-label="Project folder"
             value={pwd}
-            onChange={(e) => setPwd(e.target.value)}
+            onChange={(e) => { setPwd(e.target.value); hideProviders(); }}
             onKeyDown={(e) => {
-              // Enter = load THIS folder's sessions now (never a bare open)
-              if (e.key !== 'Enter') return;
-              const dir = pwd.trim().replace(/[\\/]+$/, '');
-              if (!dir) return;
-              loadedDir.current = dir;
-              loadProviders(dir);
+              if (e.key === 'Enter') openSessionsIn(pwd);
             }}
             spellCheck={false}
           />
-          <button title="Browse folders" onClick={() => setBrowse((b) => (b === null ? (pwd.trim() || 'C:\\') : null))}>…</button>
-          <button onClick={() => go(pwd)} title="Open the folder bare — no session; sessions load below as you type">folder only</button>
+          <button aria-label="Browse folders" title="Browse folders" onClick={() => setBrowse((b) => (b === null ? (pwd.trim() || 'C:\\') : null))}>…</button>
+          <button onClick={() => go(pwd)} title="Open the project without choosing a session">open project folder</button>
         </div>
 
         {browse !== null && (
           <div className="folderBrowse">
             <div className="fbPath" title={browse}>{browse}</div>
             <div className="fbList">
-              {!atRoot && <div className="fbRow" onClick={browseUp}><span className="codicon codicon-arrow-up" /> ..</div>}
+              {!atRoot && <button className="fbRow" onClick={browseUp}><span className="codicon codicon-arrow-up" /> ..</button>}
               {browseDirs === null && <div className="pickerHint">listing…</div>}
               {browseDirs?.map((d) => (
-                <div key={d} className="fbRow" onClick={() => setBrowse(`${browse.replace(/[\\/]+$/, '')}\\${d}`)}>
+                <button key={d} className="fbRow" onClick={() => setBrowse(`${browse.replace(/[\\/]+$/, '')}\\${d}`)}>
                   <span className="codicon codicon-folder expFolder" /> {d}
-                </div>
+                </button>
               ))}
               {browseDirs?.length === 0 && <div className="pickerHint">no subfolders</div>}
             </div>
             <div className="fbActions">
-              <button onClick={() => { setPwd(browse); setBrowse(null); }}>use this folder</button>
+              <button onClick={() => openSessionsIn(browse)}>open a session in this folder</button>
               <button onClick={() => setBrowse(null)}>cancel</button>
             </div>
           </div>
@@ -238,6 +256,6 @@ export function SessionPicker({ initialPwd, initialProvider, initialFilter, onPi
           )
         )}
       </div>
-    </div>
+    </dialog>
   );
 }

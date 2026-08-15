@@ -15,7 +15,7 @@ import { HumanReview } from './components/HumanReview';
 import { HistoryBar } from './components/HistoryBar';
 import type { TermCtl } from './components/LivePane';
 import type { Review, ReviewComment, SessionMeta } from './types';
-import { normPath, resolveWaypoint, type WaypointEntry } from './lib/timeline';
+import { normPath, pathWithin, resolveWaypoint, type WaypointEntry } from './lib/timeline';
 import { APP_CHORDS, actionOf, focusEditor, justArmed, setDeferredSink, termReleasedChord, type Action } from './lib/keys';
 import { QuickPick } from './components/QuickPick';
 import type { McflySettings } from './components/Settings';
@@ -154,9 +154,12 @@ export default function Workbench({
   // playhead, so a second timeline tab would just be the same cursor
   const [timelinePath, setTimelinePath] = useState<string>();
   const [pwd, setPwd] = useState<string>();
+  const cwd = pwd ?? r.session?.cwd;
+  const workspaceScope = cwd ?? '';
   const [pickerOpen, setPickerOpen] = useState(false);
   const [colorPick, setColorPick] = useState(false);
   const centerRef = useRef<HTMLDivElement>(null);
+  const addRootRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => { if (pwd) localStorage.setItem('mcfly.lastPwd', pwd); }, [pwd]);
 
@@ -359,7 +362,7 @@ export default function Workbench({
   }, []);
   useEffect(() => {
     if (!active) return; // the visible workbench owns the title
-    const tildePwd = pwd && home && pwd.toLowerCase().startsWith(home.toLowerCase())
+    const tildePwd = pwd && home && pathWithin(pwd, home)
       ? `~${pwd.slice(home.length)}` : pwd;
     document.title = [
       r.session && (r.session.label || r.session.id.slice(0, 8)),
@@ -504,7 +507,7 @@ export default function Workbench({
       const color = roots.length > 1 ? rt.color : undefined;
       let parent: string | null = null;
       if (rt.pwd) {
-        const norm = normPath(rt.pwd).toLowerCase();
+        const norm = normPath(rt.pwd);
         let gk = groups.get(norm);
         if (!gk) {
           gk = `g${SEP}${norm}`;
@@ -516,7 +519,7 @@ export default function Workbench({
         }
         parent = gk;
       }
-      const list = rt.active
+      const list = !rt.hasSession ? [] : rt.active
         ? r.agents
         : (rt.agents?.length ? rt.agents : [{ key: 'main', parentKey: null, label: rt.label } as AgentNode]);
       for (const a of list) {
@@ -566,8 +569,8 @@ export default function Workbench({
   // agents can query it via the workspace_state MCP tool ----
   useEffect(() => { watchSelections(); }, []);
   useEffect(() => {
-    if (!active) return; // only the visible workbench reports; its scope is set by the shell
-    updateSnapshot({
+    if (!active) return; // only the visible workbench reports into its own scope
+    updateSnapshot(workspaceScope, {
       session: r.session ? { provider: r.session.provider, id: r.session.id } : null,
       playhead: { pointer: r.pointer, head: r.head, playing: r.playing, speed: r.speed },
       editor: {
@@ -578,13 +581,13 @@ export default function Workbench({
       },
       panels: { left: leftTab, right: rightTab, bottom: bottomOpen ? bottomTab : null },
     });
-  }, [active, r.session, r.pointer, r.head, r.playing, r.speed, r.view.activePath, editorTab, timelinePath, userTabs, leftTab, rightTab, bottomTab, bottomOpen]);
+  }, [active, workspaceScope, r.session, r.pointer, r.head, r.playing, r.speed, r.view.activePath, editorTab, timelinePath, userTabs, leftTab, rightTab, bottomTab, bottomOpen]);
 
   // event emits gate on the ref (no `active` dep): a workspace switch must
   // not replay the current tab/pane state into the event history
-  const wsEmit = useCallback((ev: Parameters<typeof emit>[0]) => {
-    if (activeRef.current) emit(ev);
-  }, []);
+  const wsEmit = useCallback((ev: Parameters<typeof emit>[1]) => {
+    if (activeRef.current) emit(workspaceScope, ev);
+  }, [workspaceScope]);
   const prevTabKeys = useRef<string[]>([]);
   useEffect(() => {
     const cur = userTabs.map((t) => t.key);
@@ -719,9 +722,6 @@ export default function Workbench({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pinned?.path, pinned?.touchedAt]);
 
-  // the project pwd governs terminals and the explorer; session cwd is fallback
-  const cwd = pwd ?? r.session?.cwd;
-
   // ---- git pane + worktrees. The explorer can point at a worktree; git
   // panels follow it. A vanished worktree falls back to main, silently. ----
   const [explorerRoot, setExplorerRoot] = useState<string>();
@@ -731,17 +731,17 @@ export default function Workbench({
   // selection stays visible to agents with a timestamp
   const setGitSelection = useCallback((s: GitSelection[]) => {
     setGitSelectionRaw(s);
-    emit({ kind: 'git_select', files: s });
-  }, []);
+    emit(workspaceScope, { kind: 'git_select', files: s });
+  }, [workspaceScope]);
   const setExplorerSelection = useCallback((s: string[]) => {
     setExplorerSelectionRaw(s);
-    emit({ kind: 'explorer_select', paths: s });
-  }, []);
+    emit(workspaceScope, { kind: 'explorer_select', paths: s });
+  }, [workspaceScope]);
   const [gitCommitSel, setGitCommitSelRaw] = useState<{ hash: string; subject: string }[]>([]);
   const setGitCommitSel = useCallback((s: { hash: string; subject: string }[]) => {
     setGitCommitSelRaw(s);
-    emit({ kind: 'git_commit_select', commits: s });
-  }, []);
+    emit(workspaceScope, { kind: 'git_commit_select', commits: s });
+  }, [workspaceScope]);
 
   // data table rows are selectable too, same gestures, agent-visible
   const [dataSel, setDataSel] = useState<number[]>([]);
@@ -753,13 +753,13 @@ export default function Workbench({
     dataAnchor.current = res.anchor;
     const sel = res.sel.map(Number);
     setDataSel(sel);
-    emit({ kind: 'data_select', rows: sel.map((idx) => rows[idx]) });
-  }, [r.view.data, dataSel]);
+    emit(workspaceScope, { kind: 'data_select', rows: sel.map((idx) => rows[idx]) });
+  }, [r.view.data, dataSel, workspaceScope]);
 
   // the persistent editor text selection: survives terminal clicks, clears
   // only on a click back inside an editor body; shown char-precise
   const [textSel, setTextSel] = useState<{ path: string; rects: { x: number; y: number; w: number; h: number }[] }[]>([]);
-  useEffect(() => { onEditorSelection((sels) => setTextSel(sels.map((s) => ({ path: s.path, rects: s.rects })))); }, []);
+  useEffect(() => onEditorSelection(workspaceScope, (sels) => setTextSel(sels.map((s) => ({ path: s.path, rects: s.rects })))), [workspaceScope]);
   useEffect(() => { setExplorerSelectionRaw([]); }, [explorerRoot]);
   const [worktreeList, setWorktreeList] = useState<{ path: string; branch?: string }[]>([]);
   const gitRoot = explorerRoot ?? cwd ?? '';
@@ -782,8 +782,7 @@ export default function Workbench({
   const worktreeOf = useCallback((p?: string) => {
     if (!p || !cwd) return undefined;
     const norm = normPath(p);
-    return worktreeList.find((w) => normPath(w.path) !== normPath(cwd)
-      && (norm === normPath(w.path) || norm.startsWith(`${normPath(w.path)}\\`)));
+    return worktreeList.find((w) => normPath(w.path) !== normPath(cwd) && pathWithin(norm, w.path));
   }, [worktreeList, cwd]);
   const openWorktree = useCallback((p: string) => {
     setExplorerRoot(cwd && normPath(p) === normPath(cwd) ? undefined : p);
@@ -1273,8 +1272,12 @@ export default function Workbench({
             break;
           case 'termFocus':
             setRightOpen(true); setRightTab('term');
-            termCtl.current?.focusOrNext(!!el?.closest('.livePane'));
+            termCtl.current?.focusOrNext(!!el?.closest('.ptySession'));
             focusTerm();
+            break;
+          case 'termProjects':
+            setRightOpen(true); setRightTab('term');
+            termCtl.current?.focusProjects();
             break;
           case 'termNew':
             setRightOpen(true); setRightTab('term');
@@ -1333,7 +1336,7 @@ export default function Workbench({
   useEffect(() => {
     if (!active) return; // only the visible workbench reports into its scope
     const activeTab = userTabs.find((t) => t.key === editorTab);
-    updateSnapshot({
+    updateSnapshot(workspaceScope, {
       git: {
         root: gitRoot || null,
         selection: gitSelection,
@@ -1347,7 +1350,7 @@ export default function Workbench({
         : null,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [active, gitRoot, gitSelection, gitCommitSel, editorTab, userTabs, explorerRoot, explorerSelection, cwd, dataSel]);
+  }, [active, workspaceScope, gitRoot, gitSelection, gitCommitSel, editorTab, userTabs, explorerRoot, explorerSelection, cwd, dataSel]);
 
   const cols = [leftOpen ? `${sideW}px 5px` : '', '1fr', rightOpen ? `5px ${rightW}px` : ''].join(' ');
 
@@ -1486,10 +1489,21 @@ export default function Workbench({
               <div className="agentsSection" style={{ height: agentsH }}>
                 <div className="sideHead">
                   AGENTS
-                  <span
+                  <button
+                    ref={addRootRef}
+                    type="button"
                     className="codicon codicon-add rootAdd"
                     title="Attach another agent (a new root workspace)"
+                    aria-label="Attach another agent"
                     onClick={onAddRoot}
+                    onKeyDown={(e) => {
+                      const action = actionOf(e, ['down', 'activate']);
+                      if (!action) return;
+                      e.preventDefault();
+                      e.stopPropagation();
+                      if (action === 'activate') onAddRoot();
+                      else (e.currentTarget.closest('.agentsSection')?.querySelector('.agentTree') as HTMLElement | null)?.focus();
+                    }}
                   />
                 </div>
                 <AgentTree
@@ -1500,6 +1514,7 @@ export default function Workbench({
                   onSelect={onTreeSelect}
                   onCloseRoot={roots.length > 1 ? onTreeCloseRoot : undefined}
                   onOpenTerminal={onTreeOpenTerminal}
+                  onEscapeTop={() => addRootRef.current?.focus()}
                 />
               </div>
               <Splitter dir="row" onDrag={dragAgents} />
@@ -1550,6 +1565,7 @@ export default function Workbench({
         <div className="center" ref={centerRef}>
           <div className="editorSlot" style={{ flex: bottomOpen ? `0 0 ${editPct}%` : '1 1 auto' }}>
             <EditorPane
+              workspaceScope={workspaceScope}
               pinned={pinned}
               animate={!!pinned && pinned.path === animatedPath}
               speed={r.speed}
@@ -1566,7 +1582,7 @@ export default function Workbench({
               onOpenTimeline={(p) => { setTimelinePath(p); setEditorTab('timeline'); }}
               onCloseTimeline={() => { setTimelinePath(undefined); setEditorTab('pinned'); }}
               timelineBody={timelinePath && (
-                <FileTimeline steps={r.steps} pointer={r.pointer} path={timelinePath} speed={r.speed} onJump={r.jump} textSel={textSel} />
+                <FileTimeline workspaceScope={workspaceScope} steps={r.steps} pointer={r.pointer} path={timelinePath} speed={r.speed} onJump={r.jump} textSel={textSel} />
               )}
               onToggleWaypoint={toggleWaypoint}
               onCloseAll={closeAllFiles}

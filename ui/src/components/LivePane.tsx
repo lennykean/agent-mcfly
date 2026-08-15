@@ -1,11 +1,12 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Terminal as Xterm, type FontWeight } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
 import { emitTerminalSelection, updateSnapshot } from '../lib/workspace';
-import { termReleasedChord } from '../lib/keys';
+import { actionOf, termReleasedChord } from '../lib/keys';
 import { rgba } from '../lib/palette';
+import { normPath } from '../lib/timeline';
 
 interface Config { tools: string[]; token: string; platform?: string }
 
@@ -67,8 +68,9 @@ function parseFileRef(text: string): { path: string; line?: number } | null {
 // Control frames from the server are \x00-prefixed JSON; everything else is
 // terminal data. 'taken' = another window stole the terminal (tmux attach -d).
 // Stays mounted while hidden so backgrounded terminals keep their sockets.
-function PtySession({ tool, token, cwd, platform, attachId, steal, visible, focusArm, onPtyId, onExit, onTakeBack, onOpenFileRef }: {
+function PtySession({ tool, token, cwd, reportScope, platform, attachId, steal, visible, focusArm, onPtyId, onExit, onTakeBack, onOpenFileRef }: {
   tool: string; token: string; cwd?: string; platform?: string; attachId?: string; steal?: boolean; visible: boolean;
+  reportScope: string;
   // false while a reveal is PROGRAMMATIC (sync following a workspace
   // switch) — revealing must not steal focus from what the user is doing
   focusArm?: React.MutableRefObject<boolean>;
@@ -87,6 +89,8 @@ function PtySession({ tool, token, cwd, platform, attachId, steal, visible, focu
   onExitRef.current = onExit;
   const onOpenFileRefRef = useRef(onOpenFileRef);
   onOpenFileRefRef.current = onOpenFileRef;
+  const reportScopeRef = useRef(reportScope);
+  reportScopeRef.current = reportScope;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -152,7 +156,8 @@ function PtySession({ tool, token, cwd, platform, attachId, steal, visible, focu
     let selTimer: number | undefined;
     const selSub = term.onSelectionChange(() => {
       clearTimeout(selTimer);
-      selTimer = window.setTimeout(() => emitTerminalSelection(tool, term.getSelection()), 600);
+      const scope = reportScopeRef.current;
+      selTimer = window.setTimeout(() => emitTerminalSelection(scope, tool, term.getSelection()), 600);
     });
 
     // clickable file:line references -> open in the editor at that line
@@ -193,7 +198,6 @@ function PtySession({ tool, token, cwd, platform, attachId, steal, visible, focu
       sock.onopen = () => {
         setStatus('up');
         sock.send(JSON.stringify({ t: 'r', cols: term.cols, rows: term.rows }));
-        term.focus();
       };
       sock.onmessage = (e) => {
         if (typeof e.data === 'string' && e.data.charCodeAt(0) === 0) {
@@ -287,14 +291,18 @@ interface TermEntry {
   ptyId?: string; // learned from the server's control frame
 }
 
+const projectKey = (p: string) => normPath(p.replace(/[\\/]+$/, ''));
+const sameProject = (a?: string, b?: string) => !!a && !!b && projectKey(a) === projectKey(b);
+
 // LIVE TERMINAL pane: multiple terminals as tabs (tmux windows). Every
 // terminal stays mounted while backgrounded; '+' opens the picker (attach an
 // existing PTY from the gallery, or start a new tool in the open folder).
 // Refresh detaches all (PTYs persist server-side; re-adopt via the gallery).
 export interface TermCtl {
-  // no dir: a new shell in the CURRENT terminal's project (fallback: the
-  // active workspace). A dir targets that project (the folder-row icon).
+  // no dir: a new shell in the selected project. A dir targets that project
+  // directly (the folder-row icon).
   startNew: (dir?: string) => void;
+  focusProjects: () => void;
   focusOrNext: (fromTerm: boolean) => void;
   cycle: (dir: 1 | -1) => void;
   confirmKill: () => void;
@@ -308,13 +316,13 @@ export interface LinkedRoot { provider: string; id: string; label: string; color
 
 export function LiveTerm({ cwd, projects, currentSession, linkedRoots, onToolStart, onPtyId, onOpenFileRef, onFollowSession, onFollowResolve, onActiveSession, ctl }: {
   cwd?: string;
-  // distinct open project folders — with 2+, the picker asks WHICH one a
-  // new terminal starts in (default: the active workspace's)
+  // distinct open project folders; local and server PTYs add any surviving
+  // folders that are no longer open in the workbench
   projects?: string[];
   currentSession?: { provider: string; id: string } | null;
   linkedRoots?: LinkedRoot[];
   onToolStart?: (tool: string, dir?: string) => void;
-  onPtyId?: (id: string, tool: string, fresh: boolean) => void;
+  onPtyId?: (id: string, tool: string, fresh: boolean, dir?: string) => void;
   onOpenFileRef?: (path: string, line?: number) => void;
   onFollowSession?: (session: { provider: string; id: string; pwd: string }) => void;
   // ptyId rides along so a manually-picked session still TIES this terminal
@@ -331,7 +339,12 @@ export function LiveTerm({ cwd, projects, currentSession, linkedRoots, onToolSta
   const [active, setActive] = useState<number | null>(null); // null => picker
   const [ptys, setPtys] = useState<LivePty[]>([]);
   const [confirmSteal, setConfirmSteal] = useState<string>();
+  const [project, setProject] = useState<string | undefined>(cwd);
   const nextKey = useRef(1);
+  const paneRef = useRef<HTMLDivElement>(null);
+  const projectTabsRef = useRef<HTMLDivElement>(null);
+  const termTabsRef = useRef<HTMLDivElement>(null);
+  const pickerRef = useRef<HTMLDivElement>(null);
   // armed = a revealed terminal may take focus; sync-driven reveals disarm
   const focusArm = useRef(true);
 
@@ -360,44 +373,59 @@ export function LiveTerm({ cwd, projects, currentSession, linkedRoots, onToolSta
   const linkOf = (session: LivePty['session']) =>
     (session ? linkedRoots?.find((r) => r.provider === session.provider && r.id === session.id) : undefined);
 
-  // workspace_state: which terminals exist, which is focused, whose session
-  useEffect(() => {
-    updateSnapshot({
-      terminals: terms.map((e) => ({
-        tool: e.tool,
-        ptyId: e.ptyId ?? null,
-        active: active === e.key,
-        session: sessionOf(e.ptyId),
-      })),
-    });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [terms, active, ptys]);
   const isWatched = (session: LivePty['session']) =>
     !!session && !!currentSession
     && session.provider === currentSession.provider && session.id === currentSession.id;
 
+  const projectChoices = useMemo(() => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const p of [...(projects ?? []), ...(cwd ? [cwd] : []), ...terms.map((t) => t.cwd), ...ptys.map((t) => t.cwd)]) {
+      if (!p) continue;
+      const key = projectKey(p);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(p);
+    }
+    return out;
+  }, [projects, cwd, terms, ptys]);
+  const activeProject = projectChoices.find((p) => sameProject(p, project))
+    ?? projectChoices.find((p) => sameProject(p, cwd))
+    ?? projectChoices[0];
+  const scopedTerms = terms.filter((t) => sameProject(t.cwd, activeProject));
+  const scopedPtys = ptys.filter((p) => sameProject(p.cwd, activeProject));
+
+  // Each project reports only its terminals; the shared terminal DOM happens
+  // to sit inside one workbench, but must not relabel the other projects.
+  useEffect(() => {
+    for (const scope of projectChoices.length ? projectChoices : [cwd ?? '']) {
+      updateSnapshot(scope, {
+        terminals: terms.filter((e) => sameProject(e.cwd, scope)).map((e) => ({
+          tool: e.tool,
+          ptyId: e.ptyId ?? null,
+          active: sameProject(scope, activeProject) && active === e.key,
+          session: sessionOf(e.ptyId),
+        })),
+      });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectChoices, activeProject, cwd, terms, active, ptys]);
+
   const addTerm = (entry: Omit<TermEntry, 'key' | 'nonce'>) => {
     const key = nextKey.current++;
     setTerms((t) => [...t, { ...entry, key, nonce: 0 }]);
+    if (entry.cwd) setProject(entry.cwd);
     setActive(key);
     setConfirmSteal(undefined);
     return key;
   };
 
-  // which project the picker starts tools in: sticky choice, defaulting to
-  // the active workspace's folder
-  const projectChoices = projects?.length ? projects : cwd ? [cwd] : [];
-  const [startIn, setStartIn] = useState<string>();
-  const effStart = startIn && projectChoices.includes(startIn) ? startIn
-    : cwd && projectChoices.includes(cwd) ? cwd : projectChoices[0];
-
   const startNew = (tool: string, dir?: string) => {
-    const at = dir ?? effStart ?? cwd;
+    const at = dir ?? activeProject ?? cwd;
+    if (!at) { setActive(null); return; }
     addTerm({ tool, cwd: at });
     onToolStart?.(tool, at);
   };
-  // the tmux-style chord inherits the CURRENT terminal's project
-  const dirOfCurrent = () => terms.find((t) => t.key === active)?.cwd ?? cwd;
 
   const adopt = (p: LivePty, doSteal: boolean) => {
     addTerm({ tool: p.tool, cwd: p.cwd, attachId: p.id, steal: doSteal, ptyId: p.id });
@@ -405,11 +433,47 @@ export function LiveTerm({ cwd, projects, currentSession, linkedRoots, onToolSta
 
   const removeTerm = (key: number) => {
     setTerms((t) => {
+      const removed = t.find((e) => e.key === key);
       const rest = t.filter((e) => e.key !== key);
-      setActive((cur) => (cur === key ? (rest.at(-1)?.key ?? null) : cur));
+      const same = rest.filter((e) => sameProject(e.cwd, removed?.cwd));
+      setActive((cur) => (cur === key ? (same.at(-1)?.key ?? null) : cur));
       return rest;
     });
   };
+
+  const focusSoon = (fn: () => void) => requestAnimationFrame(() => requestAnimationFrame(fn));
+  const focusProjectTabs = (p = activeProject) => focusSoon(() => {
+    const i = projectChoices.findIndex((x) => sameProject(x, p));
+    (projectTabsRef.current?.querySelector(`[data-project-tab="${i}"]`) as HTMLElement | null)?.focus();
+  });
+  const focusTermTabs = (key: number | null = active) => focusSoon(() => {
+    (termTabsRef.current?.querySelector(`[data-term-tab="${key ?? 'plus'}"]`) as HTMLElement | null)?.focus();
+  });
+  const focusTerminal = () => focusSoon(() => {
+    (paneRef.current?.querySelector('.tabBody:not(.hiddenTab) .xterm-helper-textarea') as HTMLElement | null)?.focus();
+  });
+  const focusPicker = () => focusSoon(() => {
+    ((pickerRef.current?.querySelector('[data-term-choice]') as HTMLElement | null) ?? pickerRef.current)?.focus();
+  });
+  const openPicker = () => {
+    setActive(null);
+    setConfirmSteal(undefined);
+    focusPicker();
+  };
+  const selectProject = (p: string) => {
+    const next = terms.find((t) => sameProject(t.cwd, p));
+    if (next && next.key !== active) focusArm.current = false;
+    setProject(p);
+    setActive(next?.key ?? null);
+    setConfirmSteal(undefined);
+  };
+
+  // A workbench switch establishes the terminal context; manual project-tab
+  // changes remain sticky until the active workbench changes again.
+  useEffect(() => {
+    if (cwd && !sameProject(project, cwd)) selectProject(cwd);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cwd]);
 
   const killTerm = (key: number) => {
     const entry = terms.find((e) => e.key === key);
@@ -425,8 +489,8 @@ export function LiveTerm({ cwd, projects, currentSession, linkedRoots, onToolSta
     )));
   };
 
-  // every running PTY shows in the gallery — ones already open as tabs in
-  // this window included; clicking those just switches to their tab
+  // every running PTY in this project shows in its gallery — ones already
+  // open as tabs in this window included; choosing those switches tabs
   const tabOf = (ptyId: string) => terms.find((e) => e.ptyId === ptyId);
 
   // the terminal chords: termNew starts a shell; termFocus focuses the
@@ -436,24 +500,28 @@ export function LiveTerm({ cwd, projects, currentSession, linkedRoots, onToolSta
     // keyboard tab switches are USER switches: report the landing terminal's
     // session, same as a click, so sync mode follows either way
     const goTo = (entry: TermEntry) => {
+      if (entry.cwd) setProject(entry.cwd);
       setActive(entry.key);
       onActiveSession?.(sessionOf(entry.ptyId));
     };
     ctl.current = {
-      startNew: (dir?: string) => startNew('_', dir ?? dirOfCurrent()),
+      startNew: (dir?: string) => startNew('_', dir),
+      focusProjects: () => focusProjectTabs(),
       focusOrNext: (fromTerm: boolean) => {
-        if (!terms.length) return; // the picker is already the view
-        if (fromTerm && active !== null && terms.length > 1) {
-          const i = terms.findIndex((t) => t.key === active);
-          goTo(terms[(i + 1) % terms.length]);
+        if (!scopedTerms.length) { openPicker(); return; }
+        if (fromTerm && active !== null && scopedTerms.length > 1) {
+          const i = scopedTerms.findIndex((t) => t.key === active);
+          goTo(scopedTerms[(Math.max(0, i) + 1) % scopedTerms.length]);
         } else if (active === null) {
-          goTo(terms[0]);
+          goTo(scopedTerms[0]);
         }
       },
       cycle: (dir: 1 | -1) => {
-        if (!terms.length) return;
-        const i = Math.max(0, terms.findIndex((t) => t.key === active));
-        goTo(terms[(i + dir + terms.length) % terms.length]);
+        if (!scopedTerms.length) return;
+        const i = scopedTerms.findIndex((t) => t.key === active);
+        const next = i < 0 ? (dir === 1 ? 0 : scopedTerms.length - 1)
+          : (i + dir + scopedTerms.length) % scopedTerms.length;
+        goTo(scopedTerms[next]);
       },
       confirmKill: () => { if (active !== null) setConfirmKill(active); },
       showSession: (provider: string, id: string) => {
@@ -465,6 +533,7 @@ export function LiveTerm({ cwd, projects, currentSession, linkedRoots, onToolSta
           // programmatic reveal: show the tab, do NOT steal focus — the
           // revealed session's effect consumes this and re-arms
           focusArm.current = false;
+          if (hit.cwd) setProject(hit.cwd);
           setActive(hit.key);
         }
         return !!hit;
@@ -492,8 +561,100 @@ export function LiveTerm({ cwd, projects, currentSession, linkedRoots, onToolSta
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [confirmKill]);
 
+  const projectKeys = (e: React.KeyboardEvent) => {
+    const action = actionOf(e, ['left', 'right', 'home', 'end', 'down', 'activate', 'select', 'dismiss']);
+    if (!action || !projectChoices.length) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (action === 'down' || action === 'activate' || action === 'select') {
+      focusTermTabs();
+      return;
+    }
+    if (action === 'dismiss') {
+      (e.target as HTMLElement).blur();
+      return;
+    }
+    const i = Math.max(0, projectChoices.findIndex((p) => sameProject(p, activeProject)));
+    const next = action === 'home' ? 0 : action === 'end' ? projectChoices.length - 1
+      : (i + (action === 'right' ? 1 : -1) + projectChoices.length) % projectChoices.length;
+    selectProject(projectChoices[next]);
+    focusProjectTabs(projectChoices[next]);
+  };
+
+  const termTabKeys = (e: React.KeyboardEvent) => {
+    const action = actionOf(e, ['left', 'right', 'home', 'end', 'up', 'down', 'activate', 'select', 'dismiss']);
+    if (!action) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (action === 'up' || action === 'dismiss') {
+      focusProjectTabs();
+      return;
+    }
+    if (action === 'down' || action === 'activate' || action === 'select') {
+      if (active === null) openPicker();
+      else focusTerminal();
+      return;
+    }
+    const tabs: (number | null)[] = [...scopedTerms.map((t) => t.key), null];
+    const i = Math.max(0, tabs.findIndex((key) => key === active));
+    const next = action === 'home' ? 0 : action === 'end' ? tabs.length - 1
+      : (i + (action === 'right' ? 1 : -1) + tabs.length) % tabs.length;
+    const key = tabs[next];
+    if (key !== null && key !== active) focusArm.current = false;
+    setActive(key);
+    if (key !== null) onActiveSession?.(sessionOf(terms.find((t) => t.key === key)?.ptyId));
+    focusTermTabs(key);
+  };
+
+  const pickerKeys = (e: React.KeyboardEvent) => {
+    const action = actionOf(e, ['left', 'right', 'up', 'down', 'home', 'end', 'dismiss']);
+    if (!action) return;
+    if (action === 'dismiss') {
+      e.preventDefault();
+      e.stopPropagation();
+      setConfirmSteal(undefined);
+      focusTermTabs(null);
+      return;
+    }
+    const attach = [...(e.currentTarget as HTMLElement).querySelectorAll<HTMLElement>('[data-term-choice="attach"]')];
+    const start = [...(e.currentTarget as HTMLElement).querySelectorAll<HTMLElement>('[data-term-choice="start"]')];
+    const choice = (e.target as HTMLElement).closest<HTMLElement>('[data-term-choice]');
+    if (!choice) {
+      if (e.target !== e.currentTarget) return;
+      const next = action === 'end' ? (start.at(-1) ?? attach.at(-1)) : (attach[0] ?? start[0]);
+      if (action === 'up') focusTermTabs(null);
+      else if (next) next.focus();
+      else return;
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
+    const group = choice.dataset.termChoice === 'attach' ? attach : start;
+    const i = Math.max(0, group.indexOf(choice));
+    let next: HTMLElement | undefined;
+    if (choice.dataset.termChoice === 'attach') {
+      if (action === 'up') { focusTermTabs(null); next = undefined; }
+      else if (action === 'down') next = start[0];
+      else if (action === 'home') next = attach[0];
+      else if (action === 'end') next = attach.at(-1);
+      else next = attach[(i + (action === 'right' ? 1 : -1) + attach.length) % attach.length];
+    } else {
+      if (action === 'up') {
+        next = attach[0] ?? (i > 0 ? start[i - 1] : undefined);
+        if (!next) focusTermTabs(null);
+      }
+      else if (action === 'down') next = start[Math.min(start.length - 1, i + 1)];
+      else if (action === 'home') next = start[0];
+      else if (action === 'end') next = start.at(-1);
+      else next = start[(i + (action === 'right' ? 1 : -1) + start.length) % start.length];
+    }
+    e.preventDefault();
+    e.stopPropagation();
+    next?.focus();
+  };
+
   return (
-    <div className="livePane">
+    <div className="livePane" ref={paneRef}>
       {confirmKill !== null && (
         <div className="tmuxConfirm">
           kill terminal “{(() => {
@@ -502,18 +663,50 @@ export function LiveTerm({ cwd, projects, currentSession, linkedRoots, onToolSta
           })()}”? <b>y</b> / <b>n</b>
         </div>
       )}
-      <div className="liveTabs">
-        {terms.map((e) => {
+      {projectChoices.length > 0 && (
+        <div className="liveProjects" ref={projectTabsRef} role="tablist" aria-label="Terminal projects" onKeyDown={projectKeys}>
+          {projectChoices.map((p, i) => {
+            const selected = sameProject(p, activeProject);
+            return (
+              <button
+                key={projectKey(p)}
+                type="button"
+                role="tab"
+                aria-selected={selected}
+                tabIndex={selected ? 0 : -1}
+                data-project-tab={i}
+                className={`liveProject ${selected ? 'active' : ''}`}
+                title={p}
+                onClick={() => selectProject(p)}
+              >
+                <span className="codicon codicon-folder" />
+                <span className="liveTabLabel">{p.replace(/[\\/]+$/, '').split(/[\\/]/).pop()}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+      <div className="liveTabs" ref={termTabsRef} role="tablist" aria-label={`Terminals in ${activeProject ?? 'project'}`} onKeyDown={termTabKeys}>
+        {scopedTerms.map((e) => {
           const sess = sessionOf(e.ptyId);
           const link = linkOf(sess);
           const label = link ? link.label : e.tool === '_' ? 'shell' : e.tool;
           return (
             <span
               key={e.key}
+              role="tab"
+              aria-selected={active === e.key}
+              tabIndex={active === e.key ? 0 : -1}
+              data-term-tab={e.key}
               className={`liveTab ${active === e.key ? 'active' : ''}`}
               style={link?.color ? { background: rgba(link.color, 0.22) } : undefined}
               title={label}
-              onClick={() => { setActive(e.key); onActiveSession?.(sess); }}
+              onClick={() => {
+                focusArm.current = true;
+                setActive(e.key);
+                onActiveSession?.(sess);
+                focusTerminal();
+              }}
             >
               {link
                 ? <span className="liveDot" title={link.active ? "this terminal is running the session you're watching" : `linked to ${link.label}`} />
@@ -527,9 +720,19 @@ export function LiveTerm({ cwd, projects, currentSession, linkedRoots, onToolSta
             </span>
           );
         })}
-        <span className={`liveTab plus ${active === null ? 'active' : ''}`} title="New / attach" onClick={() => setActive(null)}>
+        <button
+          type="button"
+          role="tab"
+          aria-label={`New or attach a terminal in ${activeProject ?? 'this project'}`}
+          aria-selected={active === null}
+          tabIndex={active === null ? 0 : -1}
+          data-term-tab="plus"
+          className={`liveTab plus ${active === null ? 'active' : ''}`}
+          title="New / attach"
+          onClick={openPicker}
+        >
           <span className="codicon codicon-add" />
-        </span>
+        </button>
         {active !== null && (() => {
           const pty = ptys.find((x) => x.id === terms.find((e) => e.key === active)?.ptyId);
           const sess = pty?.session ?? null;
@@ -564,6 +767,7 @@ export function LiveTerm({ cwd, projects, currentSession, linkedRoots, onToolSta
               tool={e.tool}
               token={config.token}
               cwd={e.cwd ?? cwd}
+              reportScope={e.cwd ?? activeProject ?? cwd ?? ''}
               platform={config.platform}
               attachId={e.attachId}
               steal={e.steal}
@@ -573,30 +777,34 @@ export function LiveTerm({ cwd, projects, currentSession, linkedRoots, onToolSta
                 setTerms((t) => t.map((x) => (x.key === e.key ? { ...x, ptyId: id } : x)));
                 // fresh = started here, not adopted/taken back — only fresh
                 // starts may satisfy a session hunt
-                onPtyId?.(id, e.tool, !e.attachId);
+                onPtyId?.(id, e.tool, !e.attachId, e.cwd);
               }}
               onExit={() => removeTerm(e.key)}
               onTakeBack={() => takeBack(e.key)}
-              onOpenFileRef={onOpenFileRef}
+              onOpenFileRef={(path, line) => {
+                const abs = /^[A-Za-z]:[\\/]|^[\\/]/.test(path) || !e.cwd
+                  ? path : `${e.cwd.replace(/[\\/]+$/, '')}/${path}`;
+                onOpenFileRef?.(abs, line);
+              }}
             />
           )}
         </div>
       ))}
 
       {active === null && (
-        <div className="livePicker">
+        <div className="livePicker" ref={pickerRef} tabIndex={-1} onKeyDown={pickerKeys}>
           {error && <div className="pickerError">{error}</div>}
 
-          {ptys.length > 0 && (
+          {scopedPtys.length > 0 && (
             <>
               <div className="pickerTitle">
                 attach a terminal
-                {ptys.some((p) => !p.attached && !tabOf(p.id)) && (
+                {scopedPtys.some((p) => !p.attached && !tabOf(p.id)) && (
                   <button
                     className="killDetached"
                     title="Kill every detached terminal (ones no window is using)"
                     onClick={() => {
-                      const dead = ptys.filter((p) => !p.attached && !tabOf(p.id));
+                      const dead = scopedPtys.filter((p) => !p.attached && !tabOf(p.id));
                       void Promise.all(dead.map((p) => fetch('/api/pty-kill', { method: 'POST', body: JSON.stringify({ id: p.id }) })))
                         .then(() => setPtys((cur) => cur.filter((x) => !dead.some((d) => d.id === x.id))));
                     }}
@@ -604,18 +812,35 @@ export function LiveTerm({ cwd, projects, currentSession, linkedRoots, onToolSta
                 )}
               </div>
               <div className="liveGallery">
-                {ptys.map((p) => {
+                {scopedPtys.map((p) => {
                   const own = tabOf(p.id);
                   return (
                   <div
                     key={p.id}
+                    data-pty-id={p.id}
                     className={`ptyTile ${p.attached && !own ? 'inUse' : ''} ${isWatched(p.session) ? 'watching' : ''}`}
-                    onClick={() => {
-                      if (own) { setActive(own.key); onActiveSession?.(p.session); }
-                      else if (p.attached) setConfirmSteal(p.id);
-                      else { adopt(p, false); onActiveSession?.(p.session); }
-                    }}
                   >
+                    <button
+                      type="button"
+                      className="ptyTileHit"
+                      data-term-choice="attach"
+                      aria-label={`Attach ${p.tool === '_' ? 'shell' : p.tool} terminal in ${p.cwd}`}
+                      onKeyDown={(e) => {
+                        if (!actionOf(e, ['activate', 'select'])) return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        e.currentTarget.click();
+                      }}
+                      onClick={() => {
+                        if (own) { setActive(own.key); onActiveSession?.(p.session); }
+                        else if (p.attached) {
+                          setConfirmSteal(p.id);
+                          focusSoon(() => {
+                            (pickerRef.current?.querySelector(`[data-pty-id="${p.id}"] .tileConfirm button`) as HTMLElement | null)?.focus();
+                          });
+                        } else { adopt(p, false); onActiveSession?.(p.session); }
+                      }}
+                    />
                     <div className="tileHead">
                       {linkOf(p.session)
                         ? <span className="liveDot" title={isWatched(p.session) ? "running the session you're watching" : `linked to ${linkOf(p.session)?.label}`} />
@@ -627,9 +852,11 @@ export function LiveTerm({ cwd, projects, currentSession, linkedRoots, onToolSta
                         {own ? 'this window' : p.attached ? 'in use' : 'detached'}
                       </span>
                       {!p.attached && (
-                        <span
+                        <button
+                          type="button"
                           className="codicon codicon-close tileKill"
                           title="Kill this terminal"
+                          aria-label="Kill this terminal"
                           onClick={(e) => {
                             e.stopPropagation();
                             void fetch('/api/pty-kill', { method: 'POST', body: JSON.stringify({ id: p.id }) })
@@ -654,7 +881,12 @@ export function LiveTerm({ cwd, projects, currentSession, linkedRoots, onToolSta
                         live in another window — take the terminal?
                         <div>
                           <button onClick={() => adopt(p, true)}>yes</button>
-                          <button onClick={() => setConfirmSteal(undefined)}>no</button>
+                          <button onClick={() => {
+                            setConfirmSteal(undefined);
+                            focusSoon(() => {
+                              (pickerRef.current?.querySelector(`[data-pty-id="${p.id}"] .ptyTileHit`) as HTMLElement | null)?.focus();
+                            });
+                          }}>no</button>
                         </div>
                       </div>
                     )}
@@ -666,25 +898,11 @@ export function LiveTerm({ cwd, projects, currentSession, linkedRoots, onToolSta
           )}
 
           <div className="pickerTitle">start a session</div>
-          {effStart ? (
+          {activeProject ? (
             <>
-              {projectChoices.length > 1 && (
-                <div className="startProjects">
-                  {projectChoices.map((p) => (
-                    <button
-                      key={p}
-                      className={`projChip ${effStart === p ? 'active' : ''}`}
-                      title={p}
-                      onClick={() => setStartIn(p)}
-                    >
-                      <span className="codicon codicon-folder" /> {p.replace(/[\\/]+$/, '').split(/[\\/]/).pop()}
-                    </button>
-                  ))}
-                </div>
-              )}
-              <div className="pickerHint">in {effStart}</div>
+              <div className="pickerHint">in {activeProject}</div>
               {config?.tools.map((t) => (
-                <button key={t} className="pickerTool" onClick={() => startNew(t)}>
+                <button key={t} className="pickerTool" data-term-choice="start" onClick={() => startNew(t)}>
                   {t === '_' ? '_ blank terminal' : `▸ ${t}`}
                 </button>
               ))}

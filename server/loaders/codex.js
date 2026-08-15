@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { StringDecoder } from 'node:string_decoder';
 import { highlightCall, highlightResult, isHighlightTool, isTableTool, isWaypointRemoveTool, isWaypointTool, tableCall, tableResult, waypointCall, waypointRemoveCall, waypointRemoveResult, waypointResult } from '../mcfly-data.js';
 
 const ROOT = path.join(os.homedir(), '.codex', 'sessions');
@@ -19,7 +20,13 @@ function resolveId(id) {
   return p;
 }
 
-const norm = (p) => (p ?? '').replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+export const projectPathKey = (p) => {
+  const source = p ?? '';
+  return /^(?:[a-z]:[\\/]|[\\/]{2})/i.test(source)
+    ? source.replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase()
+    : source.replace(/\/+$/, '');
+};
+const norm = projectPathKey;
 
 // file -> { mtime, meta } head-scan cache (cwd lives in the first line)
 const headCache = new Map();
@@ -103,11 +110,15 @@ export function listForCwd(cwd) {
   return out;
 }
 
-// call_id -> render metadata (one entry per file for multi-file patches)
+// transcript + call_id -> render metadata (one entry per file for multi-file patches)
 const callMeta = new Map();
+const callKey = (file, id) => `${file}\0${id}`;
 
 export function tail(id, cursor = 0) {
-  const file = resolveId(id);
+  return tailFile(resolveId(id), cursor);
+}
+
+export function tailFile(file, cursor = 0) {
   const st = fs.statSync(file);
   const messages = [];
   let offset = cursor;
@@ -129,7 +140,7 @@ export function tail(id, cursor = 0) {
     if (end >= 0) {
       offset = cursor + end + 1;
       for (const line of buf.toString('utf8', 0, end).split('\n')) {
-        if (line.trim()) convertLine(line, messages);
+        if (line.trim()) convertLine(line, messages, file, cursor);
       }
     }
   }
@@ -141,7 +152,57 @@ const texts = (content) => (Array.isArray(content) ? content : [])
   .map((c) => c.text)
   .join('\n');
 
-function convertLine(line, messages) {
+function metasForCall(p) {
+  const input = p.input ?? p.arguments ?? '';
+  const entries = callEntries(p.name, input);
+  return entries.map((entry, index) => ({
+    ...entry,
+    tool: toolLabel(entry.name, entry.input, entry.render),
+    requestId: entries.length === 1 ? p.call_id : `${p.call_id}:${index}`,
+  }));
+}
+
+function recoverCallMeta(file, callId, before) {
+  if (!before) return [];
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const decoder = new StringDecoder('utf8');
+    let carry = '';
+    for (let offset = 0; offset < before;) {
+      const buf = Buffer.alloc(Math.min(MAX_CHUNK, before - offset));
+      const read = fs.readSync(fd, buf, 0, buf.length, offset);
+      if (!read) break;
+      offset += read;
+      const lines = (carry + decoder.write(buf.subarray(0, read))).split('\n');
+      carry = lines.pop() ?? '';
+      for (const candidate of lines) {
+        try {
+          const o = JSON.parse(candidate);
+          const p = o.type === 'response_item' ? o.payload : undefined;
+          if ((p?.type === 'custom_tool_call' || p?.type === 'function_call') && p.call_id === callId) {
+            return metasForCall(p);
+          }
+        } catch { /* unrelated or incomplete line */ }
+      }
+    }
+    carry += decoder.end();
+    if (carry) {
+      try {
+        const o = JSON.parse(carry);
+        const p = o.type === 'response_item' ? o.payload : undefined;
+        if ((p?.type === 'custom_tool_call' || p?.type === 'function_call') && p.call_id === callId) {
+          return metasForCall(p);
+        }
+      } catch { /* incomplete line */ }
+    }
+  } catch { /* recovery is best-effort; the result remains visible below */ } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+  return [];
+}
+
+function convertLine(line, messages, file, recoveryEnd) {
   let o;
   try { o = JSON.parse(line); } catch { return; }
   if (o.type !== 'response_item' || !o.payload) return;
@@ -171,14 +232,8 @@ function convertLine(line, messages) {
     }
     case 'custom_tool_call':
     case 'function_call': {
-      const input = p.input ?? p.arguments ?? '';
-      const entries = callEntries(p.name, input);
-      const metas = entries.map((entry, index) => ({
-        ...entry,
-        tool: toolLabel(entry.name, entry.input, entry.render),
-        requestId: entries.length === 1 ? p.call_id : `${p.call_id}:${index}`,
-      }));
-      callMeta.set(p.call_id, metas);
+      const metas = metasForCall(p);
+      callMeta.set(callKey(file, p.call_id), metas);
       push('assistant', metas.map((meta) => ({
         type: 'tool',
         tool_request_id: meta.requestId,
@@ -190,18 +245,37 @@ function convertLine(line, messages) {
     }
     case 'custom_tool_call_output':
     case 'function_call_output': {
-      const metas = callMeta.get(p.call_id) ?? [];
       const text = typeof p.output === 'string' ? p.output : texts(p.output);
+      const key = callKey(file, p.call_id);
+      const metas = callMeta.get(key) ?? recoverCallMeta(file, p.call_id, recoveryEnd);
+      if (!metas.length) {
+        push('user', [{
+          type: 'tool_result',
+          tool_request_id: p.call_id,
+          tool: 'unmatched result',
+          result: text,
+          extended: { render: { verb: 'exec', stdout: '', stderr: text }, is_error: true },
+        }]);
+        return;
+      }
       const count = metas.reduce((max, meta) => Math.max(max, meta.resultIndex), -1) + 1;
       const results = splitNumberedResults(text, count)
         ?? Array.from({ length: count }, (_, index) => index === 0 ? text : '');
-      push('user', metas.map((meta) => ({
-        type: 'tool_result',
-        tool_request_id: meta.requestId,
-        tool: meta.tool ?? meta.name ?? '?',
-        result: results[meta.resultIndex] ?? '',
-        extended: { render: resultRender(meta, results[meta.resultIndex] ?? '', p.output) },
-      })));
+      push('user', metas.map((meta) => {
+        const result = results[meta.resultIndex] ?? '';
+        const failed = isPatchCall(meta) && patchResultFailed(result, p.output);
+        return {
+          type: 'tool_result',
+          tool_request_id: meta.requestId,
+          tool: meta.tool ?? meta.name ?? '?',
+          result,
+          extended: {
+            render: resultRender(meta, result, p.output),
+            ...(failed ? { is_error: true } : {}),
+          },
+        };
+      }));
+      callMeta.delete(key);
       return;
     }
     default:
@@ -376,6 +450,30 @@ function execPayload(text) {
   return start < 0 ? text : text.slice(start + marker.length);
 }
 
+function isPatchCall(meta) {
+  return meta.name === 'apply_patch' || nestedToolNames(meta.input).includes('apply_patch');
+}
+
+function structuredFailure(value) {
+  if (typeof value === 'string') {
+    const source = value.trim();
+    if (source.startsWith('{') || source.startsWith('[')) {
+      try { return structuredFailure(JSON.parse(source)); } catch { return false; }
+    }
+    return false;
+  }
+  if (Array.isArray(value)) return value.some(structuredFailure);
+  if (!value || typeof value !== 'object') return false;
+  if (value.success === false || value.is_error === true || value.isError === true) return true;
+  const code = value.exit_code ?? value.exitCode ?? value.metadata?.exit_code ?? value.metadata?.exitCode;
+  return typeof code === 'number' && code !== 0;
+}
+
+function patchResultFailed(text, output) {
+  return structuredFailure(output)
+    || /\bapply_patch verification failed\b|(?:^|\n)(?:Patch failed\b|Invalid patch\b|Script failed\b|Script error:|Exit code:\s*[1-9]\d*)/i.test(text);
+}
+
 export function resultRender(meta, text, output) {
   if (!meta) return { verb: 'other' };
   if (meta.render?.verb === 'data') {
@@ -391,8 +489,10 @@ export function resultRender(meta, text, output) {
     return waypointResult(output) ?? waypointResult(text) ?? { verb: 'exec', stdout: execPayload(text), stderr: '' };
   }
   // Edits render from the result side so the timeline applies them only after completion.
-  if (meta.name === 'apply_patch' || nestedToolNames(meta.input).includes('apply_patch')) {
-    return meta.render;
+  if (isPatchCall(meta)) {
+    return patchResultFailed(text, output)
+      ? { verb: 'exec', stdout: '', stderr: execPayload(text) }
+      : meta.render;
   }
   if (meta.render?.verb === 'read_file') {
     const image = (meta.name === 'view_image' || nestedToolNames(meta.input).includes('view_image')) && Array.isArray(output)
@@ -441,12 +541,16 @@ export function patchRenders(input) {
     const kind = file.match[1];
     const section = lines.slice(file.index + 1, files[index + 1]?.index ?? lines.length);
     const moved = section[0]?.match(/^\*\*\* Move to:\s*(.*)$/);
-    const filePath = (moved?.[1] ?? file.match[2]).trim();
+    const sourcePath = file.match[2].trim();
+    const filePath = (moved?.[1] ?? sourcePath).trim();
     const patchLines = moved ? section.slice(1) : section;
     if (kind === 'Add') {
       const content = patchLines.filter((line) => line.startsWith('+')).map((line) => line.slice(1)).join('\n');
       const count = content.split('\n').length;
       return { verb: 'write_file', path: filePath, title: path.basename(filePath), content, region: { start: 1, end: count } };
+    }
+    if (kind === 'Delete') {
+      return { verb: 'patch_file', path: sourcePath, title: path.basename(sourcePath), removed: true };
     }
     const groups = [];
     for (const line of patchLines) {
@@ -458,6 +562,7 @@ export function patchRenders(input) {
     }
     return {
       verb: 'patch_file', path: filePath, title: path.basename(filePath),
+      ...(moved ? { source_path: sourcePath } : {}),
       // codex patch envelopes carry no line numbers; 0 = "position unknown",
       // so downstream never mistakes it for a real placement hint
       hunks: groups.filter((group) => group.length).map((group) => ({

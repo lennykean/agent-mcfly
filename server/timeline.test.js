@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyPatch, invertHunks, fileChain, foldState, resolveWaypoint } from '../ui/src/lib/timeline.ts';
+import { appendMessages, applyPatch, createTimeline, invertHunks, fileChain, foldState, pathWithin, resolveWaypoint } from '../ui/src/lib/timeline.ts';
 
 const tool = (index, verb, path, result) => ({
   kind: 'tool', tool: 'T', requestId: String(index), params: {},
@@ -139,7 +139,55 @@ test('waypoints re-locate by context and detach rather than guess', () => {
 test('fileChain: windows paths fold case, posix paths do not', () => {
   const winSteps = [tool(0, 'read_file', 'C:\\repo\\App.tsx', { content: 'x', start_line: 1, total_lines: 1 })];
   assert.equal(fileChain(winSteps, 'C:/repo/app.tsx').touches.length, 1);
+  const winState = foldState([...winSteps, tool(1, 'write_file', 'c:/REPO/app.tsx', { content: 'y' })], 1);
+  assert.equal(winState.tabs.length, 1);
   const posixSteps = [tool(0, 'read_file', '/repo/Foo.ts', { content: 'x', start_line: 1, total_lines: 1 })];
   assert.equal(fileChain(posixSteps, '/repo/foo.ts').touches.length, 0);
   assert.equal(fileChain(posixSteps, '/repo/Foo.ts').touches.length, 1);
+  assert.equal(pathWithin('//SERVER/Share/child/f.ts', '\\\\server\\share'), true);
+  assert.equal(pathWithin('C:\\repo\\child\\f.ts', 'c:/REPO'), true);
+  assert.equal(pathWithin('C:\\repo-old\\f.ts', 'C:\\repo'), false);
+  assert.equal(pathWithin('/repo/Foo/f.ts', '/repo/Foo'), true);
+  assert.equal(pathWithin('/repo/foo/f.ts', '/repo/Foo'), false);
+});
+
+test('foldState removes deleted sources and moves renamed content', () => {
+  const read = tool(0, 'read_file', 'old.txt', { content: 'old\nkeep', start_line: 1, total_lines: 2 });
+  const renamed = tool(1, 'patch_file', 'new.txt', {
+    source_path: 'old.txt',
+    hunks: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ['-old', '+new'] }],
+  });
+  const moved = foldState([read, renamed], 1);
+  assert.equal(moved.tabs.some((tab) => tab.path === 'old.txt'), false);
+  assert.equal(moved.tabs.find((tab) => tab.path === 'new.txt').render.content, 'new\nkeep');
+
+  const pureMove = foldState([read, tool(1, 'patch_file', 'new.txt', { source_path: 'old.txt', hunks: [] })], 1);
+  assert.equal(pureMove.tabs.find((tab) => tab.path === 'new.txt').render.content, 'old\nkeep');
+  assert.equal(fileChain([read, tool(1, 'patch_file', 'new.txt', { source_path: 'old.txt', hunks: [] })], 'new.txt').snapshots.get(1).content, 'old\nkeep');
+  assert.equal(fileChain([read, renamed], 'new.txt').snapshots.get(1).content, 'new\nkeep');
+
+  const removal = tool(1, 'patch_file', 'old.txt', { removed: true });
+  const deleted = foldState([read, removal], 1);
+  assert.equal(deleted.tabs.some((tab) => tab.path === 'old.txt'), false);
+  assert.equal(fileChain([read, renamed], 'old.txt').snapshots.get(1).removed, true);
+  assert.equal(fileChain([read, removal], 'old.txt').snapshots.get(1).removed, true);
+});
+
+test('appendMessages keeps an unmatched tool result inspectable without replaying it', () => {
+  const timeline = createTimeline('main', 'session', 'codex');
+  appendMessages(timeline, [{
+    role: 'user',
+    content: [{
+      type: 'tool_result', tool_request_id: 'missing', tool: 'unmatched result', result: 'orphan output',
+      extended: { render: { verb: 'exec', stdout: '', stderr: 'orphan output' }, is_error: true },
+    }],
+  }]);
+  assert.equal(timeline.steps.length, 1);
+  assert.equal(timeline.steps[0].call.verb, 'other');
+  assert.equal(timeline.steps[0].resultData, 'orphan output');
+  assert.equal(timeline.steps[0].isError, true);
+  assert.equal(foldState(timeline.steps, 0).term[0].stderr, 'orphan output');
+
+  const failedPatch = tool(0, 'patch_file', 'a.txt', { verb: 'exec', stderr: 'patch failed' });
+  assert.equal(foldState([failedPatch], 0).term[0].stderr, 'patch failed');
 });

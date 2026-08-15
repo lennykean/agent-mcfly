@@ -129,8 +129,8 @@ function charWidth(): number {
 // to be typed live — in full color. A region band flashes and fades after.
 export interface BlameMark { text: string; title: string; step: number }
 
-export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, marks, onCompose, composer, reviewMarks, thread, scrollTo, textBand, find, onVisualMode }: {
-  file: FileView; animate: boolean; speed: number;
+export function CodeView({ workspaceScope, file, animate, speed, flashOnly, blame, waypoint, marks, onCompose, composer, reviewMarks, thread, scrollTo, textBand, find, onVisualMode }: {
+  workspaceScope: string; file: FileView; animate: boolean; speed: number;
   flashOnly?: boolean;
   find?: FindDrive;
   onVisualMode?: (m: null | 'char' | 'line' | 'normal') => void;
@@ -212,7 +212,7 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
     el.style.animationName = 'none';
     clearTimeout(blinkTimer.current);
     blinkTimer.current = window.setTimeout(() => { el.style.animationName = ''; }, 350);
-    updateSnapshot({ cursor: { path: file.path, line: c.line, col: c.col } });
+    updateSnapshot(workspaceScope, { cursor: { path: file.path, line: c.line, col: c.col } });
   };
   const caretSeeVisible = (line: number) => {
     const el = ref.current;
@@ -236,7 +236,7 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
     // keyboard selections are synthetic — no selectionchange fires to clear
     // them, so the click-clears-this-file contract is enforced here
     clearKbLocal();
-    reportEditorSelection({ path: file.path, clear: true });
+    reportEditorSelection(workspaceScope, { path: file.path, clear: true });
     paintCaret();
     ref.current?.focus();
   };
@@ -362,7 +362,7 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
     }
     kbFlush.current = () => {
       if (kbBandsEl.current) kbBandsEl.current.innerHTML = ''; // the reported band takes over
-      reportEditorSelection({ path: file.path, lines: [s.line, e2.line], text: parts.join('\n'), rects });
+      reportEditorSelection(workspaceScope, { path: file.path, lines: [s.line, e2.line], text: parts.join('\n'), rects });
     };
     clearTimeout(kbTimer.current);
     kbTimer.current = window.setTimeout(flushKbSel, 150);
@@ -373,7 +373,7 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
     // comment on the highlighted lines (or the caret line) in the review
     if (onCompose && actionOf(e, ['comment'])) {
       flushKbSel(); // a debounced visual selection must land before we read it
-      const sel = editorSelFor(file.path);
+      const sel = editorSelFor(workspaceScope, file.path);
       const c0 = caretRef.current;
       const range = sel?.lines?.length ? [Math.min(...sel.lines), Math.max(...sel.lines)]
         : c0 ? [c0.line, c0.line] : null;
@@ -400,7 +400,7 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
     if (!raw) return;
     if (raw === 'copy') {
       flushKbSel(); // a debounced visual selection must land before we read it
-      const sel = editorSelFor(file.path);
+      const sel = editorSelFor(workspaceScope, file.path);
       if (!sel?.text) return; // no entry: native copy proceeds
       e.preventDefault();
       e.stopPropagation();
@@ -470,10 +470,10 @@ export function CodeView({ file, animate, speed, flashOnly, blame, waypoint, mar
         e.preventDefault();
         e.stopPropagation();
         if (visual.current) { setVisual(null); flushKbSel(); }
-        else if (editorSelFor(file.path)) {
+        else if (editorSelFor(workspaceScope, file.path)) {
           clearKbLocal();
           selAnchor.current = null;
-          reportEditorSelection({ path: file.path, clear: true });
+          reportEditorSelection(workspaceScope, { path: file.path, clear: true });
         }
         return;
     }
@@ -795,7 +795,8 @@ function diffRows(hunks: NonNullable<FileView['render']['hunks']>, fileLines: st
   return out;
 }
 
-export function DiffView({ file, animate, onComment, fileLines, textBand, find, onVisualMode, reviewMarks, thread }: {
+export function DiffView({ workspaceScope, file, animate, onComment, fileLines, textBand, find, onVisualMode, reviewMarks, thread }: {
+  workspaceScope: string;
   find?: FindDrive;
   onVisualMode?: (m: null | 'char' | 'line' | 'normal') => void;
   file: FileView; animate: boolean;
@@ -934,7 +935,7 @@ export function DiffView({ file, animate, onComment, fileLines, textBand, find, 
     clearTimeout(dBlink.current);
     dBlink.current = window.setTimeout(() => { el.style.animationName = ''; }, 350);
     const r2 = rows[c.row] as DiffRow;
-    updateSnapshot({ cursor: { path: file.path, line: r2.newNo ?? null, oldLine: r2.oldNo ?? null, col: c.col, in: 'diff' } });
+    updateSnapshot(workspaceScope, { cursor: { path: file.path, line: r2.newNo ?? null, oldLine: r2.oldNo ?? null, col: c.col, in: 'diff' } });
   };
   const dSeeVisible = (rowIdx: number) => {
     const el = ref.current;
@@ -960,7 +961,7 @@ export function DiffView({ file, animate, onComment, fileLines, textBand, find, 
     // keyboard selections are synthetic — no selectionchange fires to clear
     // them, so the click-clears-this-file contract is enforced here
     clearKbLocal();
-    reportEditorSelection({ path: file.path, clear: true });
+    reportEditorSelection(workspaceScope, { path: file.path, clear: true });
     paintDCaret();
     ref.current?.focus();
   };
@@ -1114,7 +1115,7 @@ export function DiffView({ file, animate, onComment, fileLines, textBand, find, 
     }
     kbFlush.current = () => {
       if (kbBandsEl.current) kbBandsEl.current.innerHTML = '';
-      reportEditorSelection({
+      reportEditorSelection(workspaceScope, {
         path: file.path,
         lines: first?.newNo !== undefined && last?.newNo !== undefined ? [first.newNo, last.newNo] : undefined,
         old_lines: first?.oldNo !== undefined && last?.oldNo !== undefined ? [first.oldNo, last.oldNo] : undefined,
@@ -1132,7 +1133,7 @@ export function DiffView({ file, animate, onComment, fileLines, textBand, find, 
     // comment on the highlighted new-side lines (or the caret row's line)
     if (onComment && actionOf(e, ['comment'])) {
       flushKbSel(); // a debounced visual selection must land before we read it
-      const sel = editorSelFor(file.path);
+      const sel = editorSelFor(workspaceScope, file.path);
       let a: number | undefined;
       let b: number | undefined;
       if (sel?.lines?.length) { a = Math.min(...sel.lines); b = Math.max(...sel.lines); }
@@ -1170,7 +1171,7 @@ export function DiffView({ file, animate, onComment, fileLines, textBand, find, 
     if (!raw) return;
     if (raw === 'copy') {
       flushKbSel(); // a debounced visual selection must land before we read it
-      const sel = editorSelFor(file.path);
+      const sel = editorSelFor(workspaceScope, file.path);
       if (!sel?.text) return; // no entry: native copy proceeds
       e.preventDefault();
       e.stopPropagation();
@@ -1261,10 +1262,10 @@ export function DiffView({ file, animate, onComment, fileLines, textBand, find, 
         e.preventDefault();
         e.stopPropagation();
         if (dVisual.current) { setDVisual(null); flushKbSel(); }
-        else if (editorSelFor(file.path)) {
+        else if (editorSelFor(workspaceScope, file.path)) {
           clearKbLocal();
           dAnchor.current = null;
-          reportEditorSelection({ path: file.path, clear: true });
+          reportEditorSelection(workspaceScope, { path: file.path, clear: true });
         }
         return;
     }
@@ -1487,8 +1488,8 @@ function ThreadCard({ comment, stale, onReply, onResolve, onViewOriginal, onClos
   );
 }
 
-function FileBody({ file, animate, speed, onCompose, composer, waypoint, reviewMarks, thread, scrollTo, textBand, find, onVisualMode }: {
-  file: FileView; animate: boolean; speed: number;
+function FileBody({ workspaceScope, file, animate, speed, onCompose, composer, waypoint, reviewMarks, thread, scrollTo, textBand, find, onVisualMode }: {
+  workspaceScope: string; file: FileView; animate: boolean; speed: number;
   onCompose?: (line: number, lineEnd: number) => void;
   composer?: { line: number; lineEnd: number; onSubmit: (body: string) => void; onCancel: () => void };
   waypoint?: { line: number; note: string; open: boolean; onToggle: () => void };
@@ -1500,10 +1501,10 @@ function FileBody({ file, animate, speed, onCompose, composer, waypoint, reviewM
   onVisualMode?: (m: null | 'char' | 'line' | 'normal') => void;
 }) {
   return file.mode === 'diff'
-    ? <DiffView key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} textBand={textBand} find={find} onVisualMode={onVisualMode} />
+    ? <DiffView workspaceScope={workspaceScope} key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} textBand={textBand} find={find} onVisualMode={onVisualMode} />
     : file.mode === 'image'
       ? <ImageView key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} />
-      : <CodeView key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} speed={speed} onCompose={onCompose} composer={composer} waypoint={waypoint} reviewMarks={reviewMarks} thread={thread} scrollTo={scrollTo} textBand={textBand} find={find} onVisualMode={onVisualMode} />;
+      : <CodeView workspaceScope={workspaceScope} key={`${file.path}:${file.touchedAt}`} file={file} animate={animate} speed={speed} onCompose={onCompose} composer={composer} waypoint={waypoint} reviewMarks={reviewMarks} thread={thread} scrollTo={scrollTo} textBand={textBand} find={find} onVisualMode={onVisualMode} />;
 }
 
 // context capture for a review comment: the anchor line and its surroundings,
@@ -1521,13 +1522,13 @@ function captureContext(content: string, startLine: number, line: number) {
 // One PINNED tab always shows the file the replay is touching (jumps active on
 // every touch, cannot be closed); explorer files open as closable read-only tabs.
 export function EditorPane({
-  pinned, animate, speed, userTabs, active, onSelect, onClose, onOpenCurrent,
+  workspaceScope, pinned, animate, speed, userTabs, active, onSelect, onClose, onOpenCurrent,
   timelinePath, onOpenTimeline, onCloseTimeline, timelineBody, onToggleWaypoint, onCloseAll,
   waypoints, onOpenSnapshot, onActivateWaypoint, pinnedFlash = 0, pointer = 0, worktreeBanner, textSel,
   activeReview, focusThreadId, onReviewComment, onReviewReply, onReviewResolve, onReviewViewOriginal,
   vim = false,
 }: {
-  pinned?: FileView; animate: boolean; speed: number; pointer?: number;
+  workspaceScope: string; pinned?: FileView; animate: boolean; speed: number; pointer?: number;
   vim?: boolean; // vim mode: vim keys active, status bar always on, : commands
   // the active view shows a file inside a linked worktree: say so, in orange
   worktreeBanner?: { label: string; onOpen?: () => void };
@@ -1769,7 +1770,7 @@ export function EditorPane({
   );
 
   return (
-    <div className="editorPane" onKeyDown={paneKeys}>
+    <div className="editorPane" data-workspace-scope={workspaceScope} onKeyDown={paneKeys}>
       <div className="tabs">
         <div
           key={`pf${pinnedFlash}`}
@@ -1849,6 +1850,7 @@ export function EditorPane({
         userTab.diff ? (
           userTab.diff.hunks.length ? (
             <DiffView
+              workspaceScope={workspaceScope}
               key={userTab.key}
               file={{ path: userTab.path, mode: 'diff', render: { verb: 'patch_file', hunks: userTab.diff.hunks }, touchedAt: userTab.nonce ?? 0 }}
               animate={false}
@@ -1880,6 +1882,7 @@ export function EditorPane({
           // a virtual file: the chunk the waypoint captured, rendered exactly
           // like a real one — line numbers from the capture position
           <CodeView
+            workspaceScope={workspaceScope}
             key={userTab.key}
             file={{
               path: userTab.path,
@@ -1907,6 +1910,7 @@ export function EditorPane({
           <div className="editorBody imageView"><img src={userTab.image_src} alt={userTab.path} /></div>
         ) : (
           <CodeView
+            workspaceScope={workspaceScope}
             key={userTab.path}
             file={{
               path: userTab.path,
@@ -1950,6 +1954,7 @@ export function EditorPane({
         )
       ) : pinned ? (
         <FileBody
+          workspaceScope={workspaceScope}
           file={pinned}
           animate={animate}
           speed={speed}

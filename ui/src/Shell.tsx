@@ -5,7 +5,7 @@ import { SessionPicker } from './components/SessionPicker';
 import { PALETTE } from './lib/palette';
 import { Settings, type McflySettings } from './components/Settings';
 import { applyKeymap, focusEditor, setLeaders, setTmuxMode, setVimMode } from './lib/keys';
-import { setWorkspaceScope } from './lib/workspace';
+import { normPath } from './lib/timeline';
 import type { SessionMeta } from './types';
 
 // ---- multi-root shell: the URL carries PARALLEL pwd/provider/session query
@@ -349,11 +349,19 @@ export default function Shell() {
 
   const activeInfo = activeId !== undefined ? infos[activeId] : undefined;
   const activeHandle = () => (activeId !== undefined ? handles.current.get(activeId) : undefined);
+  const handleForDir = (dir?: string) => {
+    if (!dir) return undefined;
+    const key = normPath(dir.replace(/[\\/]+$/, ''));
+    const ws = wssRef.current.find((w) => {
+      const p = infosRef.current[w.id]?.cwd ?? infosRef.current[w.id]?.pwd ?? w.url.pwd;
+      return !!p && normPath(p.replace(/[\\/]+$/, '')) === key;
+    });
+    return ws ? handles.current.get(ws.id) : undefined;
+  };
 
-  // the active workspace owns the module-level report scope; in SYNC mode a
-  // linked terminal follows the switch (and a terminal switch follows back)
+  // In SYNC mode, a linked terminal follows the workspace switch (and a
+  // terminal switch follows back).
   useEffect(() => {
-    setWorkspaceScope(activeInfo?.cwd ?? activeInfo?.pwd ?? '');
     if (syncRef.current && activeInfo?.provider && activeInfo.sessionFull) {
       termCtl.current?.showSession(activeInfo.provider, activeInfo.sessionFull);
     }
@@ -370,14 +378,14 @@ export default function Shell() {
     if (i >= 0) setActiveIdx(i);
   }, []);
 
-  // the distinct open project folders, for the terminal picker's chips
+  // the distinct open project folders, for the terminal's project tabs
   const projects = useMemo(() => {
     const seen = new Set<string>();
     const out: string[] = [];
     for (const w of wss) {
       const p = infos[w.id]?.pwd ?? w.url.pwd;
       if (!p) continue;
-      const norm = p.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+      const norm = normPath(p.replace(/[\\/]+$/, ''));
       if (seen.has(norm)) continue;
       seen.add(norm);
       out.push(p);
@@ -438,8 +446,8 @@ export default function Shell() {
             currentSession={activeInfo?.provider && activeInfo.sessionFull
               ? { provider: activeInfo.provider, id: activeInfo.sessionFull } : null}
             linkedRoots={linkedRoots}
-            onToolStart={(tool, dir) => activeHandle()?.onToolStart(tool, dir)}
-            onPtyId={(id, tool, fresh) => activeHandle()?.onPtyStart(id, tool, fresh)}
+            onToolStart={(tool, dir) => (handleForDir(dir) ?? activeHandle())?.onToolStart(tool, dir)}
+            onPtyId={(id, tool, fresh, dir) => (handleForDir(dir) ?? activeHandle())?.onPtyStart(id, tool, fresh)}
             onOpenFileRef={(p, line) => activeHandle()?.openFileRef(p, line)}
             onFollowSession={(s) => followSession(s.pwd || activeInfo?.pwd || '', {
               id: s.id, provider: s.provider,

@@ -1,6 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { callRender, callRenders, parseThreadNames, patchRender, patchRenders, resultRender, splitNumberedResults, toolLabel } from './codex.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { callRender, callRenders, parseThreadNames, patchRender, patchRenders, projectPathKey, resultRender, splitNumberedResults, tailFile, toolLabel } from './codex.js';
+
+test('project path identity folds Windows paths but preserves POSIX case', () => {
+  assert.equal(projectPathKey('C:\\Repo\\App'), projectPathKey('c:/repo/app'));
+  assert.equal(projectPathKey('\\\\Server\\Share\\App'), projectPathKey('//server/share/app'));
+  assert.notEqual(projectPathKey('/repo/App'), projectPathKey('/repo/app'));
+});
 
 test('uses the latest Codex Desktop thread name', () => {
   const names = parseThreadNames([
@@ -55,6 +64,13 @@ test('recovers patch semantics from Codex exec wrappers', () => {
   ]);
   assert.equal(callRenders('apply_patch', multi).length, 2);
 
+  assert.deepEqual(patchRender('*** Begin Patch\n*** Delete File: gone.txt\n*** End Patch'), {
+    verb: 'patch_file', path: 'gone.txt', title: 'gone.txt', removed: true,
+  });
+  const moved = patchRender('*** Begin Patch\n*** Update File: old.txt\n*** Move to: new.txt\n@@\n-old\n+new\n*** End Patch');
+  assert.equal(moved.path, 'new.txt');
+  assert.equal(moved.source_path, 'old.txt');
+
   assert.equal(callRender('exec', 'await tools.shell_command({ command: "rg \'*** Begin Patch\'" });').verb, 'exec');
   const readInput = 'await tools.shell_command({ command: "Get-Content -Raw -LiteralPath \'server/server.js\'", workdir: "C:\\\\repo" });';
   const read = callRender('exec', readInput);
@@ -68,6 +84,47 @@ test('recovers patch semantics from Codex exec wrappers', () => {
       .map(({ verb, path }) => ({ verb, path })),
     [{ verb: 'read_file', path: 'a' }, { verb: 'read_file', path: 'b' }],
   );
+});
+
+test('failed patches remain errors instead of edit results', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcfly-codex-failed-'));
+  const file = path.join(dir, 'rollout.jsonl');
+  const patch = '*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch';
+  const lines = [
+    { type: 'response_item', payload: { type: 'custom_tool_call', call_id: 'failed-patch', name: 'apply_patch', input: patch } },
+    { type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'failed-patch', output: 'apply_patch verification failed: context not found' } },
+  ];
+  try {
+    fs.writeFileSync(file, lines.map(JSON.stringify).join('\n') + '\n');
+    const block = tailFile(file).messages.flatMap((message) => message.content).find((item) => item.type === 'tool_result');
+    assert.equal(block.extended.render.verb, 'exec');
+    assert.equal(block.extended.is_error, true);
+    assert.match(block.extended.render.stderr, /verification failed/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('tail recovers call metadata from before its cursor and preserves unmatched results', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcfly-codex-tail-'));
+  const file = path.join(dir, 'rollout.jsonl');
+  const patch = '*** Begin Patch\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch';
+  const call = JSON.stringify({ type: 'response_item', payload: { type: 'custom_tool_call', call_id: 'recovered-call', name: 'apply_patch', input: patch } }) + '\n';
+  const output = JSON.stringify({ type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'recovered-call', output: 'Success. Updated the following files:\nM a.txt' } }) + '\n';
+  try {
+    fs.writeFileSync(file, call + output);
+    const recovered = tailFile(file, Buffer.byteLength(call)).messages[0].content[0];
+    assert.equal(recovered.tool_request_id, 'recovered-call');
+    assert.equal(recovered.extended.render.verb, 'patch_file');
+
+    fs.writeFileSync(file, JSON.stringify({ type: 'response_item', payload: { type: 'custom_tool_call_output', call_id: 'missing-call', output: 'orphan output' } }) + '\n');
+    const unmatched = tailFile(file).messages[0].content[0];
+    assert.equal(unmatched.tool, 'unmatched result');
+    assert.equal(unmatched.result, 'orphan output');
+    assert.equal(unmatched.extended.is_error, true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('failed commands never masquerade as file reads', () => {

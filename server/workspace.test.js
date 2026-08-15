@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import path from 'node:path';
 
 test('workspace state: ingests snapshots and events, serves filtered queries', async () => {
   const port = 17700 + Math.floor(Math.random() * 200);
@@ -47,6 +48,41 @@ test('workspace state: ingests snapshots and events, serves filtered queries', a
     const merged = await (await fetch(`${base}/api/workspace-state`)).json();
     assert.equal(merged.snapshot.playhead.pointer, 43);
     assert.equal(merged.snapshot.editor.active, 'pinned');
+
+    // Explicit project queries must not fall through to the newest unrelated
+    // scope, and prefix lookalikes are not ancestors.
+    const project = path.join(process.cwd(), 'project');
+    const lookalike = `${project}-old`;
+    await fetch(`${base}/api/workspace-events`, {
+      method: 'POST', body: JSON.stringify({ scope: project, snapshot: { marker: 'right' } }),
+    });
+    await fetch(`${base}/api/workspace-events`, {
+      method: 'POST', body: JSON.stringify({ scope: lookalike, snapshot: { marker: 'wrong' } }),
+    });
+    const matched = await (await fetch(`${base}/api/workspace-state?project=${encodeURIComponent(path.join(project, 'child'))}`)).json();
+    assert.equal(matched.snapshot.marker, 'right');
+    const missing = await (await fetch(`${base}/api/workspace-state?project=${encodeURIComponent(path.join(process.cwd(), 'elsewhere'))}`)).json();
+    assert.equal(missing.scope, null);
+    assert.deepEqual(missing.snapshot, {});
+    assert.deepEqual(missing.events, []);
+
+    await fetch(`${base}/api/workspace-events`, {
+      method: 'POST', body: JSON.stringify({ scope: '/repo/Foo', snapshot: { marker: 'upper' } }),
+    });
+    await fetch(`${base}/api/workspace-events`, {
+      method: 'POST', body: JSON.stringify({ scope: '/repo/foo', snapshot: { marker: 'lower' } }),
+    });
+    const upper = await (await fetch(`${base}/api/workspace-state?project=${encodeURIComponent('/repo/Foo')}`)).json();
+    const lower = await (await fetch(`${base}/api/workspace-state?project=${encodeURIComponent('/repo/foo')}`)).json();
+    assert.equal(upper.snapshot.marker, 'upper');
+    assert.equal(lower.snapshot.marker, 'lower');
+
+    await fetch(`${base}/api/workspace-events`, {
+      method: 'POST', body: JSON.stringify({ scope: '/', snapshot: { marker: 'root' } }),
+    });
+    const rooted = await (await fetch(`${base}/api/workspace-state?project=${encodeURIComponent('/some/project')}`)).json();
+    assert.equal(rooted.scope, '/');
+    assert.equal(rooted.snapshot.marker, 'root');
   } finally {
     server.kill('SIGKILL');
   }

@@ -39,6 +39,17 @@ export function appendMessages(tl: Timeline, messages: Message[]): void {
               isError: block.extended?.is_error,
             };
             tl.pending.delete(block.tool_request_id);
+          } else {
+            // A tail can resume on a result after the server lost its call
+            // metadata. Keep that result inspectable without replaying an
+            // effect whose call-side semantics are unknown.
+            tl.steps.push({
+              kind: 'tool', ts: m.timestamp, tool: block.tool,
+              requestId: block.tool_request_id,
+              call: { verb: 'other', title: block.tool }, params: {},
+              result: block.extended?.render, resultData: block.result,
+              isError: block.extended?.is_error,
+            });
           }
           break;
         }
@@ -190,13 +201,17 @@ function backfillFromFuture(
     if (s.kind !== 'tool' || !s.result) continue;
     const r = s.result;
     const p = r.path ?? s.call.path;
+    const movedFrom = r.source_path && normPath(r.source_path) === want;
+    if (movedFrom) return null;
     if (!p || normPath(p) !== want) continue;
+    if (r.source_path) return null;
     if (r.verb === 'write_file') return null;
     if (r.verb === 'read_file') {
       if (isFullContent(r)) return unwind(r.content!, pending, hunksAtP);
       continue; // slice read: no anchor, but no sever either
     }
     if (r.verb === 'patch_file') {
+      if (r.removed) return null;
       if (!r.hunks) return null;
       if (r.content !== undefined) return unwind(r.content, [...pending, r.hunks], hunksAtP);
       pending.push(r.hunks);
@@ -236,6 +251,7 @@ export interface FileSnapshot {
   region?: { start: number; end: number };
   hunks?: NonNullable<ResultRender['hunks']>;
   image?: boolean;
+  removed?: boolean;
 }
 
 const TOUCH_VERBS = new Set<RenderVerb>(['read_file', 'patch_file', 'write_file']);
@@ -244,7 +260,15 @@ const TOUCH_VERBS = new Set<RenderVerb>(['read_file', 'patch_file', 'write_file'
 // separators and drive-letter casing; fold case only for Windows-style paths —
 // on POSIX, Foo.ts and foo.ts are different files
 export const normPath = (p: string) =>
-  (/^[a-zA-Z]:[\\/]|\\/.test(p) ? p.replace(/\//g, '\\').toLowerCase() : p);
+  (/^[a-zA-Z]:[\\/]|\\|^\/\//.test(p) ? p.replace(/\//g, '\\').toLowerCase() : p);
+
+export const pathWithin = (candidate: string, root: string) => {
+  const child = normPath(candidate);
+  const parent = normPath(root);
+  if (!parent) return false;
+  const sep = parent.includes('\\') ? '\\' : '/';
+  return child === parent || child.startsWith(parent.endsWith(sep) ? parent : `${parent}${sep}`);
+};
 
 export function fileChain(steps: Step[], path: string): { touches: FileTouch[]; snapshots: Map<number, FileSnapshot> } {
   const want = normPath(path);
@@ -255,7 +279,8 @@ export function fileChain(steps: Step[], path: string): { touches: FileTouch[]; 
     if (s.kind !== 'tool' || !s.result) continue;
     const r = s.result;
     const p = r.path ?? s.call.path;
-    if (!p || normPath(p) !== want || !TOUCH_VERBS.has(r.verb)) continue;
+    const matches = (p && normPath(p) === want) || (r.source_path && normPath(r.source_path) === want);
+    if (!matches || !TOUCH_VERBS.has(r.verb)) continue;
     touches.push({ index: i, verb: r.verb, ts: s.ts });
   }
 
@@ -268,6 +293,20 @@ export function fileChain(steps: Step[], path: string): { touches: FileTouch[]; 
 
   for (const t of touches) {
     const r = (steps[t.index] as Step & { kind: 'tool' }).result!;
+    const movedAway = r.source_path && normPath(r.source_path) === want && normPath(r.path ?? '') !== want;
+    if (r.removed || movedAway) {
+      content = undefined;
+      blame = undefined;
+      snapshots.set(t.index, { removed: true });
+      continue;
+    }
+    if (r.source_path && normPath(r.path ?? '') === want) {
+      // ponytail: re-fold only at rare rename boundaries; share reducer state
+      // if rename-heavy histories ever make this path measurable.
+      const source = foldState(steps, t.index - 1).tabs.find((tab) => normPath(tab.path) === normPath(r.source_path!));
+      content = source?.render.content;
+      blame = content === undefined ? undefined : freshBlame(content, null);
+    }
     if (r.verb === 'read_file') {
       if (r.image_src) { snapshots.set(t.index, { image: true }); continue; }
       const eol = (s: string) => s.replace(/\r\n/g, '\n');
@@ -300,6 +339,10 @@ export function fileChain(steps: Step[], path: string): { touches: FileTouch[]; 
       blame = freshBlame(written, t.index);
       snapshots.set(t.index, { content, blame });
     } else {
+      if (content !== undefined && r.source_path && !r.hunks?.length) {
+        snapshots.set(t.index, { content, blame });
+        continue;
+      }
       if (content !== undefined && r.hunks) {
         const res = applyPatch(content, r.hunks, blame, t.index);
         if (res) {
@@ -347,6 +390,16 @@ const SHELL_RESET = /Shell cwd was reset to /;
 
 export function foldState(steps: Step[], pointer: number): ViewState {
   const byPath = new Map<string, FileView>();
+  const takeView = (path: string, remove = false): FileView | undefined => {
+    const want = normPath(path);
+    for (const [key, view] of byPath) {
+      if (normPath(key) === want) {
+        if (remove || key !== path) byPath.delete(key);
+        return view;
+      }
+    }
+    return undefined;
+  };
   const term: TermBlock[] = [];
   const pushTerm = (b: TermBlock) => {
     if (SHELL_RESET.test(b.stdout) || SHELL_RESET.test(b.stderr)) {
@@ -392,27 +445,44 @@ export function foldState(steps: Step[], pointer: number): ViewState {
         }
       }
     }
+    if (r?.verb === 'exec' && !['exec', 'read_file', 'data'].includes(s.call.verb)) {
+      pushTerm({
+        command: s.call.command ?? s.tool,
+        stdout: r.stdout ?? '', stderr: r.stderr ?? '', interrupted: !!r.interrupted, at: i,
+      });
+    }
     switch (s.call.verb) {
       case 'read_file': {
         // image results carry no path of their own; the call side has it
         const path = r?.path ?? s.call.path;
         if (r?.verb === 'read_file' && path) {
+          takeView(path);
           byPath.set(path, { path, mode: r.image_src ? 'image' : 'file', render: r, touchedAt: i });
         }
-        if (s.call.command) pushTerm({ command: s.call.command, stdout: r?.stdout ?? '', stderr: r?.stderr ?? '', interrupted: !!r?.interrupted, at: i });
+        if (s.call.command || r?.verb === 'exec') pushTerm({ command: s.call.command ?? s.tool, stdout: r?.stdout ?? '', stderr: r?.stderr ?? '', interrupted: !!r?.interrupted, at: i });
         break;
       }
       case 'patch_file': {
         if (r?.verb === 'patch_file' && r.path) {
-          const prior = byPath.get(r.path)?.render.content;
-          const applied = r.content === undefined && prior !== undefined && r.hunks ? applyPatch(prior, r.hunks) : null;
-          const render = applied ? { ...r, ...applied, start_line: 1, total_lines: applied.content.split(/\r?\n/).length } : r;
+          const prior = takeView(r.source_path ?? r.path, !!r.source_path || !!r.removed)?.render.content;
+          if (r.removed) break;
+          if (r.source_path) takeView(r.path, true);
+          let render: ResultRender = r;
+          if (r.content === undefined && prior !== undefined) {
+            const applied = r.hunks?.length ? applyPatch(prior, r.hunks) : null;
+            if (applied) {
+              render = { ...r, ...applied, start_line: 1, total_lines: applied.content.split(/\r?\n/).length };
+            } else if (r.source_path && !r.hunks?.length) {
+              render = { ...r, content: prior, start_line: 1, total_lines: prior.split(/\r?\n/).length };
+            }
+          }
           byPath.set(r.path, { path: r.path, mode: render.content === undefined ? 'diff' : 'file', render, touchedAt: i });
         }
         break;
       }
       case 'write_file': {
         if (r?.verb === 'write_file' && r.path) {
+          takeView(r.path);
           byPath.set(r.path, { path: r.path, mode: 'file', render: r, touchedAt: i });
         }
         break;
