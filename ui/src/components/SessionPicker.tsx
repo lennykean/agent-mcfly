@@ -18,6 +18,21 @@ export function SessionPicker({ initialPwd, initialProvider, initialFilter, onPi
 }) {
   // the currently-open project wins; last-used pwd only seeds a bare open
   const [pwd, setPwd] = useState(() => initialPwd || localStorage.getItem('mcfly.lastPwd') || '');
+
+  // Escape ALWAYS cancels the dialog, wherever focus sits (window capture:
+  // the inputs and the app's key engine never see it)
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    const on = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      e.preventDefault();
+      e.stopPropagation();
+      onCloseRef.current();
+    };
+    window.addEventListener('keydown', on, true);
+    return () => window.removeEventListener('keydown', on, true);
+  }, []);
   const [providers, setProviders] = useState<ProviderInfo[] | null>(null);
   const [provider, setProvider] = useState<string>();
   const [sessions, setSessions] = useState<SessionMeta[] | null>(null);
@@ -73,11 +88,25 @@ export function SessionPicker({ initialPwd, initialProvider, initialFilter, onPi
 
   useEffect(() => {
     const dir = initialPwd || localStorage.getItem('mcfly.lastPwd');
-    if (dir) { setPwd(dir); loadProviders(dir); return; }
+    if (dir) { setPwd(dir); return; } // the pwd effect below loads it
     fetch('/api/config').then((r) => r.json()).then((d) => {
       if (typeof d.pwd === 'string') setPwd((current) => current || d.pwd);
     }).catch(() => {});
   }, [initialPwd]); // eslint-disable-line react-hooks/exhaustive-deps
+  // the project field is LIVE: editing it reloads that folder's agents and
+  // sessions right here in the dialog (debounced while typing) — changing
+  // projects must never require "opening" the folder first
+  const loadedDir = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const dir = pwd.trim().replace(/[\\/]+$/, '');
+    if (!dir || dir === loadedDir.current) return;
+    const t = setTimeout(() => {
+      loadedDir.current = dir;
+      loadProviders(dir);
+    }, 450);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pwd]);
   useEffect(() => { if (sessions) filterRef.current?.focus(); }, [sessions]);
 
   // seeded open (follow-resolve): jump straight to the agent's sessions,
@@ -116,11 +145,18 @@ export function SessionPicker({ initialPwd, initialProvider, initialFilter, onPi
             className="pickerInput"
             value={pwd}
             onChange={(e) => setPwd(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') go(pwd); }}
+            onKeyDown={(e) => {
+              // Enter = load THIS folder's sessions now (never a bare open)
+              if (e.key !== 'Enter') return;
+              const dir = pwd.trim().replace(/[\\/]+$/, '');
+              if (!dir) return;
+              loadedDir.current = dir;
+              loadProviders(dir);
+            }}
             spellCheck={false}
           />
           <button title="Browse folders" onClick={() => setBrowse((b) => (b === null ? (pwd.trim() || 'C:\\') : null))}>…</button>
-          <button onClick={() => go(pwd)} title="Open this folder; pick a session below if you want one">go</button>
+          <button onClick={() => go(pwd)} title="Open the folder bare — no session; sessions load below as you type">folder only</button>
         </div>
 
         {browse !== null && (
@@ -137,14 +173,16 @@ export function SessionPicker({ initialPwd, initialProvider, initialFilter, onPi
               {browseDirs?.length === 0 && <div className="pickerHint">no subfolders</div>}
             </div>
             <div className="fbActions">
-              <button onClick={() => go(browse)}>open this folder</button>
+              <button onClick={() => { setPwd(browse); setBrowse(null); }}>use this folder</button>
               <button onClick={() => setBrowse(null)}>cancel</button>
             </div>
           </div>
         )}
 
-        {scanning && <div className="pickerHint">scanning session history…</div>}
-        {providers && (
+        {/* the browser replaces the agent/session sections while open — both
+            at once squeeze the modal past its height and the rows overlap */}
+        {browse === null && scanning && <div className="pickerHint">scanning session history…</div>}
+        {browse === null && providers && (
           <div className="pickerRow">
             <span className="pickerLabel">agent</span>
             {providers.map((p) => (
@@ -161,7 +199,7 @@ export function SessionPicker({ initialPwd, initialProvider, initialFilter, onPi
           </div>
         )}
 
-        {provider && (
+        {browse === null && provider && (
           sessions === null ? <div className="pickerHint">loading sessions…</div> : (
             <>
               <div className="pickerRow">

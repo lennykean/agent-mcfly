@@ -1,23 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useReplay } from './hooks/useReplay';
-import { AgentTree } from './components/AgentTree';
+import { useReplay, type AgentNode } from './hooks/useReplay';
+import { AgentTree, type TreeAgent } from './components/AgentTree';
+import { PALETTE, tintOver } from './lib/palette';
 import { ChatPane } from './components/ChatPane';
 import { DataPane } from './components/DataPane';
 import { EditorPane, type UserTab } from './components/EditorPane';
 import { Explorer } from './components/Explorer';
 import { GitPane, type GitFile, type GitSelection } from './components/GitPane';
 import { FileTimeline } from './components/FileTimeline';
-import { LiveTerm } from './components/LivePane';
 import { SessionPicker } from './components/SessionPicker';
 import { Wayfinder } from './components/Wayfinder';
 import { Splitter } from './components/Splitter';
 import { HumanReview } from './components/HumanReview';
 import { HistoryBar } from './components/HistoryBar';
+import type { TermCtl } from './components/LivePane';
 import type { Review, ReviewComment, SessionMeta } from './types';
 import { normPath, resolveWaypoint, type WaypointEntry } from './lib/timeline';
-import { APP_CHORDS, actionOf, applyKeymap, focusEditor, justArmed, setLeaders, setTmuxMode, setVimMode, termReleasedChord } from './lib/keys';
+import { APP_CHORDS, actionOf, focusEditor, justArmed, termReleasedChord } from './lib/keys';
 import { QuickPick } from './components/QuickPick';
-import { Settings, type McflySettings } from './components/Settings';
+import type { McflySettings } from './components/Settings';
 import { emit, onEditorSelection, updateSnapshot, watchSelections } from './lib/workspace';
 import { applySelect, clickMode } from './lib/select';
 import { Terminal } from './components/Terminal';
@@ -29,7 +30,69 @@ const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v
 
 // URLs carry the bare session id (basename, no extension); the full transcript
 // path re-derives from pwd + provider via the session list
-const shortSessionId = (id: string) => (id.split('/').pop() ?? id).replace(/\.[^.]+$/, '');
+export const shortSessionId = (id: string) => (id.split('/').pop() ?? id).replace(/\.[^.]+$/, '');
+
+// ---- multi-root: the Shell mounts one Workbench per root workspace (all stay
+// mounted, only the active one is visible); this is the contract between them ----
+export interface UrlState { pwd?: string; provider?: string; session?: string }
+// what a workbench reports upward: drives the URL and the roots list
+export interface WsInfo {
+  pwd?: string; cwd?: string; provider?: string;
+  sessionShort?: string; sessionFull?: string; label?: string;
+  agents?: AgentNode[];
+}
+export interface RootInfo {
+  id: number; label: string; active: boolean; hasSession: boolean;
+  pwd?: string;
+  color?: string; // ephemeral hue, assigned when 2+ roots exist
+  colorIndex?: number;
+  agents?: AgentNode[];
+}
+// imperative reach-in for shell-routed flows (terminal follow, session hunts)
+export interface WorkbenchHandle {
+  applyPick: (pwd: string, s: SessionMeta) => void;
+  followResolve: (p: { id?: string; title?: string | null; cwd: string }) => void;
+  onToolStart: (tool: string, dir?: string) => void;
+  onPtyStart: (id: string, tool: string, fresh: boolean) => void;
+  openFileRef: (p: string, line?: number) => void;
+  openAgent: (key: string) => void;
+}
+
+export interface WorkbenchProps {
+  wsId: number;
+  active: boolean;
+  url: UrlState; // desired state from the URL; the workbench adopts changes
+  roots: RootInfo[];
+  onState: (wsId: number, info: WsInfo) => void;
+  onAddRoot: () => void;
+  onCloseRoot: (wsId: number) => void;
+  // a subagent row of ANOTHER root was picked: switch there and open it
+  onSelectAgent: (wsId: number, key: string) => void;
+  // a session appeared for a terminal launched here — the shell decides
+  // whether it lands in this workbench, an existing one, or nowhere
+  onSessionFound: (pwd: string, s: SessionMeta) => void;
+  // the user picked a session in THIS workbench's picker; the shell dedupes
+  // (already open elsewhere → switch there)
+  onPickSession: (wsId: number, pwd: string, s: SessionMeta) => void;
+  // a session picked to FOLLOW a terminal: ties the pty and ATTACHES a root
+  // (never replaces what this workbench is watching)
+  onFollowedPick: (pwd: string, s: SessionMeta, ptyId?: string) => void;
+  // terminals⇄workbench sync mode: the titlebar link toggle
+  sync: boolean;
+  onToggleSync: () => void;
+  // AGENTS tree folds, shell-owned: one truth across every workbench
+  treeCollapsed: ReadonlySet<string>;
+  onTreeToggle: (key: string) => void;
+  onPickColor: (colorIndex: number) => void;
+  settings: McflySettings | null;
+  onOpenSettings: (page: 'settings' | 'keys') => void;
+  termCtl: React.MutableRefObject<TermCtl | null>;
+  termSlot: (wsId: number, el: HTMLDivElement | null) => void;
+  registerHandle: (wsId: number, h: WorkbenchHandle | null) => void;
+}
+
+// tree keys are `<wsId>\0<agent key>`; \0 cannot appear in session ids
+const SEP = '\u0000';
 
 function usePanelSize(key: string, initial: number, lo: number, hi: number) {
   const [size, setSize] = useState(() => {
@@ -55,8 +118,18 @@ function useStoredTab<T extends string>(key: string, initial: T) {
   return [v, setV] as const;
 }
 
-export default function App() {
-  const r = useReplay();
+export default function Workbench({
+  wsId, active, url, roots, onState, onAddRoot, onCloseRoot, onSelectAgent, onSessionFound,
+  onPickSession, onFollowedPick,
+  sync, onToggleSync, treeCollapsed, onTreeToggle, onPickColor,
+  settings, onOpenSettings, termCtl, termSlot, registerHandle,
+}: WorkbenchProps) {
+  const r = useReplay(active);
+  // hidden workbenches stay mounted (state retention) but must not act on
+  // global surfaces: window keys, the snapshot, the document title
+  const activeRef = useRef(active);
+  activeRef.current = active;
+  const appRef = useRef<HTMLDivElement>(null);
   const [sideW, dragSide] = usePanelSize('sideW', 300, 180, 640);
   const [rightW, dragRight] = usePanelSize('chatW', 420, 260, 1000);
   const [editPct, dragEdit] = usePanelSize('editPct', 60, 15, 90);
@@ -74,54 +147,54 @@ export default function App() {
   const [timelinePath, setTimelinePath] = useState<string>();
   const [pwd, setPwd] = useState<string>();
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [colorPick, setColorPick] = useState(false);
   const centerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => { if (pwd) localStorage.setItem('mcfly.lastPwd', pwd); }, [pwd]);
 
-  // URL is the source of truth: ?pwd=&provider=&session= loads that view;
-  // bare startup scopes to the server's pwd with nothing loaded.
+  // the URL (via the shell) is the source of truth: the `url` prop carries
+  // this workspace's desired pwd/provider/session; adopting is idempotent —
+  // once state matches, the effect no-ops, so report→shell→prop cannot loop
   const { selectSession } = r;
-  const loadFromUrl = useCallback(async () => {
-    const q = new URLSearchParams(location.search);
-    const uPwd = q.get('pwd') ?? undefined;
-    const provider = q.get('provider');
-    const sid = q.get('session');
-    // bare URL = truly bare: no folder, no session, until the user opens one
-    if (uPwd) setPwd(uPwd);
-    if (uPwd && provider && sid) {
-      let meta: SessionMeta | undefined;
-      try {
-        const list: SessionMeta[] = await (
-          await fetch(`/api/sessions?pwd=${encodeURIComponent(uPwd)}&provider=${encodeURIComponent(provider)}`)
-        ).json();
-        meta = Array.isArray(list) ? list.find((s) => s.id === sid || shortSessionId(s.id) === sid) : undefined;
-      } catch { /* fall through to minimal meta */ }
-      selectSession(meta ?? { id: sid, provider, label: sid.split('/').pop() ?? sid, cwd: uPwd, updated_at: 0, size: 0 });
+  const sessionRef = useRef(r.session);
+  sessionRef.current = r.session;
+  useEffect(() => {
+    const want = url;
+    if (want.pwd) setPwd((cur) => (cur === want.pwd ? cur : want.pwd));
+    const cur = sessionRef.current;
+    const curSid = cur ? shortSessionId(cur.id) : undefined;
+    if (want.pwd && want.provider && want.session
+      && (want.session !== curSid || want.provider !== cur?.provider)) {
+      const { pwd: uPwd, provider, session: sid } = want as Required<UrlState>;
+      void (async () => {
+        let meta: SessionMeta | undefined;
+        try {
+          const list: SessionMeta[] = await (
+            await fetch(`/api/sessions?pwd=${encodeURIComponent(uPwd)}&provider=${encodeURIComponent(provider)}`)
+          ).json();
+          meta = Array.isArray(list) ? list.find((s) => s.id === sid || shortSessionId(s.id) === sid) : undefined;
+        } catch { /* fall through to minimal meta */ }
+        selectSession(meta ?? { id: sid, provider, label: sid.split('/').pop() ?? sid, cwd: uPwd, updated_at: 0, size: 0 });
+      })();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectSession]);
-
-  useEffect(() => {
-    void loadFromUrl();
-    const onPop = () => void loadFromUrl();
-    window.addEventListener('popstate', onPop);
-    return () => window.removeEventListener('popstate', onPop);
-  }, [loadFromUrl]);
+  }, [url, selectSession]);
 
   const applyPick = useCallback((newPwd: string, s: SessionMeta) => {
     setPwd(newPwd);
     setPickerOpen(false);
     setUserTabs([]);
     setEditorTab('pinned');
-    selectSession(s);
-    history.pushState(null, '', `?${new URLSearchParams({ pwd: newPwd, provider: s.provider, session: shortSessionId(s.id) })}`);
+    selectSession(s); // the state report to the shell writes the URL
   }, [selectSession]);
 
   // follow on a terminal whose session the title could not settle: session
   // names fully contained in the title are the candidates — exactly one
-  // follows straight away, anything else asks via the picker (pre-filtered)
-  const [pickerSeed, setPickerSeed] = useState<{ pwd?: string; provider?: string; filter?: string }>();
-  const followResolve = useCallback(async (p: { title?: string | null; cwd: string }) => {
+  // follows straight away, anything else asks via the picker (pre-filtered).
+  // A followed pick TIES the terminal and ATTACHES — it never replaces the
+  // session already open here.
+  const [pickerSeed, setPickerSeed] = useState<{ pwd?: string; provider?: string; filter?: string; followPty?: string }>();
+  const followResolve = useCallback(async (p: { id?: string; title?: string | null; cwd: string }) => {
     const dir = p.cwd || pwd || '';
     const cands: { provider: string; s: SessionMeta }[] = [];
     for (const provider of ['claude-code', 'codex']) {
@@ -135,11 +208,13 @@ export default function App() {
         }
       } catch { /* picker fallback */ }
     }
-    if (cands.length === 1) { applyPick(dir, cands[0].s); return; }
-    setPickerSeed({ pwd: dir, provider: cands[0]?.provider, filter: cands[0]?.s.label });
+    if (cands.length === 1) { onFollowedPick(dir, cands[0].s, p.id); return; }
+    // '' still marks the pick as a FOLLOW (attach semantics) when the pty
+    // id is unknown — only the labeling is skipped then
+    setPickerSeed({ pwd: dir, provider: cands[0]?.provider, filter: cands[0]?.s.label, followPty: p.id ?? '' });
     setPickerOpen(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pwd, applyPick]);
+  }, [pwd, wsId, onFollowedPick]);
 
   const { clearSession } = r;
   // "go" in the picker: the workbench opens the folder BARE, right away —
@@ -149,9 +224,25 @@ export default function App() {
     setUserTabs([]);
     setEditorTab('pinned');
     clearSession();
-    history.pushState(null, '', `?${new URLSearchParams({ pwd: newPwd })}`);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [clearSession]);
+
+  // report this workspace's identity upward: the shell writes the URL from
+  // it (parallel pwd/provider/session arrays) and builds the roots list.
+  // While the session is still loading, the URL intent stands in — reporting
+  // "no session yet" would strip the session out of the URL mid-load.
+  useEffect(() => {
+    onState(wsId, {
+      pwd: pwd ?? url.pwd,
+      cwd: pwd ?? r.session?.cwd ?? url.pwd,
+      provider: r.session?.provider ?? url.provider,
+      sessionShort: r.session ? shortSessionId(r.session.id) : url.session,
+      sessionFull: r.session?.id,
+      label: r.session ? (r.session.label || r.session.id.slice(0, 8)) : undefined,
+      agents: r.agents.length > 1 ? r.agents : undefined,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wsId, pwd, r.session, url, r.agents]);
 
   // Session detection: a tool started in the live terminal announces itself by
   // writing its transcript; poll this pwd's session list and auto-load the one
@@ -159,12 +250,14 @@ export default function App() {
   const TOOL_PROVIDERS: Record<string, string> = { claude: 'claude-code', codex: 'codex' };
   // one hunt per launch, each remembering which PTY it came from — a second
   // terminal starting mid-hunt must not steal or clobber the first's identity
-  const [hunts, setHunts] = useState<{ key: number; provider: string; tool: string; since: number; ptyId?: string; adopt?: boolean }[]>([]);
+  const [hunts, setHunts] = useState<{ key: number; provider: string; tool: string; since: number; dir?: string; ptyId?: string; adopt?: boolean }[]>([]);
   const huntKey = useRef(1);
   const claimed = useRef(new Set<string>());
-  const onToolStart = useCallback((tool: string) => {
+  // dir = the project the terminal actually launched in (may differ from
+  // this workbench's pwd once several projects are open)
+  const onToolStart = useCallback((tool: string, dir?: string) => {
     const provider = TOOL_PROVIDERS[tool];
-    if (provider) setHunts((hs) => [...hs, { key: huntKey.current++, provider, tool, since: Date.now() }]);
+    if (provider) setHunts((hs) => [...hs, { key: huntKey.current++, provider, tool, since: Date.now(), dir }]);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const onPtyStart = useCallback((id: string, tool: string, fresh: boolean) => {
@@ -186,7 +279,7 @@ export default function App() {
   }, []);
   const sessionId = r.session?.id;
   useEffect(() => {
-    if (!hunts.length || !pwd) return;
+    if (!hunts.length) return;
     const id = setInterval(async () => {
       const now = Date.now();
       if (hunts.some((h) => now - h.since > 120_000)) {
@@ -194,9 +287,11 @@ export default function App() {
         return;
       }
       for (const h of hunts) {
+        const dir = h.dir ?? pwd;
+        if (!dir) continue;
         try {
           const list: SessionMeta[] = await (
-            await fetch(`/api/sessions?pwd=${encodeURIComponent(pwd)}&provider=${encodeURIComponent(h.provider)}`)
+            await fetch(`/api/sessions?pwd=${encodeURIComponent(dir)}&provider=${encodeURIComponent(h.provider)}`)
           ).json();
           const cand = Array.isArray(list)
             ? (h.adopt
@@ -209,26 +304,40 @@ export default function App() {
             setHunts((hs) => hs.filter((x) => x.key !== h.key));
             void fetch('/api/pty-session', {
               method: 'POST',
-              body: JSON.stringify({ ptyId: h.ptyId, provider: cand.provider, session: cand.id, pwd }),
+              body: JSON.stringify({ ptyId: h.ptyId, provider: cand.provider, session: cand.id, pwd: dir }),
             });
             continue;
           }
           claimed.current.add(cand.id);
           setHunts((hs) => hs.filter((x) => x.key !== h.key));
-          applyPick(pwd, cand);
+          onSessionFound(dir, cand); // the shell routes it: here, elsewhere, or a new root
           // label the PTY with its transcript so the live-terminal picker can offer it
           if (h.ptyId) {
             void fetch('/api/pty-session', {
               method: 'POST',
-              body: JSON.stringify({ ptyId: h.ptyId, provider: cand.provider, session: cand.id, pwd }),
+              body: JSON.stringify({ ptyId: h.ptyId, provider: cand.provider, session: cand.id, pwd: dir }),
             });
           }
         } catch { /* retry next tick */ }
       }
     }, 3000);
     return () => clearInterval(id);
-  }, [hunts, pwd, sessionId, applyPick]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hunts, pwd, sessionId, onSessionFound]);
 
+  // the shell reaches in for terminal-driven flows (the live terminal pane
+  // is shell-owned and shared across workbenches)
+  const termSlotCb = useCallback((el: HTMLDivElement | null) => termSlot(wsId, el), [wsId, termSlot]);
+  const openFileRefFwd = useRef<(p: string, line?: number) => void>(() => {});
+  const openAgentFwd = useRef<(key: string) => void>(() => {});
+  useEffect(() => {
+    registerHandle(wsId, {
+      applyPick, followResolve, onToolStart, onPtyStart,
+      openFileRef: (p, line) => openFileRefFwd.current(p, line),
+      openAgent: (key) => openAgentFwd.current(key),
+    });
+    return () => registerHandle(wsId, null);
+  }, [wsId, registerHandle, applyPick, followResolve, onToolStart, onPtyStart]);
 
   const folder = pwd?.replace(/[\\/]+$/, '').split(/[\\/]/).pop();
 
@@ -241,6 +350,7 @@ export default function App() {
       .catch(() => { /* title just shows the full path */ });
   }, []);
   useEffect(() => {
+    if (!active) return; // the visible workbench owns the title
     const tildePwd = pwd && home && pwd.toLowerCase().startsWith(home.toLowerCase())
       ? `~${pwd.slice(home.length)}` : pwd;
     document.title = [
@@ -248,7 +358,7 @@ export default function App() {
       tildePwd,
       'Agent McFly',
     ].filter(Boolean).join(' - ');
-  }, [pwd, home, r.session]);
+  }, [active, pwd, home, r.session]);
 
   // the global key handler lives further down, after the state it drives
   // (editor order, active path) is declared
@@ -333,7 +443,7 @@ export default function App() {
       back?.focus();
     };
     const descend = (rootSel: string) => requestAnimationFrame(() => requestAnimationFrame(() => {
-      const body = document.querySelector(`${rootSel} .tabBody:not(.hiddenTab)`) as HTMLElement | null;
+      const body = appRef.current?.querySelector(`${rootSel} .tabBody:not(.hiddenTab)`) as HTMLElement | null;
       const el = (body?.querySelector('[tabindex]') as HTMLElement | null)
         ?? (body?.hasAttribute('tabindex') ? body : null)
         ?? (body?.querySelector('textarea') as HTMLElement | null);
@@ -374,11 +484,81 @@ export default function App() {
 
   const { switchView } = r;
   const openAgent = useCallback((key: string) => switchView(key, key), [switchView]);
+  openAgentFwd.current = openAgent;
+
+  // ---- the multi-root agents tree: WORKSPACE group rows (same-folder roots
+  // share one; grouping only, not openable) > root agents > subagents. Keys
+  // carry the owning root so one walker serves the whole panel. ----
+  const treeAgents = useMemo<TreeAgent[]>(() => {
+    const out: TreeAgent[] = [];
+    const groups = new Map<string, string>();
+    for (const rt of roots) {
+      const color = roots.length > 1 ? rt.color : undefined;
+      let parent: string | null = null;
+      if (rt.pwd) {
+        const norm = normPath(rt.pwd).toLowerCase();
+        let gk = groups.get(norm);
+        if (!gk) {
+          gk = `g${SEP}${norm}`;
+          groups.set(norm, gk);
+          out.push({
+            key: gk, parentKey: null, kind: 'workspace', pwd: rt.pwd,
+            label: rt.pwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? rt.pwd,
+          });
+        }
+        parent = gk;
+      }
+      const list = rt.active
+        ? r.agents
+        : (rt.agents?.length ? rt.agents : [{ key: 'main', parentKey: null, label: rt.label } as AgentNode]);
+      for (const a of list) {
+        out.push({
+          ...a,
+          key: `${rt.id}${SEP}${a.key}`,
+          parentKey: a.parentKey === null ? parent : `${rt.id}${SEP}${a.parentKey}`,
+          label: a.parentKey === null ? rt.label : a.label,
+          root: a.parentKey === null,
+          color,
+        });
+      }
+    }
+    return out;
+  }, [roots, r.agents]);
+  const onTreeSelect = useCallback((k: string) => {
+    const i = k.indexOf(SEP);
+    if (i < 0) return;
+    const rid = Number(k.slice(0, i));
+    const inner = k.slice(i + SEP.length);
+    if (rid === wsId) {
+      if (!r.session) { setPickerOpen(true); return; }
+      openAgent(inner);
+    } else onSelectAgent(rid, inner);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wsId, r.session, openAgent, onSelectAgent]);
+  const onTreeCloseRoot = useCallback((k: string) => {
+    const i = k.indexOf(SEP);
+    if (i > 0) onCloseRoot(Number(k.slice(0, i)));
+  }, [onCloseRoot]);
+  // the folder row's terminal icon: a new shell in THAT project
+  const onTreeOpenTerminal = useCallback((k: string) => {
+    const dir = treeAgents.find((a) => a.key === k)?.pwd;
+    if (!dir) return;
+    setRightOpen(true);
+    setRightTab('term');
+    termCtl.current?.startNew(dir);
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      ([...(appRef.current?.querySelectorAll('.livePane .xterm-helper-textarea') ?? [])]
+        .find((x) => (x as HTMLElement).offsetParent !== null) as HTMLElement | undefined)?.focus();
+    }));
+  }, [treeAgents, termCtl, setRightOpen, setRightTab]);
+  const activeRoot = roots.find((rt) => rt.active);
+  const activeColor = roots.length > 1 ? activeRoot?.color : undefined;
 
   // ---- workspace reporting: what the user has open/focused/selected, so
   // agents can query it via the workspace_state MCP tool ----
   useEffect(() => { watchSelections(); }, []);
   useEffect(() => {
+    if (!active) return; // only the visible workbench reports; its scope is set by the shell
     updateSnapshot({
       session: r.session ? { provider: r.session.provider, id: r.session.id } : null,
       playhead: { pointer: r.pointer, head: r.head, playing: r.playing, speed: r.speed },
@@ -390,28 +570,33 @@ export default function App() {
       },
       panels: { left: leftTab, right: rightTab, bottom: bottomOpen ? bottomTab : null },
     });
-  }, [r.session, r.pointer, r.head, r.playing, r.speed, r.view.activePath, editorTab, timelinePath, userTabs, leftTab, rightTab, bottomTab, bottomOpen]);
+  }, [active, r.session, r.pointer, r.head, r.playing, r.speed, r.view.activePath, editorTab, timelinePath, userTabs, leftTab, rightTab, bottomTab, bottomOpen]);
 
+  // event emits gate on the ref (no `active` dep): a workspace switch must
+  // not replay the current tab/pane state into the event history
+  const wsEmit = useCallback((ev: Parameters<typeof emit>[0]) => {
+    if (activeRef.current) emit(ev);
+  }, []);
   const prevTabKeys = useRef<string[]>([]);
   useEffect(() => {
     const cur = userTabs.map((t) => t.key);
     for (const t of userTabs) {
       if (!prevTabKeys.current.includes(t.key)) {
-        emit({ kind: 'file_open', path: t.path, flavor: t.snapshot ? 'snapshot' : 'read-only' });
+        wsEmit({ kind: 'file_open', path: t.path, flavor: t.snapshot ? 'snapshot' : 'read-only' });
       }
     }
-    for (const k of prevTabKeys.current) if (!cur.includes(k)) emit({ kind: 'file_close', key: k });
+    for (const k of prevTabKeys.current) if (!cur.includes(k)) wsEmit({ kind: 'file_close', key: k });
     prevTabKeys.current = cur;
-  }, [userTabs]);
-  useEffect(() => { emit({ kind: 'tab_focus', tab: editorTab }); }, [editorTab]);
+  }, [userTabs, wsEmit]);
+  useEffect(() => { wsEmit({ kind: 'tab_focus', tab: editorTab }); }, [editorTab, wsEmit]);
   useEffect(() => {
-    if (timelinePath) emit({ kind: 'file_open', path: timelinePath, flavor: 'timeline' });
-  }, [timelinePath]);
-  useEffect(() => { emit({ kind: 'pane_switch', bottom: bottomTab }); }, [bottomTab]);
-  useEffect(() => { emit({ kind: 'pane_switch', right: rightTab }); }, [rightTab]);
+    if (timelinePath) wsEmit({ kind: 'file_open', path: timelinePath, flavor: 'timeline' });
+  }, [timelinePath, wsEmit]);
+  useEffect(() => { wsEmit({ kind: 'pane_switch', bottom: bottomTab }); }, [bottomTab, wsEmit]);
+  useEffect(() => { wsEmit({ kind: 'pane_switch', right: rightTab }); }, [rightTab, wsEmit]);
   const wsSessionId = r.session?.id;
   useEffect(() => {
-    if (r.session) emit({ kind: 'session_open', provider: r.session.provider, id: r.session.id });
+    if (r.session) wsEmit({ kind: 'session_open', provider: r.session.provider, id: r.session.id });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wsSessionId]);
 
@@ -424,7 +609,7 @@ export default function App() {
     if (pendingSeek.current) clearTimeout(pendingSeek.current.timer);
     const from = pendingSeek.current?.from ?? trailPointer.current;
     const timer = window.setTimeout(() => {
-      emit({ kind: 'seek', from, to: trailPointer.current });
+      wsEmit({ kind: 'seek', from, to: trailPointer.current });
       pendingSeek.current = null;
     }, 800);
     pendingSeek.current = { from, timer };
@@ -441,56 +626,11 @@ export default function App() {
 
   // auto-follow: ON = the view jumps to activity (tour-guide mode); OFF = the
   // same things happen quietly, and the tab that had activity flashes instead
-  // ---- settings: persisted server-side in ~/.mcfly/settings.json. The
-  // topbar eye/LIVE buttons are in-the-moment; autoTour/autoLive are the
+  // ---- settings live in the Shell (persisted in ~/.mcfly/settings.json,
+  // one popover, one keymap module sync); this workbench just reads them.
+  // The topbar eye/LIVE buttons are in-the-moment; autoTour/autoLive are the
   // START states applied when a session opens. ----
-  const [settings, setSettings] = useState<McflySettings | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState<false | 'settings' | 'keys'>(false);
   const [autoFollow, setAutoFollow] = useState(true);
-  useEffect(() => {
-    void fetch('/api/settings').then((r2) => r2.json()).then((s: McflySettings) => {
-      if (s && Object.keys(s).length) { setSettings(s); return; }
-      // first run: adopt the old localStorage toggles, then persist
-      let keymap: Record<string, string[]> = {};
-      try { keymap = JSON.parse(localStorage.getItem('mcfly.keymap') ?? '{}'); } catch { /* fresh */ }
-      const seed: McflySettings = {
-        vim: localStorage.getItem('mcfly.vimMode') === '1',
-        tmux: localStorage.getItem('mcfly.tmuxMode') === '1',
-        autoTour: localStorage.getItem('mcfly.autoFollow') !== '0',
-        autoLive: false,
-        keymap,
-      };
-      setSettings(seed);
-      void fetch('/api/settings', { method: 'POST', body: JSON.stringify(seed) });
-    }).catch(() => setSettings({ autoTour: true }));
-  }, []);
-  // saves go through state, persistence follows in an effect: an updater
-  // must stay pure (React may re-invoke it), and the debounce keeps posts
-  // ordered — last state wins
-  const settingsDirty = useRef(false);
-  const saveSettings = useCallback((patch: Partial<McflySettings>) => {
-    settingsDirty.current = true;
-    setSettings((cur) => ({ ...(cur ?? {}), ...patch }));
-  }, []);
-  useEffect(() => {
-    if (!settings || !settingsDirty.current) return;
-    const t = setTimeout(() => {
-      settingsDirty.current = false;
-      void fetch('/api/settings', { method: 'POST', body: JSON.stringify(settings) }).catch(() => { /* runtime state stands */ });
-    }, 250);
-    return () => clearTimeout(t);
-  }, [settings]);
-  // the keymap tables follow the settings; keysVersion tells the grid the
-  // MODULE is now in sync (it reads module state, which lags one render)
-  const [keysVersion, setKeysVersion] = useState(0);
-  useEffect(() => {
-    if (!settings) return;
-    setLeaders(settings.vimLeader, settings.tmuxPrefix);
-    setVimMode(!!settings.vim);
-    setTmuxMode(!!settings.tmux);
-    applyKeymap(settings.keymap ?? {});
-    setKeysVersion((v) => v + 1);
-  }, [settings]);
   const vimMode = !!settings?.vim;
   // session START state: tour + live per settings, applied ONCE per session
   // and only after its timeline has actually loaded — goLive on an empty
@@ -622,9 +762,9 @@ export default function App() {
       .then((d) => setWorktreeList(Array.isArray(d) ? d : []))
       .catch(() => { /* keep last */ });
     void load();
-    const t = setInterval(load, 10_000);
+    const t = setInterval(load, active ? 10_000 : 30_000);
     return () => clearInterval(t);
-  }, [cwd]);
+  }, [cwd, active]);
   useEffect(() => {
     if (!explorerRoot || !worktreeList.length) return;
     if (!worktreeList.some((w) => normPath(w.path) === normPath(explorerRoot))) setExplorerRoot(undefined);
@@ -719,9 +859,10 @@ export default function App() {
   }, [cwd]);
   useEffect(() => {
     refreshReviews();
-    const id = setInterval(refreshReviews, 4000); // agent replies appear live
+    // agent replies appear live; backgrounded workbenches check gently
+    const id = setInterval(refreshReviews, active ? 4000 : 15000);
     return () => clearInterval(id);
-  }, [refreshReviews]);
+  }, [refreshReviews, active]);
 
   const activeReview = reviews.find((v) => v.status === 'open'
     && v.session?.provider === r.session?.provider && v.session?.id === r.session?.id) ?? null;
@@ -899,9 +1040,10 @@ export default function App() {
       })
       .catch(() => { /* keep last */ });
     void load();
-    const t = setInterval(load, 10000); // the diff moves as the agent works
+    // the diff moves as the agent works; backgrounded workbenches idle
+    const t = setInterval(load, active ? 10000 : 30000);
     return () => { dead = true; clearInterval(t); };
-  }, [clBase, gitRoot]);
+  }, [clBase, gitRoot, active]);
   // auto-uncheck what changed since it was ticked, and refresh its open tab
   useEffect(() => {
     const checked = activeReview?.checklist?.checked;
@@ -960,6 +1102,7 @@ export default function App() {
     const abs = /^[A-Za-z]:[\\/]|^[\\/]/.test(p) ? p : cwd ? `${cwd.replace(/[\\/]+$/, '')}/${p}` : null;
     if (abs) openAbs(abs, line);
   }, [cwd, openAbs]);
+  openFileRefFwd.current = openFileRef;
 
   const closeFile = useCallback((key: string) => {
     setUserTabs((tabs) => tabs.filter((t) => t.key !== key));
@@ -1001,27 +1144,31 @@ export default function App() {
   // included — xterm declines them); transport keys are CONTEXTUAL: a pane
   // with its own history bar owns prev/next/first/last while focus is in it,
   // everywhere else they drive the session playhead ----
-  const termCtl = useRef<{ startNew: () => void; focusOrNext: (fromTerm: boolean) => void; cycle: (dir: 1 | -1) => void; confirmKill: () => void } | null>(null);
   const [quick, setQuick] = useState<null | 'grep' | 'file'>(null);
+  // the root the server actually searched (it defaults to its launch dir
+  // when no folder is open here) — picks resolve against THAT root
+  const quickRoot = useRef<string | null>(null);
   const editorOrder = useMemo(
     () => ['pinned', ...(timelinePath ? ['timeline'] : []), ...userTabs.map((t) => t.key)],
     [timelinePath, userTabs],
   );
   useEffect(() => {
     const focusTerm = () => requestAnimationFrame(() => {
-      ([...document.querySelectorAll('.livePane .xterm-helper-textarea')]
+      ([...(appRef.current?.querySelectorAll('.livePane .xterm-helper-textarea') ?? [])]
         .find((x) => (x as HTMLElement).offsetParent !== null) as HTMLElement | undefined)?.focus();
     });
     // a tab jump is a jump: focus lands IN the pane, so arrows work
-    // immediately (double rAF: the tab switch has to render first)
+    // immediately (double rAF: the tab switch has to render first).
+    // Queries scope to THIS workbench — several stay mounted at once.
     const focusPane = (rootSel: string) => requestAnimationFrame(() => requestAnimationFrame(() => {
-      const body = document.querySelector(`${rootSel} .tabBody:not(.hiddenTab)`) as HTMLElement | null;
+      const body = appRef.current?.querySelector(`${rootSel} .tabBody:not(.hiddenTab)`) as HTMLElement | null;
       const inner = (body?.querySelector('[tabindex]') as HTMLElement | null)
         ?? (body?.hasAttribute('tabindex') ? body : null)
         ?? (body?.querySelector('textarea') as HTMLElement | null);
       inner?.focus();
     }));
     const onKey = (e: KeyboardEvent) => {
+      if (!activeRef.current) return; // only the visible workbench listens
       const t = e.target;
       const el = t instanceof Element ? t : null;
       // typing is typing: TEXTUAL inputs never trigger chords and never arm
@@ -1088,7 +1235,7 @@ export default function App() {
             break;
           case 'grep': setQuick('grep'); break;
           case 'findFile': setQuick('file'); break;
-          case 'showKeys': setSettingsOpen('keys'); break;
+          case 'showKeys': onOpenSettings('keys'); break;
           case 'closeTab':
             if (editorTab === 'timeline') { setTimelinePath(undefined); setEditorTab('pinned'); }
             else if (editorTab !== 'pinned') closeFile(editorTab);
@@ -1127,7 +1274,15 @@ export default function App() {
         e.stopPropagation();
         return;
       }
-      if (el?.closest('.livePane')) return; // plain keys belong to the live terminal
+      if (el?.closest('.livePane')) {
+        // panel-nav OUT of the terminal: its DOM is moved under this
+        // workbench, but its React tree lives in the Shell, so the
+        // workbench's onKeyDown never sees these — catch them here
+        const p = actionOf(e, ['panelLeft', 'panelDown']);
+        if (p === 'panelLeft') { e.preventDefault(); e.stopPropagation(); focusEditor(); return; }
+        if (p === 'panelDown') { e.preventDefault(); e.stopPropagation(); setBottomOpen(true); focusPane('.bottomPane'); return; }
+        return; // plain keys belong to the live terminal
+      }
       const action = actionOf(e, ['playPause', 'stepBack', 'stepForward', 'playHome', 'playEnd']);
       if (!action) return;
       const bar = el?.closest('.tabBody, .editorSlot')?.querySelector('.histBar');
@@ -1140,18 +1295,19 @@ export default function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [r, editorOrder, editorTab, activeViewPath, openAbs, closeFile, leftTab, bottomTab, rightTab, setLeftOpen, setRightOpen, setBottomOpen, setLeftTab, setRightTab, setBottomTab]);
+  }, [r, editorOrder, editorTab, activeViewPath, openAbs, closeFile, leftTab, bottomTab, rightTab, setLeftOpen, setRightOpen, setBottomOpen, setLeftTab, setRightTab, setBottomTab, onOpenSettings, termCtl]);
 
   // agents see the git surface through workspace_state: the selection, the
   // open diff, and the worktree — "commit these 3 files" resolves from here
   useEffect(() => {
-    const active = userTabs.find((t) => t.key === editorTab);
+    if (!active) return; // only the visible workbench reports into its scope
+    const activeTab = userTabs.find((t) => t.key === editorTab);
     updateSnapshot({
       git: {
         root: gitRoot || null,
         selection: gitSelection,
         commits: gitCommitSel,
-        diff: active?.diff ? { path: active.path, area: active.diff.area } : null,
+        diff: activeTab?.diff ? { path: activeTab.path, area: activeTab.diff.area } : null,
       },
       explorer: { root: explorerRoot ?? cwd ?? null, selection: explorerSelection },
       worktree: explorerRoot ?? null,
@@ -1160,18 +1316,68 @@ export default function App() {
         : null,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gitRoot, gitSelection, gitCommitSel, editorTab, userTabs, explorerRoot, explorerSelection, cwd, dataSel]);
+  }, [active, gitRoot, gitSelection, gitCommitSel, editorTab, userTabs, explorerRoot, explorerSelection, cwd, dataSel]);
 
   const cols = [leftOpen ? `${sideW}px 5px` : '', '1fr', rightOpen ? `5px ${rightW}px` : ''].join(' ');
 
+  // a workspace switch hides the tree that held focus — revive the keyboard
+  // in the newly visible workbench (only when focus actually died; a click
+  // that CAUSED the switch keeps its target)
+  const wasActive = useRef(active);
+  useEffect(() => {
+    if (active && !wasActive.current) {
+      const el = document.activeElement as HTMLElement | null;
+      if (!el || el === document.body || !el.offsetParent) {
+        // editor body first; a session with no file open has none, so fall
+        // back to the tool log, then the left tab strip — never leave the
+        // keyboard dead
+        const own = (sel: string) => appRef.current?.querySelector(sel) as HTMLElement | null;
+        const target = [own('.editorPane .editorBody'), own('.toolLog'), own('.paneTabs')]
+          .find((x) => x && x.offsetParent !== null);
+        target?.focus();
+      }
+    }
+    wasActive.current = active;
+  }, [active, wsId]);
+
   return (
-    <div className="app">
-      <div className="titlebar">
-        <span className="logo">⏱ Agent McFly</span>
+    <div className="app" ref={appRef}>
+      <div className="titlebar" style={activeColor ? { background: tintOver(activeColor, 0.18, '#323233') } : undefined}>
+        <span className="logo" title={`v${__APP_VERSION__} · built ${__BUILD_TS__}`}>⏱ Agent McFly</span>
         {pwd && <span className="pwdChip" title={pwd}>{folder}</span>}
-        <button onClick={() => setPickerOpen(true)} title="Open a session">
-          <span className="codicon codicon-folder-opened" /> open
-        </button>
+        {!pwd && !r.session && (
+          <button onClick={() => setPickerOpen(true)} title="Open a session">
+            <span className="codicon codicon-folder-opened" /> open
+          </button>
+        )}
+        {activeColor && (
+          <span className="swatchWrap">
+            <button
+              className="colorSwatch"
+              style={{ background: activeColor }}
+              title="Workspace color"
+              onClick={() => setColorPick((v) => !v)}
+            />
+            {colorPick && (
+              <div className="colorGrid">
+                {PALETTE.map((hex, i) => {
+                  const taken = roots.some((rt) => !rt.active && rt.colorIndex === i);
+                  const cur = activeRoot?.colorIndex === i;
+                  return (
+                    <button
+                      key={hex}
+                      disabled={taken || cur}
+                      className={`colorCell ${cur ? 'sel' : ''}`}
+                      style={{ background: hex }}
+                      title={taken ? 'taken by another root' : hex}
+                      onClick={() => { onPickColor(i); setColorPick(false); }}
+                    />
+                  );
+                })}
+              </div>
+            )}
+          </span>
+        )}
         {r.session && (() => {
           // the chip is the agent hierarchy of the current view: root session
           // down to whichever agent you are inside, however deep
@@ -1199,6 +1405,13 @@ export default function App() {
           );
         })()}
         <span className="titleRight">
+          <button
+            className={`tourToggle ${sync ? 'on' : ''}`}
+            title={sync
+              ? 'Terminals synced: picking an agent shows its terminal, picking a linked terminal switches the workbench. Click to unsync.'
+              : 'Sync terminals to sessions: picking an agent will show its terminal and vice versa.'}
+            onClick={onToggleSync}
+          ><span className="codicon codicon-link" /></button>
           {r.session && (
             <button
               className={`liveToggle ${r.follow ? 'on' : ''}`}
@@ -1229,7 +1442,7 @@ export default function App() {
             <button className={bottomOpen ? 'on' : ''} title="Toggle bottom pane" onClick={() => setBottomOpen(!bottomOpen)}>⬓</button>
             <button className={rightOpen ? 'on' : ''} title="Toggle right pane" onClick={() => setRightOpen(!rightOpen)}>◨</button>
           </span>
-          <button className="tourToggle" title="Settings and keybindings" onClick={() => setSettingsOpen('settings')}>
+          <button className="tourToggle" title="Settings and keybindings" onClick={() => onOpenSettings('settings')}>
             <span className="codicon codicon-settings-gear" />
           </button>
         </span>
@@ -1239,15 +1452,26 @@ export default function App() {
         {leftOpen && (
           <>
             <div className="sidebar" onKeyDown={sidebarKeys} onFocusCapture={(e) => { lastSideFocus.current = e.target as HTMLElement; }}>
-              {r.session && (
-                <>
-                  <div className="agentsSection" style={{ height: agentsH }}>
-                    <div className="sideHead">AGENTS</div>
-                    <AgentTree agents={r.agents} viewKey={r.viewKey} onSelect={openAgent} />
-                  </div>
-                  <Splitter dir="row" onDrag={dragAgents} />
-                </>
-              )}
+              <div className="agentsSection" style={{ height: agentsH }}>
+                <div className="sideHead">
+                  AGENTS
+                  <span
+                    className="codicon codicon-add rootAdd"
+                    title="Attach another agent (a new root workspace)"
+                    onClick={onAddRoot}
+                  />
+                </div>
+                <AgentTree
+                  agents={treeAgents}
+                  viewKey={`${wsId}${SEP}${r.viewKey}`}
+                  collapsed={treeCollapsed}
+                  onToggle={onTreeToggle}
+                  onSelect={onTreeSelect}
+                  onCloseRoot={roots.length > 1 ? onTreeCloseRoot : undefined}
+                  onOpenTerminal={onTreeOpenTerminal}
+                />
+              </div>
+              <Splitter dir="row" onDrag={dragAgents} />
               <div className="paneTabs" ref={leftStripRef} tabIndex={-1} onKeyDown={stripKeys(['tools', 'explorer', 'git'], leftTab, (t) => setLeftTab(t as typeof leftTab))}>
                 <div className={`paneTab ${leftTab === 'tools' ? 'active' : ''}`} onClick={() => setLeftTab('tools')}>TOOL CALLS</div>
                 <div className={`paneTab ${leftTab === 'explorer' ? 'active' : ''}`} onClick={() => setLeftTab('explorer')}>EXPLORER</div>
@@ -1422,23 +1646,14 @@ export default function App() {
                   onEscapeTop={escapeRight}
                 />
               </div>
-              {/* stays mounted across tab switches so the PTY session survives */}
-              <div className={rightTab === 'term' ? 'tabBody' : 'tabBody hiddenTab'}>
-                <LiveTerm
-                  cwd={cwd}
-                  currentSession={r.session && { provider: r.session.provider, id: r.session.id }}
-                  onToolStart={onToolStart}
-                  onPtyId={onPtyStart}
-                  onOpenFileRef={openFileRef}
-                  onFollowSession={(s) => applyPick(s.pwd || pwd || '', {
-                    id: s.id, provider: s.provider,
-                    label: s.id.split('/').pop() ?? s.id,
-                    cwd: s.pwd, updated_at: 0, size: 0,
-                  })}
-                  onFollowResolve={(p) => void followResolve({ title: p.title, cwd: p.cwd || pwd || '' })}
-                  ctl={termCtl}
-                />
-              </div>
+              {/* the ONE LiveTerm is shell-owned (terminals are global across
+                  roots); the shell portals it into the active workbench here.
+                  The ref callback must be STABLE — an inline arrow re-fires
+                  null→el every render, which loops setState in the shell */}
+              <div
+                className={rightTab === 'term' ? 'tabBody termSlot' : 'tabBody termSlot hiddenTab'}
+                ref={termSlotCb}
+              />
             </div>
           </>
         )}
@@ -1451,19 +1666,18 @@ export default function App() {
           initialPwd={pickerSeed?.pwd ?? pwd ?? ''}
           initialProvider={pickerSeed?.provider}
           initialFilter={pickerSeed?.filter}
-          onPick={applyPick}
+          onPick={(p, s) => {
+            const followPty = pickerSeed?.followPty;
+            setPickerOpen(false);
+            setPickerSeed(undefined);
+            if (followPty !== undefined) onFollowedPick(p, s, followPty || undefined);
+            else onPickSession(wsId, p, s);
+          }}
           onGo={scopeFolder}
-          onClose={() => { setPickerOpen(false); setPickerSeed(undefined); }}
-        />
-      )}
-
-      {settingsOpen && settings && (
-        <Settings
-          settings={settings}
-          initialPage={settingsOpen}
-          keysVersion={keysVersion}
-          onSave={saveSettings}
-          onClose={() => { setSettingsOpen(false); focusEditor(); }}
+          onClose={() => {
+            setPickerOpen(false);
+            setPickerSeed(undefined);
+          }}
         />
       )}
 
@@ -1471,30 +1685,35 @@ export default function App() {
         <QuickPick
           key={quick}
           title={quick === 'grep' ? 'grep' : 'find file'}
+          hint={`${(explorerRoot ?? cwd)?.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? 'server folder'} · v${__APP_VERSION__}`}
           placeholder={quick === 'grep' ? 'regex…' : 'file name…'}
           onQuery={async (q) => {
+            // no open folder is fine: the server greps its own launch dir
+            // and echoes back which root it actually searched
             const root = explorerRoot ?? cwd;
-            if (!root) return [{ label: '⚠ no project folder open', path: '' }];
             if (!q.trim()) return [];
             const kind = quick === 'grep' ? 'grep' : 'files';
-            const r2 = await fetch(`/api/${kind}?root=${encodeURIComponent(root)}&q=${encodeURIComponent(q)}`).catch(() => null);
+            const r2 = await fetch(`/api/${kind}?root=${encodeURIComponent(root ?? '')}&q=${encodeURIComponent(q)}`).catch(() => null);
             if (!r2) return [{ label: '⚠ server unreachable', path: '' }];
             if (!r2.ok) return [{ label: `⚠ server too old for /${kind} — restart mcfly after updating`, path: '' }];
             const res = await r2.json().catch(() => null);
             if (res && !Array.isArray(res) && res.error) return [{ label: `⚠ ${res.error}`, path: '' }];
-            if (!Array.isArray(res)) return [];
+            if (res?.root) quickRoot.current = String(res.root);
+            // old servers answer a bare array; new ones {root, items}
+            const items = Array.isArray(res) ? res : Array.isArray(res?.items) ? res.items : null;
+            if (!items) return [];
             return quick === 'grep'
-              ? (res as { path: string; line: number; text: string }[]).map((m) => ({
+              ? (items as { path: string; line: number; text: string }[]).map((m) => ({
                 label: `${m.path}:${m.line}`, detail: m.text.trim().slice(0, 160), path: m.path, line: m.line,
               }))
-              : (res as string[]).map((p) => ({ label: p, path: p }));
+              : (items as string[]).map((p) => ({ label: p, path: p }));
           }}
           onPick={(it) => {
             if (!it.path) return; // an error row is information, not a target
             setQuick(null);
-            const root = explorerRoot ?? cwd;
+            const root = quickRoot.current ?? explorerRoot ?? cwd;
             if (!root) return;
-            openAbs(`${root}/${it.path}`, it.line);
+            openAbs(`${root.replace(/[\\/]+$/, '')}/${it.path}`, it.line);
             // the caret follows the pick: onto the match line (grep) or the
             // top of the file (find file). Fired twice — the tab mounts async.
             if (it.line) {

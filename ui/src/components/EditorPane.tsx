@@ -795,7 +795,7 @@ function diffRows(hunks: NonNullable<FileView['render']['hunks']>, fileLines: st
   return out;
 }
 
-export function DiffView({ file, animate, onComment, fileLines, textBand, find, onVisualMode }: {
+export function DiffView({ file, animate, onComment, fileLines, textBand, find, onVisualMode, reviewMarks, thread }: {
   find?: FindDrive;
   onVisualMode?: (m: null | 'char' | 'line' | 'normal') => void;
   file: FileView; animate: boolean;
@@ -805,6 +805,14 @@ export function DiffView({ file, animate, onComment, fileLines, textBand, find, 
   fileLines?: string[];
   // the persistent text selection fragments, same as CodeView
   textBand?: { rects: { x: number; y: number; w: number; h: number }[] };
+  // existing review threads, anchored by NEW-side line numbers — the same
+  // contract CodeView has, so commented lines are marked in diffs too
+  reviewMarks?: { id: string; line: number; lineEnd: number; state: ReviewComment['state']; onClick: () => void }[];
+  thread?: {
+    comment: ReviewComment; line: number; stale: boolean;
+    onReply: (body: string) => void; onResolve: () => void;
+    onViewOriginal: () => void; onClose: () => void;
+  };
 }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -1314,6 +1322,17 @@ export function DiffView({ file, animate, onComment, fileLines, textBand, find, 
   }
   const composerTop = compose ? (rowIdxOfNew(compose.hunk, compose.lineEnd) + 1) * LH + 4 : 0;
 
+  // review thread marks by NEW-side line number, hunk-agnostic (a commented
+  // line outside the visible hunks simply has no row to mark)
+  const rowOfNew = (n: number) => rows.findIndex((r2) => r2.kind !== 'hunk' && r2.kind !== 'gap' && r2.newNo === n);
+  const threadEndRow = thread
+    ? (() => {
+      const end = thread.line + ((thread.comment.line_end ?? thread.comment.line) - thread.comment.line);
+      const r2 = rowOfNew(end);
+      return r2 >= 0 ? r2 : rowOfNew(thread.line);
+    })()
+    : -1;
+
   return (
     <div
       className={`editorBody ${animate ? 'diffFlash' : ''}`} ref={ref} tabIndex={-1} onKeyDown={dMoveCaret} data-path={file.path} data-start-line={1}
@@ -1338,9 +1357,33 @@ export function DiffView({ file, animate, onComment, fileLines, textBand, find, 
         })}
         <div className="userCaret" ref={dCaretEl} style={{ display: 'none' }} />
         {band && <div className="rvBand" style={{ top: band.top, height: band.height }} />}
+        {reviewMarks?.map((m) => {
+          const r2 = rowOfNew(m.line);
+          if (r2 < 0) return null;
+          return (
+            <div
+              key={`rm-${m.id}`}
+              className={`rvMark dRvMark codicon codicon-comment rv-${m.state}`}
+              style={{ top: r2 * LH }}
+              title={`review comment (${m.state})`}
+              onClick={(e) => { e.stopPropagation(); m.onClick(); }}
+            />
+          );
+        })}
+        {reviewMarks?.filter((m) => m.lineEnd > m.line).map((m) => {
+          const a = rowOfNew(m.line);
+          const b = rowOfNew(m.lineEnd);
+          if (a < 0 || b < 0) return null;
+          return <div key={`rb-${m.id}`} className="rvBand" style={{ top: a * LH, height: (b - a + 1) * LH }} />;
+        })}
         {compose && (
           <div className="wpOverlayWrap" style={{ top: composerTop, transform: 'none' }}>
             <ComposerCard onSubmit={submit} onCancel={() => setCompose(null)} />
+          </div>
+        )}
+        {thread && threadEndRow >= 0 && (
+          <div className="wpOverlayWrap" style={{ top: (threadEndRow + 1) * LH + 4, transform: 'none' }}>
+            <ThreadCard {...thread} />
           </div>
         )}
       </div>
@@ -1603,6 +1646,22 @@ export function EditorPane({
     : [];
   const openThread = tabReview.find((t) => t.comment.id === openThreadId);
 
+  // comments in review DIFF tabs: anchored by new-side (on-disk) lines,
+  // re-resolved against the file as it is now
+  const diffReview = userTab && userTab.diff && activeReview
+    ? activeReview.comments
+      .filter((c) => normPath(c.path) === normPath(userTab.path))
+      .map((c) => {
+        const content = userTab.diff!.fileLines?.join('\n');
+        const found = content !== undefined
+          ? resolveWaypoint(content, { path: c.path, line: c.line, note: '', before: c.before, anchor: c.anchor, after: c.after })
+          : null;
+        const line = found ?? c.line;
+        return { comment: c, line, lineEnd: line + ((c.line_end ?? c.line) - c.line), stale: found === null };
+      })
+    : [];
+  const diffThread = diffReview.find((t) => t.comment.id === openThreadId);
+
   // review threads for the live pinned view: resolved against the session
   // content on screen, in file coordinates (the content may be a region)
   const pinnedReview = pinned && pinned.mode === 'file' && pinned.render.content !== undefined && activeReview
@@ -1777,6 +1836,17 @@ export function EditorPane({
                 ...(c.lineEnd > c.line ? { line_end: c.lineEnd } : {}),
                 before: c.before, anchor: c.anchor, after: c.after, body: c.body,
               }) : undefined}
+              reviewMarks={diffReview.map((t) => ({
+                id: t.comment.id, line: t.line, lineEnd: t.lineEnd, state: t.comment.state,
+                onClick: () => setOpenThreadId((cur) => (cur === t.comment.id ? undefined : t.comment.id)),
+              }))}
+              thread={diffThread && onReviewReply && onReviewResolve && onReviewViewOriginal ? {
+                comment: diffThread.comment, line: diffThread.line, stale: diffThread.stale,
+                onReply: (body) => onReviewReply(diffThread.comment.id, body),
+                onResolve: () => onReviewResolve(diffThread.comment.id),
+                onViewOriginal: () => onReviewViewOriginal(diffThread.comment),
+                onClose: () => setOpenThreadId(undefined),
+              } : undefined}
             />
           ) : (
             <div className="emptyHint">no changes in this file</div>

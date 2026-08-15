@@ -29,10 +29,28 @@ function json(res, code, obj) {
 const ALLOWED_HOSTS = new Set([`localhost:${PORT}`, `127.0.0.1:${PORT}`, `[::1]:${PORT}`]);
 
 // what the user has open/focused/selected, reported by the UI; agents query
-// it through the mcfly MCP's workspace_state tool
-const wsSnapshot = {};
+// it through the mcfly MCP's workspace_state tool. Multi-root: one snapshot
+// per workspace scope (its project pwd; '' from pre-scope UIs), so an agent
+// in project A reads A's state even while the user works in project B.
+const wsSnapshots = new Map(); // scope -> { ...snapshot, updated }
 const wsRing = [];
 const WS_RING_CAP = 500;
+const normScope = (p) => String(p ?? '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+// the scope covering a project dir: the longest scope the project sits under
+// (or that sits under the project); no match falls back to the newest scope
+function pickScope(project) {
+  const keys = [...wsSnapshots.keys()];
+  if (!keys.length) return null;
+  const want = normScope(project);
+  if (want) {
+    const hits = keys.filter((k) => {
+      const n = normScope(k);
+      return n && (want === n || want.startsWith(`${n}/`) || n.startsWith(`${want}/`));
+    }).sort((a, b) => b.length - a.length);
+    if (hits.length) return hits[0];
+  }
+  return keys.sort((a, b) => (wsSnapshots.get(b).updated ?? 0) - (wsSnapshots.get(a).updated ?? 0))[0];
+}
 
 // registry so the (separate) MCP process can find running servers
 const SERVERS_FILE = path.join(os.homedir(), '.mcfly', 'servers.json');
@@ -149,16 +167,19 @@ const server = http.createServer(async (req, res) => {
     // quick pickers: grep the repo, find a file by name (tracked files).
     // Failures surface as {error} — a silent [] reads as "no matches"
     if (url.pathname === '/api/grep' || url.pathname === '/api/files') {
-      const root = url.searchParams.get('root') ?? process.cwd();
+      // the root is echoed back so the picker can SHOW what it searched —
+      // a silent empty result with an invisible root is undiagnosable
+      const root = url.searchParams.get('root') || process.cwd();
       const q = url.searchParams.get('q') ?? '';
-      if (!git.okRoot(root)) return json(res, 200, { error: `not a directory: ${root}` });
-      if (!q.trim()) return json(res, 200, []);
+      if (!git.okRoot(root)) return json(res, 200, { root, error: `not a directory: ${root}` });
+      if (!q.trim()) return json(res, 200, { root, items: [] });
       try {
-        return json(res, 200, url.pathname === '/api/grep'
-          ? await git.grep(root, q)
-          : await git.listFiles(root, q));
+        return json(res, 200, {
+          root,
+          items: url.pathname === '/api/grep' ? await git.grep(root, q) : await git.listFiles(root, q),
+        });
       } catch (e) {
-        return json(res, 200, { error: String(e.message ?? e) });
+        return json(res, 200, { root, error: String(e.message ?? e) });
       }
     }
     // human review: session-scoped threaded comments; the human writes from
@@ -195,10 +216,13 @@ const server = http.createServer(async (req, res) => {
       req.on('data', (c) => { body += c; });
       req.on('end', () => {
         try {
-          const { snapshot, events } = JSON.parse(body);
-          if (snapshot && typeof snapshot === 'object') Object.assign(wsSnapshot, snapshot, { updated: Date.now() });
+          const { scope = '', snapshot, events } = JSON.parse(body);
+          if (snapshot && typeof snapshot === 'object') {
+            const cur = wsSnapshots.get(scope) ?? {};
+            wsSnapshots.set(scope, Object.assign(cur, snapshot, { updated: Date.now() }));
+          }
           if (Array.isArray(events)) {
-            for (const e of events) wsRing.push(e);
+            for (const e of events) wsRing.push({ ...e, scope });
             while (wsRing.length > WS_RING_CAP) wsRing.shift();
           }
           json(res, 200, { ok: true });
@@ -210,12 +234,13 @@ const server = http.createServer(async (req, res) => {
       const history = Math.min(Number(url.searchParams.get('history')) || 0, WS_RING_CAP);
       const kinds = url.searchParams.get('kinds')?.split(',').filter(Boolean);
       const since = Number(url.searchParams.get('since_seconds')) || 0;
-      let events = wsRing;
+      const scope = pickScope(url.searchParams.get('project'));
+      let events = scope === null ? [] : wsRing.filter((e) => (e.scope ?? '') === scope);
       if (kinds?.length) events = events.filter((e) => kinds.includes(e.kind));
       if (since) events = events.filter((e) => e.ts >= Date.now() - since * 1000);
       if (history) events = events.slice(-history);
       else if (!kinds?.length && !since) events = [];
-      return json(res, 200, { snapshot: wsSnapshot, events });
+      return json(res, 200, { snapshot: scope === null ? {} : wsSnapshots.get(scope), scope, events });
     }
     // pasted images land here as bytes; the temp file's path gets typed into
     // the terminal (the drag-and-drop flow every agent CLI already speaks)

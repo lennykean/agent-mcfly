@@ -1,12 +1,12 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import App from './App';
+import Shell from './Shell';
 import '@vscode/codicons/dist/codicon.css';
 import './styles/tokens.css';
 import './styles/app.css';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+    <Shell />
   </StrictMode>,
 );

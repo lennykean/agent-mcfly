@@ -11,6 +11,7 @@ export interface McflySettings {
   tmuxPrefix?: string; // a chord in vim notation; <C-b> when unset
   autoLive?: boolean;
   autoTour?: boolean;
+  autoSync?: boolean; // start with terminals synced to sessions
   keymap?: Record<string, string[]>;
 }
 
@@ -155,6 +156,8 @@ export function Settings({ settings, initialPage = 'settings', keysVersion = 0, 
               !!settings.autoLive, (v) => onSave({ autoLive: v }))}
             {toggleRow('auto tour guide', 'start in tour guide mode: the view follows files, tables, and waypoints',
               settings.autoTour !== false, (v) => onSave({ autoTour: v }))}
+            {toggleRow('auto-sync terminals', 'start with terminals synced: picking an agent shows its terminal and vice versa',
+              !!settings.autoSync, (v) => onSave({ autoSync: v }))}
             {ask && (
               <div className="setAsk">
                 <div>

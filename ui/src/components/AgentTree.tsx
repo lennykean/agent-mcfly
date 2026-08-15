@@ -1,17 +1,42 @@
 import { useRef } from 'react';
 import { actionOf } from '../lib/keys';
-import type { AgentNode } from '../hooks/useReplay';
+import { rgba } from '../lib/palette';
+
+// a node in the (possibly multi-root) agents tree; keys are opaque to this
+// component — the App prefixes them with the owning workspace
+export interface TreeAgent {
+  key: string;
+  parentKey: string | null;
+  label: string;
+  agentType?: string;
+  color?: string; // the root's hue; rows get a tinted background
+  root?: boolean; // a top-level agent (broadcast icon, closable)
+  // a workspace GROUP row: pure grouping, informational — it cannot be
+  // opened or selected, only collapsed
+  kind?: 'workspace';
+  pwd?: string; // the group row's project folder (terminal quick-launch)
+}
 
 // The agents list is its OWN panel, not a tab of the strip below it: plain
-// arrows walk (soft select) and Enter switches views, but no arrow leaves
-// the panel — crossing panels takes the panelUp/panelDown chord, handled by
-// the sidebar above this component.
+// arrows walk (soft select), left/right collapse/expand subagent subtrees at
+// any depth, Enter switches views — but no arrow leaves the panel; crossing
+// panels takes the panelUp/panelDown chord, handled by the sidebar above.
 export function AgentTree({
-  agents, viewKey, onSelect,
+  agents, viewKey, collapsed, onToggle, onSelect, onCloseRoot, onOpenTerminal,
 }: {
-  agents: AgentNode[]; viewKey: string; onSelect: (key: string) => void;
+  agents: TreeAgent[]; viewKey: string;
+  // collapse state is CONTROLLED: every mounted workbench renders this same
+  // panel, so the folds live in the shell — one truth across root switches
+  collapsed: ReadonlySet<string>; onToggle: (key: string) => void;
+  onSelect: (key: string) => void;
+  // when set, top-level rows offer a ✕ that closes their root workspace
+  onCloseRoot?: (key: string) => void;
+  // when set, workspace group rows offer a terminal icon: new shell there
+  onOpenTerminal?: (key: string) => void;
 }) {
   const children = (parent: string | null) => agents.filter((a) => a.parentKey === parent);
+  const byKey = new Map(agents.map((a) => [a.key, a]));
+  const toggle = onToggle;
 
   const boxRef = useRef<HTMLDivElement>(null);
   const barRef = useRef<HTMLDivElement>(null);
@@ -30,15 +55,31 @@ export function AgentTree({
   const onKeyDown = (e: React.KeyboardEvent) => {
     const rows = rowsNow();
     if (!rows.length) return;
-    const action = actionOf(e, ['up', 'down', 'home', 'end', 'activate', 'dismiss']);
+    const action = actionOf(e, ['up', 'down', 'left', 'right', 'home', 'end', 'activate', 'dismiss']);
     if (!action) return;
     let i = Math.max(0, Math.min(cursor.current, rows.length - 1));
+    const key = rows[i]?.dataset.key ?? '';
+    const node = byKey.get(key);
+    const kids = node ? children(node.key).length > 0 : false;
     switch (action) {
       case 'up': i = Math.max(0, i - 1); break;
       case 'down': i = Math.min(rows.length - 1, cursor.current < 0 ? 0 : i + 1); break;
       case 'home': i = 0; break;
       case 'end': i = rows.length - 1; break;
       case 'activate': rows[i]?.click(); break;
+      case 'left':
+        // collapse an open subtree, else hop to the parent row
+        if (kids && !collapsed.has(key)) toggle(key);
+        else if (node?.parentKey) {
+          const pi = rows.findIndex((r2) => r2.dataset.key === node.parentKey);
+          if (pi >= 0) i = pi;
+        }
+        break;
+      case 'right':
+        // expand a closed subtree, else step into the first child
+        if (kids && collapsed.has(key)) toggle(key);
+        else if (kids) i = Math.min(rows.length - 1, i + 1);
+        break;
       case 'dismiss': (e.target as HTMLElement).blur(); cursor.current = -1; paintBar(); break;
     }
     e.preventDefault();
@@ -62,21 +103,51 @@ export function AgentTree({
     });
   };
 
-  const renderNode = (node: AgentNode, depth: number) => (
-    <div key={node.key}>
-      <div
-        className={`agentRow ${node.key === viewKey ? 'active' : ''}`}
-        style={{ paddingLeft: 12 + depth * 14 }}
-        onClick={() => onSelect(node.key)}
-        title={node.label}
-      >
-        <span className={`codicon ${node.parentKey === null ? 'codicon-broadcast' : 'codicon-hubot'} agentIcon`} />
-        {node.agentType ? `[${node.agentType}] ` : ''}
-        {node.label}
+  const renderNode = (node: TreeAgent, depth: number) => {
+    const kids = children(node.key);
+    const closed = collapsed.has(node.key);
+    return (
+      <div key={node.key}>
+        <div
+          className={`agentRow ${node.key === viewKey ? 'active' : ''} ${node.kind === 'workspace' ? 'wsGroupRow' : ''}`}
+          style={{
+            paddingLeft: 4 + depth * 14,
+            background: node.color && node.key !== viewKey ? rgba(node.color, 0.14) : undefined,
+          }}
+          data-key={node.key}
+          onClick={() => (node.kind === 'workspace' ? toggle(node.key) : onSelect(node.key))}
+          title={node.label}
+        >
+          {kids.length > 0 ? (
+            <span
+              className={`codicon codicon-chevron-${closed ? 'right' : 'down'} agentChevron`}
+              onClick={(e) => { e.stopPropagation(); toggle(node.key); }}
+            />
+          ) : <span className="agentChevron" />}
+          <span className={`codicon ${node.kind === 'workspace' ? 'codicon-folder' : node.root ? 'codicon-broadcast' : 'codicon-hubot'} agentIcon`} />
+          <span className="agentLabel">
+            {node.agentType ? `[${node.agentType}] ` : ''}
+            {node.label}
+          </span>
+          {onOpenTerminal && node.kind === 'workspace' && (
+            <span
+              className="codicon codicon-terminal wsTermBtn"
+              title={`New terminal in ${node.label}`}
+              onClick={(e) => { e.stopPropagation(); onOpenTerminal(node.key); }}
+            />
+          )}
+          {onCloseRoot && node.root && (
+            <span
+              className="codicon codicon-close rootClose"
+              title="Close this root workspace"
+              onClick={(e) => { e.stopPropagation(); onCloseRoot(node.key); }}
+            />
+          )}
+        </div>
+        {!closed && kids.map((c) => renderNode(c, depth + 1))}
       </div>
-      {children(node.key).map((c) => renderNode(c, depth + 1))}
-    </div>
-  );
+    );
+  };
 
   return (
     <div className="agentTree" ref={boxRef} tabIndex={-1} onKeyDown={onKeyDown} onMouseDown={onMouseDown}>

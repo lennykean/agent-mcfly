@@ -132,6 +132,8 @@ async function runWorkspaceState(args = {}) {
   const byNewest = [...servers].sort((a, b) => b.started - a.started);
   const pick = byNewest.find((s) => cwd.startsWith(String(s.pwd).toLowerCase())) ?? byNewest[0];
   const qs = new URLSearchParams();
+  // multi-root workbenches keep one snapshot per project; ask for OURS
+  qs.set('project', path.resolve(args.cwd ?? process.cwd()));
   if (args.history) qs.set('history', String(args.history));
   if (Array.isArray(args.kinds) && args.kinds.length) qs.set('kinds', args.kinds.join(','));
   if (args.since_seconds) qs.set('since_seconds', String(args.since_seconds));

@@ -5,8 +5,9 @@ export interface QuickItem { label: string; detail?: string; path: string; line?
 // The floating quick picker (grep, find file): same dialog language as the
 // session picker but WITHOUT the dimmed backdrop — the app stays visible.
 // Type to query (debounced), arrows walk, Enter jumps, Escape closes.
-export function QuickPick({ title, placeholder, onQuery, onPick, onClose }: {
+export function QuickPick({ title, hint, placeholder, onQuery, onPick, onClose }: {
   title: string;
+  hint?: string; // shown dim in the head: what root was searched, which build
   placeholder: string;
   onQuery: (q: string) => Promise<QuickItem[]>;
   onPick: (item: QuickItem) => void;
@@ -47,6 +48,7 @@ export function QuickPick({ title, placeholder, onQuery, onPick, onClose }: {
       <div className="pickerModal quickPick">
         <div className="pickerHead">
           <span>{title}</span>
+          {hint && <span className="quickHint" title={hint}>{hint}</span>}
           <button className="pickerClose" onClick={onClose}>✕</button>
         </div>
         <input

@@ -124,7 +124,10 @@ pre, code { font-family: var(--font-mono); }
 .pickerModal { background: var(--bg-panel); border: 1px solid var(--border-light); border-radius: 6px; width: 640px; max-width: 90vw; max-height: 70vh; display: flex; flex-direction: column; padding: 12px 16px; gap: 10px; box-shadow: 0 8px 32px rgb(0 0 0 / 60%); overflow: hidden; }
 .pickerHead { display: flex; justify-content: space-between; align-items: center; font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--fg-dim); }
 .pickerClose { padding: 0 6px; }
-.pickerRow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+/* rows never shrink: a too-tall modal must scroll its lists, not squeeze
+   fixed rows into overlapping their neighbors */
+.pickerRow { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: 0 0 auto; }
+.pickerHead, .pickerHint { flex: 0 0 auto; }
 .pickerLabel { flex: 0 0 56px; font-size: 11px; color: var(--fg-faint); text-transform: uppercase; letter-spacing: 1px; }
 .pickerInput { flex: 1; background: var(--bg-inset); color: var(--fg); border: 1px solid var(--border-light); border-radius: 3px; padding: 5px 8px; font-family: var(--font-mono); font-size: 12px; }
 .pickerInput:focus { outline: 1px solid var(--accent); }
@@ -242,7 +245,9 @@ pre, code { font-family: var(--font-mono); }
 
 /* live terminal tabs (tmux windows) */
 .liveTabs { display: flex; align-items: center; gap: 2px; padding: 2px 6px; background: var(--bg-panel-alt); font-size: 11px; flex: 0 0 auto; overflow-x: auto; }
-.liveTab { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 3px; color: var(--fg-dim); cursor: pointer; white-space: nowrap; }
+.liveTab { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 3px; color: var(--fg-dim); cursor: pointer; white-space: nowrap; max-width: 160px; flex: 0 1 auto; }
+/* long linked names (agent labels) ellipsize; the title attr carries the full text */
+.liveTabLabel { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .liveTab:hover { background: #3a3a3a; }
 .liveTab.active { background: var(--bg-inset); color: var(--fg); }
 .liveTab .codicon { font-size: 11px !important; }
@@ -267,6 +272,60 @@ pre, code { font-family: var(--font-mono); }
 .agentRow { padding: 3px 12px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .agentRow:hover { background: #2a2d2e; }
 .agentRow.active { background: var(--accent-bg); color: #fff; }
+
+/* multi-root AGENTS tree: workspace group rows (grouping only) > roots >
+   subagents; roots carry their hue as a row tint */
+.agentRow { display: flex; align-items: center; min-width: 0; }
+.agentLabel { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agentChevron { flex: 0 0 16px; font-size: 12px !important; color: var(--fg-dim); cursor: pointer; text-align: center; }
+/* hover stays visible on tinted rows: layer instead of replacing background */
+.agentRow:hover { box-shadow: inset 0 0 0 999px rgb(255 255 255 / 5%); }
+.wsGroupRow { color: var(--fg-dim); font-size: 11px; letter-spacing: 0.5px; text-transform: uppercase; }
+.wsGroupRow .agentIcon { color: var(--fg-dim); }
+.agentRow .rootClose { flex: 0 0 auto; margin-left: 4px; font-size: 12px !important; color: var(--fg-faint); visibility: hidden; padding: 1px; }
+.agentRow:hover .rootClose { visibility: visible; }
+.agentRow .rootClose:hover { color: var(--fg); }
+.sideHead .rootAdd { float: right; cursor: pointer; font-size: 13px !important; color: var(--fg-dim); }
+.sideHead .rootAdd:hover { color: var(--fg); }
+
+/* workspace group row: terminal quick-launch (hover, like the ✕) */
+.wsTermBtn { flex: 0 0 auto; margin-left: auto; font-size: 12px !important; color: var(--fg-faint); visibility: hidden; padding: 1px; cursor: pointer; }
+.agentRow:hover .wsTermBtn { visibility: visible; }
+.wsTermBtn:hover { color: var(--fg); }
+
+.killDetached { margin-left: 10px; font-size: 11px; color: var(--fg-dim); border: 1px solid var(--border-light); border-radius: 3px; padding: 1px 8px; cursor: pointer; text-transform: none; letter-spacing: 0; }
+.killDetached:hover { color: var(--red); border-color: var(--red); }
+
+/* terminal picker: which project a new session starts in */
+.startProjects { display: flex; flex-wrap: wrap; gap: 6px; }
+.projChip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border: 1px solid var(--border-light); border-radius: 3px; font-size: 12px; color: var(--fg-dim); cursor: pointer; }
+.projChip .codicon { font-size: 12px !important; }
+.projChip.active { background: var(--accent-bg); color: #fff; border-color: transparent; }
+
+/* root color swatch + 4x4 preset grid in the titlebar */
+.swatchWrap { position: relative; display: inline-flex; align-items: center; }
+.colorSwatch { width: 14px; height: 14px; padding: 0; border: 1px solid rgb(255 255 255 / 30%); border-radius: 3px; cursor: pointer; }
+.colorGrid {
+  position: absolute; top: 22px; left: 0; z-index: 40;
+  display: grid; grid-template-columns: repeat(4, 20px); gap: 6px;
+  padding: 8px; background: var(--bg-panel); border: 1px solid var(--border-light);
+  border-radius: 4px; box-shadow: 0 4px 16px rgb(0 0 0 / 50%);
+}
+.colorCell { width: 20px; height: 20px; padding: 0; border: 1px solid rgb(0 0 0 / 40%); border-radius: 3px; cursor: pointer; }
+.colorCell:disabled { opacity: 0.22; cursor: not-allowed; }
+.colorCell.sel { outline: 2px solid #fff; outline-offset: 1px; }
+
+/* review thread markers in DIFF views: absolute over the old-side gutter */
+.diffwrap .dRvMark { position: absolute; left: 2px; width: 16px; height: 18px; line-height: 18px; text-align: center; font-size: 12px !important; cursor: pointer; z-index: 3; }
+
+/* the shared live terminal rides a permanent host div that gets MOVED into
+   the active workbench's right-pane slot (see Shell.tsx). No display rule on
+   .termSlot — it would out-cascade .hiddenTab and paint a second terminal
+   under the chat tab. */
+.termHost { display: flex; flex-direction: column; flex: 1; min-height: 0; height: 100%; }
+
+/* quick pick head hint: which root was searched, which build is running */
+.quickHint { margin-left: auto; margin-right: 8px; color: var(--fg-faint); font-size: 10px; text-transform: none; letter-spacing: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 55%; }
 
 /* tool log */
 .toolLog { flex: 1; overflow-y: auto; font-size: 12px; font-family: var(--font-mono); position: relative; outline: none; }

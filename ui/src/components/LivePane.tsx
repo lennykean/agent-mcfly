@@ -5,6 +5,7 @@ import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
 import { emitTerminalSelection, updateSnapshot } from '../lib/workspace';
 import { termReleasedChord } from '../lib/keys';
+import { rgba } from '../lib/palette';
 
 interface Config { tools: string[]; token: string; platform?: string }
 
@@ -74,6 +75,9 @@ function PtySession({ tool, token, cwd, platform, attachId, steal, visible, onPt
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Xterm | null>(null);
   const [status, setStatus] = useState<'connecting' | 'up' | 'closed' | 'taken'>('connecting');
+  // the PTY this session OWNS, learned from the server's control frame: a
+  // reconnect (any effect re-run) must re-attach to it, never spawn fresh
+  const myPty = useRef<string | undefined>(attachId);
   const onPtyIdRef = useRef(onPtyId);
   onPtyIdRef.current = onPtyId;
   const onExitRef = useRef(onExit);
@@ -173,10 +177,14 @@ function PtySession({ tool, token, cwd, platform, attachId, steal, visible, onPt
     // the server, or every terminal start leaves a ghost PTY
     const timer = setTimeout(() => {
       const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      // re-runs attach to the pty we already own (self-reattach steals: the
+      // dying socket is our own); only a truly fresh session spawns one
+      const attach = myPty.current ?? attachId;
+      const doSteal = attach && attach !== attachId ? true : steal;
       const sock = new WebSocket(
         `${proto}://${location.host}/ws/pty?token=${token}&tool=${encodeURIComponent(tool)}&cwd=${encodeURIComponent(cwd ?? '')}`
-        + (attachId ? `&attach=${attachId}` : '')
-        + (attachId && steal ? '&steal=1' : ''),
+        + (attach ? `&attach=${attach}` : '')
+        + (attach && doSteal ? '&steal=1' : ''),
       );
       ws = sock;
       sock.onopen = () => {
@@ -188,7 +196,7 @@ function PtySession({ tool, token, cwd, platform, attachId, steal, visible, onPt
         if (typeof e.data === 'string' && e.data.charCodeAt(0) === 0) {
           try {
             const c = JSON.parse(e.data.slice(1));
-            if (c.ptyId) onPtyIdRef.current(c.ptyId);
+            if (c.ptyId) { myPty.current = c.ptyId; onPtyIdRef.current(c.ptyId); }
             if (c.exit || c.gone) onExitRef.current();
             if (c.busy || c.taken) setStatus('taken'); // take-back stays possible
           } catch { /* not a control frame after all */ }
@@ -260,6 +268,10 @@ function PtySession({ tool, token, cwd, platform, attachId, steal, visible, onPt
 interface TermEntry {
   key: number;
   tool: string;
+  // the folder this terminal LAUNCHED in, frozen at creation — the live cwd
+  // prop follows the active workspace, and a prop change must never touch
+  // an established socket (it would respawn fresh-started PTYs)
+  cwd?: string;
   attachId?: string; // set when adopting an existing PTY
   steal?: boolean;
   nonce: number; // bump to force a fresh socket (take-back)
@@ -270,16 +282,39 @@ interface TermEntry {
 // terminal stays mounted while backgrounded; '+' opens the picker (attach an
 // existing PTY from the gallery, or start a new tool in the open folder).
 // Refresh detaches all (PTYs persist server-side; re-adopt via the gallery).
-export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFileRef, onFollowSession, onFollowResolve, ctl }: {
+export interface TermCtl {
+  // no dir: a new shell in the CURRENT terminal's project (fallback: the
+  // active workspace). A dir targets that project (the folder-row icon).
+  startNew: (dir?: string) => void;
+  focusOrNext: (fromTerm: boolean) => void;
+  cycle: (dir: 1 | -1) => void;
+  confirmKill: () => void;
+  // multi-root: reveal the terminal tab running a session, if one is open here
+  showSession: (provider: string, id: string) => boolean;
+}
+
+// a root workspace whose session is open in the workbench — terminals tied
+// to one get the green dot, the agent's name, and the root's color
+export interface LinkedRoot { provider: string; id: string; label: string; color?: string; active: boolean }
+
+export function LiveTerm({ cwd, projects, currentSession, linkedRoots, onToolStart, onPtyId, onOpenFileRef, onFollowSession, onFollowResolve, onActiveSession, ctl }: {
   cwd?: string;
+  // distinct open project folders — with 2+, the picker asks WHICH one a
+  // new terminal starts in (default: the active workspace's)
+  projects?: string[];
   currentSession?: { provider: string; id: string } | null;
-  onToolStart?: (tool: string) => void;
+  linkedRoots?: LinkedRoot[];
+  onToolStart?: (tool: string, dir?: string) => void;
   onPtyId?: (id: string, tool: string, fresh: boolean) => void;
   onOpenFileRef?: (path: string, line?: number) => void;
   onFollowSession?: (session: { provider: string; id: string; pwd: string }) => void;
-  onFollowResolve?: (pty: { title?: string | null; cwd: string }) => void;
+  // ptyId rides along so a manually-picked session still TIES this terminal
+  onFollowResolve?: (pty: { id: string; title?: string | null; cwd: string }) => void;
+  // a USER terminal-tab switch, with the session that terminal is linked to
+  // (null when unlinked) — the shell switches workbenches on it
+  onActiveSession?: (session: LivePty['session']) => void;
   // keyboard chords reach in from the app: focus/cycle terminals, start new
-  ctl?: React.MutableRefObject<{ startNew: () => void; focusOrNext: (fromTerm: boolean) => void; cycle: (dir: 1 | -1) => void; confirmKill: () => void } | null>;
+  ctl?: React.MutableRefObject<TermCtl | null>;
 }) {
   const [config, setConfig] = useState<Config | null>(null);
   const [error, setError] = useState<string>();
@@ -310,6 +345,9 @@ export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFile
   }, [active]);
 
   const sessionOf = (ptyId?: string) => ptys.find((p) => p.id === ptyId)?.session ?? null;
+  // the open root a terminal's session ties it to, if any
+  const linkOf = (session: LivePty['session']) =>
+    (session ? linkedRoots?.find((r) => r.provider === session.provider && r.id === session.id) : undefined);
 
   // workspace_state: which terminals exist, which is focused, whose session
   useEffect(() => {
@@ -335,13 +373,23 @@ export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFile
     return key;
   };
 
-  const startNew = (tool: string) => {
-    addTerm({ tool });
-    onToolStart?.(tool);
+  // which project the picker starts tools in: sticky choice, defaulting to
+  // the active workspace's folder
+  const projectChoices = projects?.length ? projects : cwd ? [cwd] : [];
+  const [startIn, setStartIn] = useState<string>();
+  const effStart = startIn && projectChoices.includes(startIn) ? startIn
+    : cwd && projectChoices.includes(cwd) ? cwd : projectChoices[0];
+
+  const startNew = (tool: string, dir?: string) => {
+    const at = dir ?? effStart ?? cwd;
+    addTerm({ tool, cwd: at });
+    onToolStart?.(tool, at);
   };
+  // the tmux-style chord inherits the CURRENT terminal's project
+  const dirOfCurrent = () => terms.find((t) => t.key === active)?.cwd ?? cwd;
 
   const adopt = (p: LivePty, doSteal: boolean) => {
-    addTerm({ tool: p.tool, attachId: p.id, steal: doSteal, ptyId: p.id });
+    addTerm({ tool: p.tool, cwd: p.cwd, attachId: p.id, steal: doSteal, ptyId: p.id });
   };
 
   const removeTerm = (key: number) => {
@@ -374,23 +422,37 @@ export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFile
   // active terminal, and pressed again FROM a terminal it cycles the tabs
   useEffect(() => {
     if (!ctl) return;
+    // keyboard tab switches are USER switches: report the landing terminal's
+    // session, same as a click, so sync mode follows either way
+    const goTo = (entry: TermEntry) => {
+      setActive(entry.key);
+      onActiveSession?.(sessionOf(entry.ptyId));
+    };
     ctl.current = {
-      startNew: () => startNew('_'),
+      startNew: (dir?: string) => startNew('_', dir ?? dirOfCurrent()),
       focusOrNext: (fromTerm: boolean) => {
         if (!terms.length) return; // the picker is already the view
         if (fromTerm && active !== null && terms.length > 1) {
           const i = terms.findIndex((t) => t.key === active);
-          setActive(terms[(i + 1) % terms.length].key);
+          goTo(terms[(i + 1) % terms.length]);
         } else if (active === null) {
-          setActive(terms[0].key);
+          goTo(terms[0]);
         }
       },
       cycle: (dir: 1 | -1) => {
         if (!terms.length) return;
         const i = Math.max(0, terms.findIndex((t) => t.key === active));
-        setActive(terms[(i + dir + terms.length) % terms.length].key);
+        goTo(terms[(i + dir + terms.length) % terms.length]);
       },
       confirmKill: () => { if (active !== null) setConfirmKill(active); },
+      showSession: (provider: string, id: string) => {
+        const hit = terms.find((e) => {
+          const s = sessionOf(e.ptyId);
+          return !!s && s.provider === provider && s.id === id;
+        });
+        if (hit) setActive(hit.key);
+        return !!hit;
+      },
     };
   });
 
@@ -425,19 +487,30 @@ export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFile
         </div>
       )}
       <div className="liveTabs">
-        {terms.map((e) => (
-          <span key={e.key} className={`liveTab ${active === e.key ? 'active' : ''}`} onClick={() => setActive(e.key)}>
-            {isWatched(sessionOf(e.ptyId))
-              ? <span className="liveDot" title="this terminal is running the session you're watching" />
-              : <span className="codicon codicon-terminal" />}
-            {e.tool === '_' ? 'shell' : e.tool}
+        {terms.map((e) => {
+          const sess = sessionOf(e.ptyId);
+          const link = linkOf(sess);
+          const label = link ? link.label : e.tool === '_' ? 'shell' : e.tool;
+          return (
             <span
-              className="codicon codicon-close liveTabClose"
-              title="Detach (leave it running)"
-              onClick={(ev) => { ev.stopPropagation(); removeTerm(e.key); }}
-            />
-          </span>
-        ))}
+              key={e.key}
+              className={`liveTab ${active === e.key ? 'active' : ''}`}
+              style={link?.color ? { background: rgba(link.color, 0.22) } : undefined}
+              title={label}
+              onClick={() => { setActive(e.key); onActiveSession?.(sess); }}
+            >
+              {link
+                ? <span className="liveDot" title={link.active ? "this terminal is running the session you're watching" : `linked to ${link.label}`} />
+                : <span className="codicon codicon-terminal" />}
+              <span className="liveTabLabel">{label}</span>
+              <span
+                className="codicon codicon-close liveTabClose"
+                title="Detach (leave it running)"
+                onClick={(ev) => { ev.stopPropagation(); removeTerm(e.key); }}
+              />
+            </span>
+          );
+        })}
         <span className={`liveTab plus ${active === null ? 'active' : ''}`} title="New / attach" onClick={() => setActive(null)}>
           <span className="codicon codicon-add" />
         </span>
@@ -474,7 +547,7 @@ export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFile
               key={`${e.key}:${e.nonce}`}
               tool={e.tool}
               token={config.token}
-              cwd={cwd}
+              cwd={e.cwd ?? cwd}
               platform={config.platform}
               attachId={e.attachId}
               steal={e.steal}
@@ -499,7 +572,20 @@ export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFile
 
           {ptys.length > 0 && (
             <>
-              <div className="pickerTitle">attach a terminal</div>
+              <div className="pickerTitle">
+                attach a terminal
+                {ptys.some((p) => !p.attached && !tabOf(p.id)) && (
+                  <button
+                    className="killDetached"
+                    title="Kill every detached terminal (ones no window is using)"
+                    onClick={() => {
+                      const dead = ptys.filter((p) => !p.attached && !tabOf(p.id));
+                      void Promise.all(dead.map((p) => fetch('/api/pty-kill', { method: 'POST', body: JSON.stringify({ id: p.id }) })))
+                        .then(() => setPtys((cur) => cur.filter((x) => !dead.some((d) => d.id === x.id))));
+                    }}
+                  >✕ clean up detached</button>
+                )}
+              </div>
               <div className="liveGallery">
                 {ptys.map((p) => {
                   const own = tabOf(p.id);
@@ -507,11 +593,15 @@ export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFile
                   <div
                     key={p.id}
                     className={`ptyTile ${p.attached && !own ? 'inUse' : ''} ${isWatched(p.session) ? 'watching' : ''}`}
-                    onClick={() => (own ? setActive(own.key) : p.attached ? setConfirmSteal(p.id) : adopt(p, false))}
+                    onClick={() => {
+                      if (own) { setActive(own.key); onActiveSession?.(p.session); }
+                      else if (p.attached) setConfirmSteal(p.id);
+                      else { adopt(p, false); onActiveSession?.(p.session); }
+                    }}
                   >
                     <div className="tileHead">
-                      {isWatched(p.session)
-                        ? <span className="liveDot" title="running the session you're watching" />
+                      {linkOf(p.session)
+                        ? <span className="liveDot" title={isWatched(p.session) ? "running the session you're watching" : `linked to ${linkOf(p.session)?.label}`} />
                         : <span className="codicon codicon-terminal" />}
                       <span className="tileName">
                         {p.tool === '_' ? 'shell' : p.tool} · {p.cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop()}
@@ -560,9 +650,23 @@ export function LiveTerm({ cwd, currentSession, onToolStart, onPtyId, onOpenFile
           )}
 
           <div className="pickerTitle">start a session</div>
-          {cwd ? (
+          {effStart ? (
             <>
-              <div className="pickerHint">in {cwd}</div>
+              {projectChoices.length > 1 && (
+                <div className="startProjects">
+                  {projectChoices.map((p) => (
+                    <button
+                      key={p}
+                      className={`projChip ${effStart === p ? 'active' : ''}`}
+                      title={p}
+                      onClick={() => setStartIn(p)}
+                    >
+                      <span className="codicon codicon-folder" /> {p.replace(/[\\/]+$/, '').split(/[\\/]/).pop()}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <div className="pickerHint">in {effStart}</div>
               {config?.tools.map((t) => (
                 <button key={t} className="pickerTool" onClick={() => startNew(t)}>
                   {t === '_' ? '_ blank terminal' : `▸ ${t}`}

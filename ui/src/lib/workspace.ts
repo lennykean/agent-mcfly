@@ -5,7 +5,24 @@
 
 type Ev = Record<string, unknown> & { kind: string };
 
-const snapshot: Record<string, unknown> = {};
+// multi-root: each workspace (project pwd) owns a snapshot; the shell points
+// this module at the ACTIVE workspace and only the active one reports. The
+// server stores snapshots per scope so an agent in project A still sees what
+// the user last had open there while they work in project B.
+const snapshots = new Map<string, Record<string, unknown>>();
+let scope = '';
+let snapshot: Record<string, unknown> = snapFor('');
+function snapFor(key: string) {
+  let s = snapshots.get(key);
+  if (!s) { s = {}; snapshots.set(key, s); }
+  return s;
+}
+export function setWorkspaceScope(pwd: string | null | undefined) {
+  const key = pwd ?? '';
+  if (key === scope) return;
+  scope = key;
+  snapshot = snapFor(key);
+}
 let events: (Ev & { ts: number })[] = [];
 let timer: number | undefined;
 let lastFlush = 0;
@@ -54,14 +71,16 @@ function queue() {
 
 function flush() {
   lastFlush = Date.now();
-  // visible lines are pulled at flush time — cheaper than scroll listeners
-  const body = document.querySelector('.editorPane .editorBody');
+  // visible lines are pulled at flush time — cheaper than scroll listeners.
+  // Multiple workspaces stay mounted; only the VISIBLE editor body counts.
+  const body = [...document.querySelectorAll('.editorPane .editorBody')]
+    .find((el) => el instanceof HTMLElement && el.offsetParent !== null);
   if (body) {
     const start = Number(body.getAttribute('data-start-line') ?? 1);
     const top = Math.floor(body.scrollTop / 18) + start;
     snapshot.visible_lines = [top, top + Math.ceil(body.clientHeight / 18)];
   }
-  const payload = JSON.stringify({ snapshot, events });
+  const payload = JSON.stringify({ scope, snapshot, events });
   events = [];
   void fetch('/api/workspace-events', { method: 'POST', body: payload }).catch(() => { /* best effort */ });
 }
@@ -86,7 +105,11 @@ export function onEditorSelection(cb: typeof editorSelCb) { editorSelCb = cb; }
 let lastDownEditorPath: string | null | false = false; // false = outside any editor
 let lastDownAt = 0; // clears only apply to entries OLDER than the click
 
+let watching = false;
 export function watchSelections() {
+  // document-level singletons: every mounted workspace calls this, once wires it
+  if (watching) return;
+  watching = true;
   document.addEventListener('mousedown', (e) => {
     const body = e.target instanceof Element ? e.target.closest('.editorBody') : null;
     lastDownEditorPath = body ? body.getAttribute('data-path') : false;

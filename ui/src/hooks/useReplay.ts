@@ -3,6 +3,8 @@ import { appendMessages, createTimeline, durationFor, foldState, indexAtTime } f
 import type { SessionMeta, Step, TailResponse, Timeline } from '../types';
 
 const POLL_MS = 2500;
+const POLL_HIDDEN_MS = 10_000; // backgrounded workbenches tail gently — a
+// heavy hidden session refolding mid-drag steals frames from the visible one
 
 export interface AgentNode {
   key: string; // timeline key ('main' or child session id)
@@ -11,7 +13,7 @@ export interface AgentNode {
   agentType?: string;
 }
 
-export function useReplay() {
+export function useReplay(active = true) {
   const [session, setSession] = useState<SessionMeta | null>(null);
   const timelines = useRef(new Map<string, Timeline>());
   const [viewKey, setViewKey] = useState('main');
@@ -111,9 +113,9 @@ export function useReplay() {
     const id = setInterval(() => {
       void tailOnce('main');
       if (viewKey !== 'main') void tailOnce(viewKey);
-    }, POLL_MS);
+    }, active ? POLL_MS : POLL_HIDDEN_MS);
     return () => clearInterval(id);
-  }, [session, viewKey, tailOnce]);
+  }, [session, viewKey, tailOnce, active]);
 
   const steps: Step[] = timelines.current.get(viewKey)?.steps ?? [];
   const head = Math.max(0, steps.length - 1);

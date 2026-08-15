@@ -26,9 +26,11 @@ const runLenient = (root, args) => new Promise((resolve, reject) => {
   });
 });
 
-// grep the work tree (tracked files) with an extended regex
+// grep the work tree (tracked files) with an extended regex; smart case —
+// an all-lowercase query matches case-insensitively, any capital goes exact
 export async function grep(root, q) {
-  const out = await runLenient(root, ['grep', '-n', '-I', '--no-color', '-E', '--', q]);
+  const smart = /[A-Z]/.test(q) ? [] : ['-i'];
+  const out = await runLenient(root, ['grep', '-n', '-I', '--no-color', '-E', ...smart, '--', q]);
   return out.split('\n').filter(Boolean).slice(0, 500).map((l) => {
     // CRLF work trees: the \r would block the $ anchor (JS "." skips \r)
     const m = l.replace(/\r$/, '').match(/^(.+?):(\d+):(.*)$/);
@@ -63,9 +65,10 @@ export async function diffAgainstRef(root, ref, file) {
   return parseUnified(out);
 }
 
-// find tracked files by name substring, case-insensitive
+// find files by name substring, case-insensitive: tracked AND untracked
+// (minus ignored) — a freshly created file must be findable
 export async function listFiles(root, q) {
-  const out = await runLenient(root, ['ls-files']);
+  const out = await runLenient(root, ['ls-files', '--cached', '--others', '--exclude-standard']);
   const needle = q.toLowerCase();
   return out.split('\n').filter(Boolean)
     .filter((p) => p.toLowerCase().includes(needle))
