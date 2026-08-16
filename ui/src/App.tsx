@@ -17,7 +17,7 @@ import type { TermCtl } from './components/LivePane';
 import type { Review, ReviewComment, SessionMeta, WorkspaceSource } from './types';
 import { withConnection } from './lib/api';
 import { normPath, pathWithin, resolveWaypoint, type WaypointEntry } from './lib/timeline';
-import { APP_CHORDS, actionOf, focusEditor, justArmed, setDeferredSink, termReleasedChord, type Action } from './lib/keys';
+import { APP_CHORDS, actionOf, focusEditor, justArmed, notify, setDeferredSink, termReleasedChord, type Action } from './lib/keys';
 import { QuickPick } from './components/QuickPick';
 import type { McflySettings } from './components/Settings';
 import { emit, onEditorSelection, updateSnapshot, watchSelections } from './lib/workspace';
@@ -404,9 +404,14 @@ export default function Workbench({
   // title reads context-first: agent (when a session is open), then the
   // project (~-relative when under home), then the app. Bare = just the app.
   const [home, setHome] = useState<string>();
+  // a local VS Code to hand folders to (the editor icon hides without one)
+  const [hasEditor, setHasEditor] = useState(false);
   useEffect(() => {
     fetch(withConnection('/api/config', source?.connection)).then((r) => r.json())
-      .then((d) => { if (typeof d.home === 'string') setHome(d.home); })
+      .then((d) => {
+        if (typeof d.home === 'string') setHome(d.home);
+        setHasEditor(!!d.editor);
+      })
       .catch(() => { /* title just shows the full path */ });
   }, [source?.connection]);
   useEffect(() => {
@@ -615,6 +620,16 @@ export default function Workbench({
         .find((x) => (x as HTMLElement).offsetParent !== null) as HTMLElement | undefined)?.focus();
     }));
   }, [treeAgents, termCtl, setRightOpen, setRightTab]);
+  // hand a LOCAL project folder to VS Code (the server launches `code`, so
+  // the browser never asks about a vscode:// link)
+  const onTreeOpenEditor = useCallback((k: string) => {
+    const project = treeAgents.find((a) => a.key === k);
+    if (!project?.pwd || project.source) return; // remote paths mean nothing locally
+    void fetch('/api/open-editor', { method: 'POST', body: JSON.stringify({ path: project.pwd }) })
+      .then((r) => (r.ok ? null : r.json()))
+      .then((err) => { if (err?.error) notify(err.error); })
+      .catch(() => notify('could not reach the server'));
+  }, [treeAgents]);
   const activeRoot = roots.find((rt) => rt.active);
   const activeColor = roots.length > 1 ? activeRoot?.color : undefined;
 
@@ -1604,6 +1619,7 @@ export default function Workbench({
                   onSelect={onTreeSelect}
                   onCloseRoot={roots.length > 1 ? onTreeCloseRoot : undefined}
                   onOpenTerminal={onTreeOpenTerminal}
+                  onOpenEditor={hasEditor ? onTreeOpenEditor : undefined}
                   onEscapeTop={() => addRootRef.current?.focus()}
                 />
               </div>

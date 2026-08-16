@@ -31,7 +31,7 @@ const FADE_MS = 320; // matches .agentGone in app.css
 // any depth, Enter switches views, and Up past the first row reaches the
 // header action. Crossing into another panel still takes panelUp/panelDown.
 export function AgentTree({
-  agents, viewKey, collapsed, onToggle, onSelect, onCloseRoot, onOpenTerminal, onEscapeTop,
+  agents, viewKey, collapsed, onToggle, onSelect, onCloseRoot, onOpenTerminal, onOpenEditor, onEscapeTop,
 }: {
   agents: TreeAgent[]; viewKey: string;
   // collapse state is CONTROLLED: every mounted workbench renders this same
@@ -42,6 +42,9 @@ export function AgentTree({
   onCloseRoot?: (key: string) => void;
   // when set, workspace group rows offer a terminal icon: new shell there
   onOpenTerminal?: (key: string) => void;
+  // ...and an editor icon, for LOCAL folders only (a remote path means
+  // nothing to a local VS Code)
+  onOpenEditor?: (key: string) => void;
   // ArrowUp from the first row moves to the AGENTS header action.
   onEscapeTop?: () => void;
 }) {
@@ -173,6 +176,13 @@ export function AgentTree({
             {node.agentType ? `[${node.agentType}] ` : ''}
             {node.label}
           </span>
+          {onOpenEditor && node.kind === 'workspace' && !node.remote && (
+            <span
+              className="codicon codicon-vscode wsEditBtn"
+              title={`Open ${node.label} in VS Code`}
+              onClick={(e) => { e.stopPropagation(); onOpenEditor(node.key); }}
+            />
+          )}
           {onOpenTerminal && node.kind === 'workspace' && (
             <span
               className="codicon codicon-terminal wsTermBtn"

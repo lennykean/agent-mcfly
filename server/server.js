@@ -9,7 +9,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import * as claudeCode from './loaders/claude-code.js';
 import * as codex from './loaders/codex.js';
-import { alive, attachPty, detectTools, killAllPtys, killPty, listPtys, reapOrphans, setPtySession, TOKEN } from './pty.js';
+import { alive, attachPty, detectTools, hasEditor, openInEditor, killAllPtys, killPty, listPtys, reapOrphans, setPtySession, TOKEN } from './pty.js';
 import { connectSsh, disconnectAllSsh, disconnectSsh, getSshConnection, listSshConnections } from './ssh.js';
 import * as review from './review.js';
 import * as git from './git.js';
@@ -139,7 +139,27 @@ const server = http.createServer(async (req, res) => {
           platform: remote.platform, home: remote.home,
         });
       }
-      return json(res, 200, { tools: [...detectTools(), '_'], token: TOKEN, pwd: process.cwd(), platform: process.platform, home: os.homedir() });
+      return json(res, 200, {
+        tools: [...detectTools(), '_'], token: TOKEN, pwd: process.cwd(),
+        platform: process.platform, home: os.homedir(),
+        editor: hasEditor(), // a local VS Code to hand folders to
+      });
+    }
+    // open a LOCAL folder in VS Code. Launching `code` here (rather than a
+    // vscode:// link) keeps the browser from asking permission every time.
+    if (url.pathname === '/api/open-editor' && req.method === 'POST') {
+      let body = '';
+      req.on('data', (c) => { body += c; });
+      req.on('end', () => {
+        try {
+          const { path: target } = JSON.parse(body);
+          if (!target || !git.okRoot(target)) return json(res, 404, { error: 'no such folder' });
+          if (!hasEditor()) return json(res, 404, { error: 'VS Code (code) is not on PATH' });
+          openInEditor(target);
+          json(res, 200, { ok: true });
+        } catch (e) { json(res, 400, { error: String(e.message ?? e) }); }
+      });
+      return;
     }
     if (url.pathname === '/api/workspace/validate') {
       const pwd = url.searchParams.get('pwd');

@@ -9,7 +9,7 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { WebSocketServer } from 'ws';
 import pty from '@lydell/node-pty';
 import headless from '@xterm/headless';
@@ -53,6 +53,20 @@ export function toolFlags(tool) {
 export function detectTools() {
   tools ??= CANDIDATE_TOOLS.filter(which);
   return tools;
+}
+
+// VS Code, for handing a project folder over. Detected once, like the agent
+// CLIs; the launcher is fire-and-forget so a slow editor never blocks a request.
+let editor;
+export function hasEditor() {
+  editor ??= which('code');
+  return editor;
+}
+export function openInEditor(dir) {
+  // .cmd on Windows needs a shell; detached+unref so it outlives this request
+  const cmd = WIN ? 'code.cmd' : 'code';
+  const child = spawn(cmd, [dir], { detached: true, stdio: 'ignore', shell: WIN, windowsHide: true });
+  child.unref();
 }
 
 // The server may itself have been launched from inside an agent session; the
