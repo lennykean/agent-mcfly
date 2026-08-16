@@ -31,6 +31,38 @@ const norm = projectPathKey;
 // file -> { mtime, meta } head-scan cache (cwd lives in the first line)
 const headCache = new Map();
 
+// ---- codex teams: matching a spawn_agent call to the sub-agent's thread ----
+const jsonField = (raw, key) => {
+  try {
+    const v = JSON.parse(typeof raw === 'string' ? raw : JSON.stringify(raw))?.[key];
+    return typeof v === 'string' ? v : undefined;
+  } catch { return undefined; }
+};
+// "/root/credential_hardening_review" reads as its leaf in the tree
+const agentLabel = (task) => (task ? String(task).split('/').filter(Boolean).pop() : 'agent');
+
+// agent_path -> thread, resolved by scanning rollout heads for the same team
+// root. Spawns are rare and the head scan is cached, but a child's file lands
+// a beat AFTER its call, so misses are re-tried rather than remembered.
+const childByPath = new Map(); // `${rootId}\u0000${agentPath}` -> { id, nickname }
+function childThread(file, agentPath) {
+  if (!file) return null;
+  let rootId;
+  try { rootId = headMeta(file, fs.statSync(file)).rootId; } catch { return null; }
+  if (!rootId) return null;
+  const key = `${rootId}\u0000${agentPath}`;
+  const hit = childByPath.get(key);
+  if (hit) return hit;
+  for (const candidate of rolloutFiles()) {
+    let meta;
+    try { meta = headMeta(candidate, fs.statSync(candidate)); } catch { continue; }
+    if (!meta.subagent || meta.rootId !== rootId || !meta.agentPath) continue;
+    const found = { id: rel(candidate), nickname: meta.nickname };
+    childByPath.set(`${rootId}\u0000${meta.agentPath}`, found);
+  }
+  return childByPath.get(key) ?? null;
+}
+
 function headMeta(file, st) {
   const hit = headCache.get(file);
   if (hit && hit.mtime === st.mtimeMs) return hit.meta;
@@ -51,7 +83,13 @@ function headMeta(file, st) {
 
 // Shared by local files and remote SFTP reads; transcript semantics stay here.
 export function parseHead(text) {
-  const meta = { id: undefined, cwd: undefined, label: undefined, nickname: undefined };
+  const meta = {
+    id: undefined, cwd: undefined, label: undefined, nickname: undefined,
+    // multi-agent teams (codex "collaboration"): a sub-agent thread names its
+    // parent, the root of the team, and its own agent path — the same string
+    // spawn_agent hands back as task_name
+    subagent: false, parentId: undefined, rootId: undefined, agentPath: undefined,
+  };
   for (const line of text.split('\n')) {
     if (meta.cwd && meta.label) break;
     if (!line.trim()) continue;
@@ -60,7 +98,12 @@ export function parseHead(text) {
     if (o.type === 'session_meta') {
       meta.id = o.payload?.id ?? o.payload?.session_id;
       meta.cwd = o.payload?.cwd;
-      meta.nickname = o.payload?.source?.subagent?.thread_spawn?.agent_nickname;
+      const spawn = o.payload?.source?.subagent?.thread_spawn;
+      meta.nickname = o.payload?.agent_nickname ?? spawn?.agent_nickname;
+      meta.subagent = o.payload?.thread_source === 'subagent' || !!o.payload?.source?.subagent;
+      meta.parentId = o.payload?.parent_thread_id ?? spawn?.parent_thread_id;
+      meta.rootId = o.payload?.session_id;
+      meta.agentPath = o.payload?.agent_path ?? spawn?.agent_path;
     } else if (!meta.label && o.type === 'response_item' && o.payload?.type === 'message' && o.payload.role === 'user') {
       // skip injected context blobs (<environment_context>, AGENTS.md dumps)
       const label = (o.payload.content ?? [])
@@ -104,6 +147,8 @@ export function listForCwd(cwd) {
     try { st = fs.statSync(file); } catch { continue; }
     const meta = headMeta(file, st);
     if (norm(meta.cwd) !== want) continue;
+    // sub-agent threads belong to their parent's tree, not the session list
+    if (meta.subagent) continue;
     const base = path.basename(file, '.jsonl').replace(/^rollout-/, '');
     out.push({
       id: rel(file),
@@ -246,6 +291,7 @@ function convertLine(line, messages, file, recoveryEnd) {
     case 'custom_tool_call':
     case 'function_call': {
       const metas = metasForCall(p);
+      for (const meta of metas) meta.file = file; // spawn results resolve their child thread from here
       callMeta.set(callKey(file, p.call_id), metas);
       push('assistant', metas.map((meta) => ({
         type: 'tool',
@@ -431,6 +477,12 @@ function directRenders(name, input, source = input) {
   if (name === 'view_image') {
     return [imageReadRender(input) ?? { verb: 'other', title: 'view_image' }];
   }
+  // codex teams: spawn_agent starts a sub-agent thread. The task message is
+  // encrypted, so the task NAME is what we can show.
+  if (name === 'spawn_agent') {
+    const task = jsonField(input, 'task_name');
+    return [{ verb: 'spawn_agent', agent_type: 'agent', title: task ?? 'agent' }];
+  }
   return [{ verb: 'other', title: `${name} ${truncate(String(input), 40)}` }];
 }
 
@@ -492,6 +544,20 @@ function patchResultFailed(text, output) {
 
 export function resultRender(meta, text, output) {
   if (!meta) return { verb: 'other' };
+  if (meta.render?.verb === 'spawn_agent') {
+    // the output names the agent (/root/task_name); its thread is a rollout
+    // of its own, findable by that path under the same team root
+    const task = jsonField(text, 'task_name') ?? meta.render.title;
+    const child = task ? childThread(meta.file, task) : null;
+    return {
+      verb: 'spawn_agent',
+      agent_id: task,
+      agent_type: child?.nickname ?? 'agent',
+      title: agentLabel(task),
+      status: 'running',
+      ...(child ? { child_session_id: child.id } : {}),
+    };
+  }
   if (meta.render?.verb === 'data') {
     return tableResult(output) ?? tableResult(text) ?? { verb: 'exec', stdout: execPayload(text), stderr: '' };
   }

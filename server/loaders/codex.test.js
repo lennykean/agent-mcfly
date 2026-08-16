@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { callRender, callRenders, parseThreadNames, patchRender, patchRenders, projectPathKey, resultRender, splitNumberedResults, tailFile, toolLabel } from './codex.js';
+import { callRender, callRenders, parseHead, parseThreadNames, patchRender, patchRenders, projectPathKey, resultRender, splitNumberedResults, tailFile, toolLabel } from './codex.js';
 
 test('project path identity folds Windows paths but preserves POSIX case', () => {
   assert.equal(projectPathKey('C:\\Repo\\App'), projectPathKey('c:/repo/app'));
@@ -200,4 +200,29 @@ test('recovers McFly table semantics from MCP results', () => {
   const bare = resultRender({ name: 'mcp__mcfly__run_table', render: call }, JSON.stringify(envelope));
   assert.equal(bare.verb, 'data');
   assert.deepEqual(bare.table, envelope.data);
+});
+
+test('codex teams: sub-agent threads stay out of the session list and link to their spawn', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcfly-codex-team-'));
+  const root = { session_id: 'root-1', id: 'root-1', cwd: dir, source: 'vscode' };
+  const child = {
+    session_id: 'root-1', id: 'kid-1', cwd: dir, parent_thread_id: 'root-1',
+    thread_source: 'subagent', agent_path: '/root/audit', agent_nickname: 'Euler',
+    source: { subagent: { thread_spawn: { parent_thread_id: 'root-1', depth: 1 } } },
+  };
+  assert.equal(parseHead(JSON.stringify({ type: 'session_meta', payload: root })).subagent, false);
+  const kid = parseHead(JSON.stringify({ type: 'session_meta', payload: child }));
+  assert.equal(kid.subagent, true);
+  assert.equal(kid.agentPath, '/root/audit');
+  assert.equal(kid.rootId, 'root-1');
+  assert.equal(kid.nickname, 'Euler');
+
+  // the call renders as an agent spawn; the result carries the agent's identity
+  const [call] = callRenders('spawn_agent', '{"task_name":"audit","fork_turns":"none"}');
+  assert.equal(call.verb, 'spawn_agent');
+  assert.equal(call.title, 'audit');
+  const done = resultRender({ name: 'spawn_agent', render: call }, '{"task_name":"/root/audit"}');
+  assert.equal(done.verb, 'spawn_agent');
+  assert.equal(done.agent_id, '/root/audit');
+  assert.equal(done.title, 'audit');
 });
