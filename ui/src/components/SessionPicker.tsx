@@ -191,7 +191,7 @@ export function SessionPicker({ initialPwd, initialProvider, initialFilter, sour
             spellCheck={false}
           />
           <button aria-label="Browse folders" title="Browse folders" onClick={() => setBrowse((b) => (b === null ? (pwd.trim() || (source ? '/' : 'C:\\')) : null))}>…</button>
-          {onAddRemote && <button className="codicon codicon-radio-tower" aria-label="Connect over SSH" title="Connect over SSH" onClick={onAddRemote} />}
+          {!source && onAddRemote && <button className="codicon codicon-radio-tower" aria-label="Connect over SSH" title="Connect over SSH" onClick={onAddRemote} />}
           <button onClick={() => go(pwd)} title="Open the project without choosing a session">open project folder</button>
         </div>
 
