@@ -144,18 +144,18 @@ function sudoCodexFixture(wrapper = [
           stderr = 'cannot restore inaccessible working directory';
         }
         else if (command === 'command -v codex') stdout = '/usr/local/bin/codex\n';
-        else if (command.startsWith('head -c 8192 -- ')) stdout = wrapper;
+        else if (command.startsWith('dd if=') && command.includes('bs=8192 count=1')) stdout = wrapper;
         else if (command.includes('CODEX_HOME')) stdout = `${stateDir}\n`;
-        else if (command.includes(' find ')) stdout = [id, String(transcript.length), '2', ''].join('\0');
-        else if (command.includes(' stat -c ')) {
+        else if (command.includes('find . ')) stdout = [id, String(transcript.length), ''].join('\0');
+        else if (command.includes('wc -c')) {
           const bytes = command.includes('session_index.jsonl') ? index : transcript;
-          stdout = `${bytes.length}\t2\n`;
+          stdout = `${bytes.length}\n`;
         }
-        else if (command.includes(' dd ')) {
+        else if (command.includes(' od ')) {
           const bytes = command.includes('session_index.jsonl') ? index : transcript;
-          const start = Number(command.match(/\bskip=(\d+)/)?.[1] ?? 0);
-          const count = Number(command.match(/\bcount=(\d+)/)?.[1] ?? bytes.length);
-          stdout = bytes.subarray(start, start + count).toString('base64');
+          const start = Number(command.match(/\s-j (\d+)/)?.[1] ?? 0);
+          const count = Number(command.match(/\s-N (\d+)/)?.[1] ?? bytes.length);
+          stdout = `${bytes.subarray(start, start + count).toString('hex').match(/../g)?.join(' ') ?? ''}\n`;
         } else { code = 127; stderr = 'unexpected command'; }
         if (stdout) channel.emit('data', stdout);
         if (stderr) channel.stderr.emit('data', stderr);
@@ -217,7 +217,8 @@ test('discovers and tails Codex through a validated sudo wrapper', async () => {
   assert.ok(commands.some((command) => command.includes("'/srv/codex owner'\\''s state/sessions'")));
   assert.ok(commands.every((command) => !command.includes(`${connection.home}/.codex`)));
   assert.ok(commands.some((command) => command.includes(stateDir.replace("'", "'\\''"))));
-  assert.ok(commands.filter((command) => command.includes(' dd ')).every((command) => command.endsWith('| base64 -w0')));
+  assert.ok(commands.some((command) => command.includes(' od -A n -v -t x1 -j ')));
+  assert.ok(commands.every((command) => !/head -c|-printf|stat -c|base64 -w0|status=none/.test(command)));
 });
 
 test('rejects an unsafe user in a Codex sudo wrapper', async () => {

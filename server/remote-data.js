@@ -160,7 +160,7 @@ async function detectSudoCodex(connection) {
   try {
     const executable = (await exec(connection, 'command -v codex', false, { timeout: 5_000, maxBytes: 4096 })).trim();
     if (!path.posix.isAbsolute(executable) || /[\r\n]/.test(executable)) return null;
-    const wrapper = await exec(connection, `head -c 8192 -- ${quote(executable)}`, false, { timeout: 5_000, maxBytes: 8192 });
+    const wrapper = await exec(connection, `dd if=${quote(executable)} bs=8192 count=1 2>/dev/null`, false, { timeout: 5_000, maxBytes: 8192 });
     const user = sudoWrapperUser(wrapper);
     if (!user) return null;
     const prefix = `cd /tmp && sudo -n -u ${quote(user)} -H`;
@@ -171,18 +171,24 @@ async function detectSudoCodex(connection) {
   } catch { return null; }
 }
 
+function rolloutTime(file) {
+  const hit = /rollout-(\d{4}-\d{2}-\d{2}T\d{2})-(\d{2})-(\d{2})/.exec(path.posix.basename(file));
+  const time = hit ? Date.parse(`${hit[1]}:${hit[2]}:${hit[3]}Z`) : 0;
+  return Number.isFinite(time) ? time : 0;
+}
+
 async function sudoCodexFiles(connection, access, root) {
-  const format = '%P\\0%s\\0%T@\\0';
-  const command = `if ${access.prefix} test -d ${quote(root)}; then ${access.prefix} find ${quote(root)} -type f -name ${quote('rollout-*.jsonl')} -printf ${quote(format)}; fi`;
+  const script = 'cd "$1" 2>/dev/null || exit 0\n'
+    + 'find . -type f -name "rollout-*.jsonl" -exec sh -c \'for file; do size=$(wc -c < "$file") || continue; printf "%s\\000%s\\000" "${file#./}" "$size"; done\' sh {} +';
+  const command = `${access.prefix} sh -c ${quote(script)} sh ${quote(root)}`;
   const fields = (await exec(connection, command, false, { maxBytes: MAX_CHUNK })).split('\0');
   if (fields.at(-1) === '') fields.pop();
-  if (fields.length % 3) throw new Error('invalid remote Codex file list');
+  if (fields.length % 2) throw new Error('invalid remote Codex file list');
   const out = [];
-  for (let i = 0; i < fields.length; i += 3) {
+  for (let i = 0; i < fields.length; i += 2) {
     const size = Number(fields[i + 1]);
-    const mtime = Number(fields[i + 2]);
-    if (!fields[i] || !Number.isFinite(size) || size < 0 || !Number.isFinite(mtime)) continue;
-    out.push({ id: fields[i], file: contained(connection, root, fields[i]), attrs: { size, mtimeMs: mtime * 1000 } });
+    if (!fields[i] || !Number.isSafeInteger(size) || size < 0) continue;
+    out.push({ id: fields[i], file: contained(connection, root, fields[i]), attrs: { size, mtimeMs: rolloutTime(fields[i]) } });
   }
   return out;
 }
@@ -200,21 +206,21 @@ async function codexIo(connection) {
       readIndex: (file) => readFile(connection, file),
     };
     const statAsUser = async (file) => {
-      const [size, mtime] = (await exec(connection,
-        `${access.prefix} stat -c ${quote('%s\t%Y')} -- ${quote(file)}`, false,
-        { maxBytes: 4096 })).trim().split(/\s+/).map(Number);
-      if (!Number.isFinite(size) || !Number.isFinite(mtime)) throw new Error('invalid remote Codex stat');
-      return { size, mtimeMs: mtime * 1000 };
+      const size = Number((await exec(connection,
+        `${access.prefix} sh -c ${quote('wc -c < "$1"')} sh ${quote(file)}`, false,
+        { maxBytes: 4096 })).trim());
+      if (!Number.isSafeInteger(size) || size < 0) throw new Error('invalid remote Codex stat');
+      return { size, mtimeMs: rolloutTime(file) };
     };
     const readRangeAsUser = async (file, start, length) => {
       const count = Math.min(length, MAX_CHUNK);
       if (!Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(count) || count < 0) throw new Error('invalid remote Codex range');
       if (!count) return Buffer.alloc(0);
-      const encoded = await exec(connection,
-        `${access.prefix} dd if=${quote(file)} bs=1 skip=${start} count=${count} status=none | base64 -w0`, false,
-        { maxBytes: Math.ceil(count / 3) * 4 + 4096 });
-      if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) throw new Error('invalid remote Codex bytes');
-      const buffer = Buffer.from(encoded, 'base64');
+      const encoded = (await exec(connection,
+        `${access.prefix} od -A n -v -t x1 -j ${start} -N ${count} ${quote(file)}`, false,
+        { maxBytes: count * 3 + 4096 })).replace(/\s/g, '');
+      if (!/^(?:[0-9a-fA-F]{2})*$/.test(encoded)) throw new Error('invalid remote Codex bytes');
+      const buffer = Buffer.from(encoded, 'hex');
       if (buffer.length > count) throw new Error('invalid remote Codex range');
       return buffer;
     };
