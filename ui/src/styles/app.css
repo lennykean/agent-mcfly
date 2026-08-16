@@ -93,7 +93,8 @@ pre, code { font-family: var(--font-mono); }
 
 .titleRight { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 .layoutToggles { display: flex; gap: 2px; }
-.layoutToggles button { font-size: 14px; padding: 0 6px; opacity: 0.45; }
+.layoutToggles button { font-size: 14px; padding: 0 6px; opacity: 0.45; background: none; border-color: transparent; }
+.layoutToggles button:hover { background: rgb(255 255 255 / 8%); }
 .layoutToggles button.on { opacity: 1; }
 
 .sessionToggle { display: inline-flex; align-items: center; gap: 5px; padding: 0 7px; opacity: 0.5; background: none; border: 1px solid transparent; color: var(--fg-dim); font-size: 13px; }
