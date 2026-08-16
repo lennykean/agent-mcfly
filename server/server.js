@@ -28,6 +28,12 @@ function json(res, code, obj) {
   res.end(JSON.stringify(obj));
 }
 
+function errorJson(res, error, fallback = 500) {
+  const body = { error: String(error.message ?? error) };
+  if (typeof error.code === 'string') body.code = error.code;
+  return json(res, error.status ?? fallback, body);
+}
+
 function remoteConnection(url) {
   const id = url.searchParams.get('connection');
   if (!id) return null;
@@ -35,6 +41,7 @@ function remoteConnection(url) {
   if (connection) return connection;
   const error = new Error('SSH connection not found');
   error.status = 404;
+  error.code = 'SSH_CONNECTION_NOT_FOUND';
   throw error;
 }
 
@@ -125,16 +132,22 @@ const server = http.createServer(async (req, res) => {
       }
     }
     if (url.pathname === '/api/config') {
-      const connection = url.searchParams.get('connection');
-      if (connection) {
-        const remote = getSshConnection(connection);
-        if (!remote) return json(res, 404, { error: 'SSH connection not found' });
+      const remote = remoteConnection(url);
+      if (remote) {
         return json(res, 200, {
           tools: [...remote.tools, '_'], token: TOKEN, pwd: remote.home,
           platform: remote.platform, home: remote.home,
         });
       }
       return json(res, 200, { tools: [...detectTools(), '_'], token: TOKEN, pwd: process.cwd(), platform: process.platform, home: os.homedir() });
+    }
+    if (url.pathname === '/api/workspace/validate') {
+      const pwd = url.searchParams.get('pwd');
+      const remote = remoteConnection(url);
+      if (pwd && (remote ? await remoteData.isDirectory(remote, pwd) : git.okRoot(pwd))) {
+        return json(res, 200, { ok: true });
+      }
+      return json(res, 404, { error: 'Workspace directory not found', code: 'WORKSPACE_NOT_FOUND' });
     }
     // live terminal registry (agent tmux: list-sessions / map to transcript);
     // mapped sessions carry their transcript title so the picker reads human
@@ -338,8 +351,9 @@ const server = http.createServer(async (req, res) => {
             : path.join(os.tmpdir(), `mcfly-paste-${Date.now()}${ext}`);
           if (!remote) fs.writeFileSync(file, Buffer.concat(chunks));
           json(res, 200, { path: file });
-        } catch {
-          json(res, 500, { error: 'write failed' });
+        } catch (error) {
+          if (error.status) errorJson(res, error);
+          else json(res, 500, { error: 'write failed' });
         }
       });
       return;
@@ -350,7 +364,9 @@ const server = http.createServer(async (req, res) => {
         const connection = remoteConnection(url)?.id ?? body.connection;
         const { id } = body;
         return json(res, 200, { ok: killPty(id, connection) });
-      } catch { return json(res, 400, { error: 'bad body' }); }
+      } catch (error) {
+        return error.status ? errorJson(res, error) : json(res, 400, { error: 'bad body' });
+      }
     }
     if (url.pathname === '/api/pty-session' && req.method === 'POST') {
       try {
@@ -358,7 +374,9 @@ const server = http.createServer(async (req, res) => {
         const connection = remoteConnection(url)?.id ?? body.connection;
         const { ptyId, provider, session, pwd } = body;
         return json(res, 200, { ok: setPtySession(ptyId, { provider, id: session, pwd }, connection) });
-      } catch { return json(res, 400, { error: 'bad body' }); }
+      } catch (error) {
+        return error.status ? errorJson(res, error) : json(res, 400, { error: 'bad body' });
+      }
     }
     // which agents have session history for this project directory
     if (url.pathname === '/api/providers') {
@@ -429,6 +447,7 @@ const server = http.createServer(async (req, res) => {
         if (remote) return json(res, 200, await remoteData.tailSession(remote, providerName, id, cursor));
         return json(res, 200, provider.tail(id, cursor));
       } catch (e) {
+        if (e.status) return errorJson(res, e);
         return json(res, e.code === 'ENOENT' || e.code === 2 ? 404 : 400, { error: String(e.message ?? e) });
       }
     }
@@ -448,7 +467,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(404);
     res.end('not found — in dev, use the vite server');
   } catch (e) {
-    json(res, e.status ?? 500, { error: String(e.message ?? e) });
+    errorJson(res, e);
   }
 });
 

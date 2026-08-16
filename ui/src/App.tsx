@@ -69,7 +69,7 @@ export interface WorkbenchProps {
   onState: (wsId: number, info: WsInfo) => void;
   onAddRoot: () => void;
   onAddRemote: () => void;
-  onCloseRoot: (wsId: number) => void;
+  onCloseRoot: (wsId: number, invalid?: boolean) => void;
   // a subagent row of ANOTHER root was picked: switch there and open it
   onSelectAgent: (wsId: number, key: string) => void;
   // a session appeared for a terminal launched here — the shell decides
@@ -171,10 +171,14 @@ export default function Workbench({
   // the URL (via the shell) is the source of truth: the `url` prop carries
   // this workspace's desired pwd/provider/session; adopting is idempotent —
   // once state matches, the effect no-ops, so report→shell→prop cannot loop
-  const { selectSession } = r;
+  const { clearSession, selectSession } = r;
   const sessionRef = useRef(r.session);
   sessionRef.current = r.session;
+  const desiredSession = url.pwd && url.provider && url.session
+    ? `${url.pwd}\0${url.provider}\0${url.session}` : undefined;
+  const [rejectedSession, setRejectedSession] = useState<string>();
   useEffect(() => {
+    let cancelled = false;
     const want = url;
     if (want.pwd) setPwd((cur) => (cur === want.pwd ? cur : want.pwd));
     const cur = sessionRef.current;
@@ -185,16 +189,54 @@ export default function Workbench({
       void (async () => {
         let meta: SessionMeta | undefined;
         try {
-          const list: SessionMeta[] = await (
-            await fetch(withConnection(`/api/sessions?pwd=${encodeURIComponent(uPwd)}&provider=${encodeURIComponent(provider)}`, source?.connection))
-          ).json();
+          const response = await fetch(withConnection(`/api/sessions?pwd=${encodeURIComponent(uPwd)}&provider=${encodeURIComponent(provider)}`, source?.connection));
+          const list = await response.json().catch(() => undefined);
+          if (cancelled) return;
+          if (!response.ok) {
+            if (response.status === 404 && (list?.code === 'SSH_CONNECTION_NOT_FOUND' || list?.code === 'WORKSPACE_NOT_FOUND')) {
+              onCloseRoot(wsId, true);
+            }
+            return;
+          }
           meta = Array.isArray(list) ? list.find((s) => s.id === sid || shortSessionId(s.id) === sid) : undefined;
-        } catch { /* fall through to minimal meta */ }
-        selectSession(meta ?? { id: sid, provider, label: sid.split('/').pop() ?? sid, cwd: uPwd, updated_at: 0, size: 0 });
+        } catch { return; }
+        if (meta) {
+          setRejectedSession(undefined);
+          selectSession(meta);
+        } else {
+          setRejectedSession(`${uPwd}\0${provider}\0${sid}`);
+          clearSession();
+        }
       })();
     }
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url, selectSession]);
+
+  // A root is valid only while its directory and, for SSH, its process-local
+  // connection exist. The server owns that truth; a definite 404 prunes the
+  // root and replaces its URL entry instead of leaving a dead workspace.
+  useEffect(() => {
+    if (!cwd) return;
+    let stopped = false;
+    let busy = false;
+    const validate = async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        const response = await fetch(withConnection(`/api/workspace/validate?pwd=${encodeURIComponent(cwd)}`, source?.connection));
+        const result = response.status === 404 ? await response.json().catch(() => undefined) : undefined;
+        if (!stopped && response.status === 404
+          && (result?.code === 'SSH_CONNECTION_NOT_FOUND' || result?.code === 'WORKSPACE_NOT_FOUND')) {
+          onCloseRoot(wsId, true);
+        }
+      } catch { /* a stopped/restarting server has not answered yet */ }
+      finally { busy = false; }
+    };
+    void validate();
+    const timer = setInterval(validate, 5000);
+    return () => { stopped = true; clearInterval(timer); };
+  }, [cwd, source?.connection, onCloseRoot, wsId]);
 
   const applyPick = useCallback((newPwd: string, s: SessionMeta) => {
     setPwd(newPwd);
@@ -232,7 +274,6 @@ export default function Workbench({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pwd, wsId, onFollowedPick]);
 
-  const { clearSession } = r;
   // "go" in the picker: the workbench opens the folder BARE, right away —
   // no session until one is picked. The picker stays open offering them.
   const scopeFolder = useCallback((newPwd: string) => {
@@ -250,17 +291,18 @@ export default function Workbench({
   // While the session is still loading, the URL intent stands in — reporting
   // "no session yet" would strip the session out of the URL mid-load.
   useEffect(() => {
+    const rejected = rejectedSession === desiredSession;
     onState(wsId, {
       pwd: pwd ?? url.pwd,
       cwd: pwd ?? r.session?.cwd ?? url.pwd,
-      provider: r.session?.provider ?? url.provider,
-      sessionShort: r.session ? shortSessionId(r.session.id) : url.session,
+      provider: r.session?.provider ?? (rejected ? undefined : url.provider),
+      sessionShort: r.session ? shortSessionId(r.session.id) : rejected ? undefined : url.session,
       sessionFull: r.session?.id,
       label: r.session ? (r.session.label || r.session.id.slice(0, 8)) : undefined,
       agents: r.agents.length > 1 ? r.agents : undefined,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wsId, pwd, r.session, url, r.agents]);
+  }, [wsId, pwd, r.session, url, r.agents, desiredSession, rejectedSession]);
 
   // Session detection: a tool started in the live terminal announces itself by
   // writing its transcript; poll this pwd's session list and auto-load the one
@@ -1754,6 +1796,11 @@ export default function Workbench({
             else onPickSession(wsId, p, s);
           }}
           onGo={scopeFolder}
+          onAddRemote={() => {
+            setPickerOpen(false);
+            setPickerSeed(undefined);
+            onAddRemote();
+          }}
           onClose={() => {
             setPickerOpen(false);
             setPickerSeed(undefined);

@@ -9,13 +9,14 @@ const PROVIDER_LABELS: Record<string, string> = { 'claude-code': 'claude', codex
 // Open-session flow: choose a folder -> confirm session history -> agent type
 // -> type-ahead over that project's sessions. Opening only the project is a
 // separate action. The ... button browses folders through the server.
-export function SessionPicker({ initialPwd, initialProvider, initialFilter, source, onPick, onGo, onClose }: {
+export function SessionPicker({ initialPwd, initialProvider, initialFilter, source, onPick, onGo, onAddRemote, onClose }: {
   initialPwd: string;
   initialProvider?: string; // pre-select this agent and load its sessions
   initialFilter?: string; // pre-fill the filter (e.g. an ambiguous title match)
   source?: WorkspaceSource;
   onPick: (pwd: string, session: SessionMeta) => void;
   onGo?: (pwd: string) => void; // scope the workbench to this folder, no session needed
+  onAddRemote?: () => void;
   onClose: () => void;
 }) {
   // the currently-open project wins; last-used pwd only seeds a bare open
@@ -190,6 +191,7 @@ export function SessionPicker({ initialPwd, initialProvider, initialFilter, sour
             spellCheck={false}
           />
           <button aria-label="Browse folders" title="Browse folders" onClick={() => setBrowse((b) => (b === null ? (pwd.trim() || (source ? '/' : 'C:\\')) : null))}>…</button>
+          {onAddRemote && <button className="codicon codicon-radio-tower" aria-label="Connect over SSH" title="Connect over SSH" onClick={onAddRemote} />}
           <button onClick={() => go(pwd)} title="Open the project without choosing a session">open project folder</button>
         </div>
 

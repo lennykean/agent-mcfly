@@ -73,9 +73,9 @@ test('SSH routes require explicit host-key confirmation and retain no credential
         session.on('sftp', (acceptSftp, rejectSftp) => {
           if (!sftpAvailable) { rejectSftp(); return; }
           const stream = acceptSftp();
-          stream.once('data', () => {
-            // SSH_FXP_VERSION, v3 — enough for the capability probe.
-            stream.write(Buffer.from([0, 0, 0, 5, 2, 0, 0, 0, 3]));
+          stream.on('STAT', (id, filename) => {
+            if (filename !== '/home/mcfly') return stream.status(id, 2); // SSH_FX_NO_SUCH_FILE
+            stream.attrs(id, { mode: fs.constants.S_IFDIR | 0o755, size: 0, atime: 0, mtime: 0 });
           });
         });
         session.on('exec', (acceptExec, rejectExec) => {
@@ -116,6 +116,21 @@ test('SSH routes require explicit host-key confirmation and retain no credential
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
 
+    const validWorkspace = await fetch(`${base}/api/workspace/validate?pwd=${encodeURIComponent(process.cwd())}`);
+    assert.equal(validWorkspace.status, 200);
+    assert.deepEqual(await validWorkspace.json(), { ok: true });
+    for (const invalid of ['', path.join(dir, 'missing'), path.join(process.cwd(), 'package.json')]) {
+      const response = await fetch(`${base}/api/workspace/validate${invalid ? `?pwd=${encodeURIComponent(invalid)}` : ''}`);
+      assert.equal(response.status, 404);
+      assert.equal((await response.json()).code, 'WORKSPACE_NOT_FOUND');
+    }
+    const unknownWorkspace = await fetch(`${base}/api/workspace/validate?pwd=%2Fhome%2Fmcfly&connection=gone`);
+    assert.equal(unknownWorkspace.status, 404);
+    assert.equal((await unknownWorkspace.json()).code, 'SSH_CONNECTION_NOT_FOUND');
+    const unknownSession = await fetch(`${base}/api/session?provider=codex&id=gone&connection=gone`);
+    assert.equal(unknownSession.status, 404);
+    assert.equal((await unknownSession.json()).code, 'SSH_CONNECTION_NOT_FOUND');
+
     const unknownResponse = await post('/api/ssh/connect', credentials);
     const unknown = await unknownResponse.json();
     assert.equal(unknownResponse.status, 409);
@@ -130,6 +145,13 @@ test('SSH routes require explicit host-key confirmation and retain no credential
     assert.equal(connected.platform, 'linux');
     assert.deepEqual(connected.tools, ['codex']);
     assert.equal(passwordAuthentications, 1);
+
+    const remoteWorkspace = await fetch(`${base}/api/workspace/validate?pwd=%2Fhome%2Fmcfly&connection=${encodeURIComponent(connected.id)}`);
+    assert.equal(remoteWorkspace.status, 200);
+    assert.deepEqual(await remoteWorkspace.json(), { ok: true });
+    const missingRemoteWorkspace = await fetch(`${base}/api/workspace/validate?pwd=%2Fmissing&connection=${encodeURIComponent(connected.id)}`);
+    assert.equal(missingRemoteWorkspace.status, 404);
+    assert.equal((await missingRemoteWorkspace.json()).code, 'WORKSPACE_NOT_FOUND');
 
     const listed = await (await fetch(`${base}/api/ssh/connections`)).json();
     assert.equal(listed.length, 1);

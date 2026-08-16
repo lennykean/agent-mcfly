@@ -8,12 +8,12 @@ import { Settings, type McflySettings } from './components/Settings';
 import { applyKeymap, focusEditor, setLeaders, setTmuxMode, setVimMode } from './lib/keys';
 import { normPath } from './lib/timeline';
 import { sameTerminalProject, terminalProjectKey, type TerminalProject } from './lib/terminal-project';
-import { withConnection } from './lib/api';
+import { formatSshPwd, parseSshPwd, withConnection } from './lib/api';
 import type { SessionMeta, WorkspaceSource } from './types';
 
 // ---- multi-root shell: the URL carries PARALLEL pwd/provider/session query
 // arrays (?pwd=A&pwd=B&session=x&session=y — index i is one root workspace;
-// repeated pwd values are fine) plus `active` for which root is visible.
+// SSH roots encode their authority directly in pwd). `active` selects a root.
 // Every root's Workbench stays mounted — switching hides one and shows
 // another with all its state (playhead, tabs, carets) intact. ----
 
@@ -23,24 +23,34 @@ type WorkbenchAction = (handle: WorkbenchHandle) => void;
 
 let nextWsId = 1;
 
-function parseUrl(): { list: WsSeed[]; active: number } {
+const sameSource = (a?: WorkspaceSource, b?: WorkspaceSource) => (!a && !b)
+  || (!!a && !!b && ((a.connection && a.connection === b.connection)
+    || (a.host.toLowerCase() === b.host.toLowerCase() && (!a.port || !b.port || a.port === b.port))));
+const sourceReady = (source?: WorkspaceSource) => !source || (!!source.connection && !!source.port);
+
+function parseUrl(): { list: WsSeed[]; active: number; legacy: boolean } {
   const q = new URLSearchParams(location.search);
   const pwds = q.getAll('pwd');
   const provs = q.getAll('provider');
   const sids = q.getAll('session');
   const connections = q.getAll('connection');
   const hosts = q.getAll('host');
-  const list: WsSeed[] = pwds.map((p, i) => ({
-    url: {
-      pwd: p || undefined,
-      provider: provs[i] || undefined,
-      session: sids[i] || undefined,
-    },
-    source: connections[i] ? { connection: connections[i], host: hosts[i] || connections[i] } : undefined,
-  }));
+  const list: WsSeed[] = pwds.map((p, i) => {
+    const ssh = parseSshPwd(p);
+    return {
+      url: {
+        pwd: (ssh?.pwd ?? p) || undefined,
+        provider: provs[i] || undefined,
+        session: sids[i] || undefined,
+      },
+      source: ssh
+        ? { connection: '', host: ssh.host, port: ssh.port }
+        : connections[i] ? { connection: connections[i], host: hosts[i] || connections[i], port: 0 } : undefined,
+    };
+  });
   if (!list.length) list.push({ url: {} });
   const active = Math.min(Math.max(0, Number(q.get('active') ?? 0) || 0), list.length - 1);
-  return { list, active };
+  return { list, active, legacy: connections.length > 0 || hosts.length > 0 };
 }
 
 const folderOf = (p?: string) => p?.replace(/[\\/]+$/, '').split(/[\\/]/).pop();
@@ -50,9 +60,11 @@ export default function Shell() {
   const [wss, setWss] = useState<Ws[]>(() => initial.list.map((seed) => ({ id: nextWsId++, ...seed })));
   const [activeIdx, setActiveIdx] = useState(initial.active);
   const [infos, setInfos] = useState<Record<number, WsInfo>>({});
+  const replaceUrl = useRef(initial.legacy);
   const handles = useRef(new Map<number, WorkbenchHandle>());
   const pendingHandleActions = useRef(new Map<number, WorkbenchAction[]>());
   const pendingProjectIds = useRef(new Map<string, number>());
+  const termCtl = useRef<TermCtl | null>(null);
   const activeId = wss[Math.min(activeIdx, wss.length - 1)]?.id;
 
   const onState = useCallback((wsId: number, info: WsInfo) => {
@@ -81,20 +93,21 @@ export default function Shell() {
   // ---- URL writing: parallel arrays, one column per root that has a folder;
   // roots still empty (a fresh ⊕) stay out of the URL until they open one ----
   useEffect(() => {
+    if (wss.some((w) => !sourceReady(w.source))) return;
     const cols = wss.map((w) => ({ w, st: stateOf(w) })).filter((c) => c.st.pwd);
     const params = new URLSearchParams();
-    for (const c of cols) params.append('pwd', c.st.pwd!);
+    for (const c of cols) params.append('pwd', c.w.source
+      ? formatSshPwd(c.w.source.host, c.w.source.port, c.st.pwd!)
+      : c.st.pwd!);
     if (cols.some((c) => c.st.provider)) for (const c of cols) params.append('provider', c.st.provider ?? '');
     if (cols.some((c) => c.st.session)) for (const c of cols) params.append('session', c.st.session ?? '');
-    if (cols.some((c) => c.w.source)) {
-      for (const c of cols) params.append('connection', c.w.source?.connection ?? '');
-      for (const c of cols) params.append('host', c.w.source?.host ?? '');
-    }
     const activeCol = cols.findIndex((c) => c.w.id === activeId);
     if (activeCol > 0) params.set('active', String(activeCol));
     const next = params.toString();
+    const replace = replaceUrl.current;
+    replaceUrl.current = false;
     if (next !== location.search.replace(/^\?/, '')) {
-      history.pushState(null, '', next ? `?${next}` : location.pathname);
+      history[replace ? 'replaceState' : 'pushState'](null, '', next ? `?${next}` : location.pathname);
     }
   }, [wss, infos, activeId, stateOf]);
 
@@ -102,11 +115,17 @@ export default function Shell() {
   // by position, extras unmount, new columns mount fresh
   useEffect(() => {
     const onPop = () => {
-      const { list, active } = parseUrl();
-      setWss((cur) => list.map((seed, i) => ({
-        id: cur[i] && cur[i].source?.connection === seed.source?.connection ? cur[i].id : nextWsId++,
-        ...seed,
-      })));
+      const { list, active, legacy } = parseUrl();
+      if (legacy) replaceUrl.current = true;
+      setWss((cur) => list.map((seed, i) => {
+        const source = seed.source && !sourceReady(seed.source) && sameSource(cur[i]?.source, seed.source)
+          ? cur[i].source : seed.source;
+        return {
+          id: cur[i] && sameSource(cur[i].source, source) ? cur[i].id : nextWsId++,
+          ...seed,
+          source,
+        };
+      }));
       setActiveIdx(active);
     };
     window.addEventListener('popstate', onPop);
@@ -214,7 +233,7 @@ export default function Shell() {
   }, []);
 
   // ---- roots list for the AGENTS panel (same array to every workbench) ----
-  const roots = useMemo<RootInfo[]>(() => wss.map((w) => ({
+  const roots = useMemo<RootInfo[]>(() => wss.filter((w) => sourceReady(w.source)).map((w) => ({
     id: w.id,
     label: infos[w.id]?.label ?? folderOf(infos[w.id]?.pwd ?? w.url.pwd) ?? 'new workspace',
     active: w.id === activeId,
@@ -279,24 +298,85 @@ export default function Shell() {
     setWss([...wssRef.current, { id, source, url: { pwd } }]);
     setActiveIdx(wssRef.current.length);
   }, [addPicker]);
-  const onCloseRoot = useCallback((wsId: number) => {
+  const removeRoots = useCallback((ids: ReadonlySet<number>, replace = false) => {
     const cur = wssRef.current;
-    const rest = cur.filter((w) => w.id !== wsId);
+    const rest = cur.filter((w) => !ids.has(w.id));
+    if (rest.length === cur.length) return;
+    if (replace) {
+      for (const w of cur) {
+        const pwd = infosRef.current[w.id]?.pwd ?? w.url.pwd;
+        if (!ids.has(w.id) || !pwd || !sourceReady(w.source)) continue;
+        const project = { cwd: pwd, source: w.source };
+        const stillOpen = rest.some((other) => {
+          const otherPwd = infosRef.current[other.id]?.pwd ?? other.url.pwd;
+          return sourceReady(other.source) && !!otherPwd
+            && sameTerminalProject({ cwd: otherPwd, source: other.source }, project);
+        });
+        if (!stillOpen) termCtl.current?.dropProject(project);
+      }
+    }
     const next = rest.length ? rest : [{ id: nextWsId++, url: {} }];
     const curActive = cur[Math.min(activeIdxRef.current, cur.length - 1)]?.id;
     const keep = next.findIndex((w) => w.id === curActive);
+    if (replace) replaceUrl.current = true;
+    wssRef.current = next;
     setWss(next);
     setActiveIdx(keep >= 0 ? keep : Math.max(0, Math.min(activeIdxRef.current, next.length - 1)));
     setInfos((c) => {
-      const { [wsId]: _gone, ...restInfo } = c;
-      return restInfo;
+      const nextInfo = { ...c };
+      for (const id of ids) delete nextInfo[id];
+      return nextInfo;
     });
   }, []);
+  const onCloseRoot = useCallback((wsId: number, invalid = false) => {
+    removeRoots(new Set([wsId]), invalid);
+  }, [removeRoots]);
+
+  // ssh:// URLs carry durable host identity, not the server's process-local
+  // connection UUID. Resolve them against the live registry; a definite miss
+  // is dropped so credentials are requested again, while outages retry.
+  const unresolved = wss.filter((w) => !sourceReady(w.source))
+    .map((w) => `${w.source!.host.toLowerCase()}:${w.source!.port}`).join('\0');
+  useEffect(() => {
+    if (!unresolved) return;
+    let stopped = false;
+    let busy = false;
+    const resolve = async () => {
+      if (busy) return;
+      busy = true;
+      try {
+        const response = await fetch('/api/ssh/connections');
+        if (!response.ok) return;
+        const listed = await response.json();
+        if (stopped || !Array.isArray(listed)) return;
+        const cur = wssRef.current;
+        const dropped = new Set<number>();
+        const next = cur.map((w) => {
+          if (sourceReady(w.source)) return w;
+          const live = listed.find((item) => item?.id && item.id === w.source!.connection)
+            ?? listed.find((item) => item?.id
+            && String(item.host).toLowerCase() === w.source!.host.toLowerCase()
+            && (!w.source!.port || (Number(item.port) || 22) === w.source!.port));
+          if (!live) { dropped.add(w.id); return null; }
+          return { ...w, source: { connection: live.id, host: live.host, port: Number(live.port) || 22 } };
+        }).filter((w): w is Ws => w !== null);
+        if (dropped.size) {
+          removeRoots(dropped, true);
+        } else {
+          wssRef.current = next;
+          setWss(next);
+        }
+      } catch { /* server unavailable: keep retrying until it can answer */ }
+      finally { busy = false; }
+    };
+    void resolve();
+    const timer = setInterval(resolve, 2500);
+    return () => { stopped = true; clearInterval(timer); };
+  }, [unresolved, removeRoots]);
 
   // ---- the shared live terminal: ONE LiveTerm for all roots, portaled into
   // the active workbench's right-pane slot (offscreen keeps it mounted when
   // the slot is closed, so PTY sockets survive) ----
-  const termCtl = useRef<TermCtl | null>(null);
   const [slots, setSlots] = useState<Record<number, HTMLDivElement | null>>({});
   const termSlot = useCallback((wsId: number, el: HTMLDivElement | null) => {
     setSlots((cur) => (cur[wsId] === el ? cur : { ...cur, [wsId]: el }));
@@ -448,6 +528,7 @@ export default function Shell() {
     const seen = new Set<string>();
     const out: TerminalProject[] = [];
     for (const w of wss) {
+      if (!sourceReady(w.source)) continue;
       const p = infos[w.id]?.pwd ?? w.url.pwd;
       if (!p) continue;
       const project = { cwd: p, source: w.source };
@@ -476,7 +557,7 @@ export default function Shell() {
 
   return (
     <>
-      {wss.map((w) => (
+      {wss.map((w) => sourceReady(w.source) && (
         <div key={w.id} className="wsHost" style={{ display: w.id === activeId ? 'contents' : 'none' }}>
           <Workbench
             wsId={w.id}
@@ -547,6 +628,10 @@ export default function Shell() {
             else attachSession(pwd, session);
           }}
           onGo={attachFolder}
+          onAddRemote={() => {
+            closeAddPicker();
+            setSshOpen(true);
+          }}
           onClose={closeAddPicker}
         />
       )}

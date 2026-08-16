@@ -308,6 +308,7 @@ export interface TermCtl {
   focusOrNext: (fromTerm: boolean) => void;
   cycle: (dir: 1 | -1) => void;
   confirmKill: () => void;
+  dropProject: (project: TerminalProject) => void;
   // multi-root: reveal the terminal tab running a session, if one is open here
   showSession: (provider: string, id: string, source?: WorkspaceSource) => boolean;
 }
@@ -343,6 +344,7 @@ export function LiveTerm({ cwd, source, projects, currentSession, linkedRoots, o
   const [ptys, setPtys] = useState<LivePty[]>([]);
   const [confirmSteal, setConfirmSteal] = useState<string>();
   const [project, setProject] = useState<TerminalProject | undefined>(cwd ? { cwd, source } : undefined);
+  const [droppedProjects, setDroppedProjects] = useState<ReadonlySet<string>>(() => new Set());
   const nextKey = useRef(1);
   const paneRef = useRef<HTMLDivElement>(null);
   const projectTabsRef = useRef<HTMLDivElement>(null);
@@ -362,6 +364,16 @@ export function LiveTerm({ cwd, source, projects, currentSession, linkedRoots, o
     return [...out.values()];
   }, [projects, source, terms]);
 
+  useEffect(() => {
+    const reopened = new Set([...(projects ?? []), ...(currentProject ? [currentProject] : [])].map(terminalProjectKey));
+    setDroppedProjects((cur) => {
+      if (![...cur].some((key) => reopened.has(key))) return cur;
+      const next = new Set(cur);
+      for (const key of reopened) next.delete(key);
+      return next;
+    });
+  }, [projects, currentProject]);
+
   // registry poll: feeds the gallery AND the tab badges (which terminal is
   // the live agent of the session being watched)
   useEffect(() => {
@@ -371,10 +383,17 @@ export function LiveTerm({ cwd, source, projects, currentSession, linkedRoots, o
       if (busy) return;
       busy = true;
       const sources = new Map(seedSources.map((item) => [sourceKey(item), item]));
+      let liveConnections: Set<string> | undefined;
       try {
-        const saved = await fetch('/api/ssh/connections').then((r) => r.ok ? r.json() : []);
+        const response = await fetch('/api/ssh/connections');
+        const saved = response.ok ? await response.json() : undefined;
+        if (Array.isArray(saved)) liveConnections = new Set(saved.map((item) => String(item?.id ?? '')).filter(Boolean));
         for (const item of Array.isArray(saved) ? saved : []) {
-          if (item?.id) sources.set(item.id, { connection: item.id, host: item.label || item.host || item.id });
+          if (item?.id) sources.set(item.id, {
+            connection: item.id,
+            host: item.host || item.id,
+            port: Number(item.port) || 22,
+          });
         }
       } catch { /* open projects still supply their connection */ }
       const batches = await Promise.all([...sources.values()].map(async (item) => {
@@ -394,7 +413,19 @@ export function LiveTerm({ cwd, source, projects, currentSession, linkedRoots, o
       if (!stopped) {
         const ok = batches.filter((batch) => batch !== null);
         setPtys(ok.flatMap((batch) => batch.ptys));
-        setConfigs((cur) => Object.assign({}, cur, ...ok.map((batch) => ({ [batch.key]: batch.config }))));
+        setConfigs((cur) => Object.assign(
+          {},
+          Object.fromEntries(Object.entries(cur).filter(([key]) => !key || !liveConnections || liveConnections.has(key))),
+          ...ok.map((batch) => ({ [batch.key]: batch.config })),
+        ));
+        if (liveConnections) {
+          setTerms((cur) => {
+            const next = cur.filter((term) => !term.source || liveConnections!.has(term.source.connection));
+            setActive((key) => key !== null && !next.some((term) => term.key === key) ? null : key);
+            return next;
+          });
+          setProject((cur) => cur?.source && !liveConnections!.has(cur.source.connection) ? undefined : cur);
+        }
         setError(ok.length ? undefined : 'api unreachable');
       }
       busy = false;
@@ -426,12 +457,12 @@ export function LiveTerm({ cwd, source, projects, currentSession, linkedRoots, o
     ];
     for (const p of choices) {
       const key = terminalProjectKey(p);
-      if (seen.has(key)) continue;
+      if (seen.has(key) || droppedProjects.has(key)) continue;
       seen.add(key);
       out.push(p);
     }
     return out;
-  }, [projects, currentProject, terms, ptys]);
+  }, [projects, currentProject, terms, ptys, droppedProjects]);
   const activeProject = projectChoices.find((p) => sameTerminalProject(p, project))
     ?? projectChoices.find((p) => sameTerminalProject(p, currentProject))
     ?? projectChoices[0];
@@ -570,6 +601,22 @@ export function LiveTerm({ cwd, source, projects, currentSession, linkedRoots, o
         goTo(scopedTerms[next]);
       },
       confirmKill: () => { if (active !== null) setConfirmKill(active); },
+      dropProject: (target: TerminalProject) => {
+        const key = terminalProjectKey(target);
+        setDroppedProjects((cur) => cur.has(key) ? cur : new Set(cur).add(key));
+        setTerms((cur) => {
+          const removed = cur.filter((term) => term.cwd
+            && sameTerminalProject({ cwd: term.cwd, source: term.source }, target));
+          const next = cur.filter((term) => !removed.includes(term));
+          setActive((activeKey) => activeKey !== null && !next.some((term) => term.key === activeKey) ? null : activeKey);
+          setConfirmKill((killKey) => killKey !== null && removed.some((term) => term.key === killKey) ? null : killKey);
+          return next;
+        });
+        setConfirmSteal((stealKey) => stealKey && ptys.some((pty) => ptyKey(pty.id, pty.source) === stealKey
+          && sameTerminalProject({ cwd: pty.cwd, source: pty.source }, target)) ? undefined : stealKey);
+        setProject((cur) => sameTerminalProject(cur, target) ? undefined : cur);
+        updateSnapshot(terminalProjectScope(target), { terminals: [] });
+      },
       showSession: (provider: string, id: string, targetSource?: WorkspaceSource) => {
         const hit = terms.find((e) => {
           const s = sessionOf(e.ptyId, e.source);

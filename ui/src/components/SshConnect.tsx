@@ -4,6 +4,7 @@ import type { WorkspaceSource } from '../types';
 interface SshConnection {
   id: string;
   host: string;
+  port: number;
   home?: string;
 }
 
@@ -26,7 +27,6 @@ export function SshConnect({ onConnected, onClose }: {
   const [auth, setAuth] = useState<'agent' | 'password' | 'key'>('agent');
   const [password, setPassword] = useState('');
   const [privateKey, setPrivateKey] = useState('');
-  const [keyName, setKeyName] = useState('');
   const [passphrase, setPassphrase] = useState('');
   const [challenge, setChallenge] = useState<HostKeyChallenge>();
   const [error, setError] = useState('');
@@ -69,7 +69,11 @@ export function SshConnect({ onConnected, onClose }: {
       if (!response.ok) throw new Error(data.error || `SSH connection failed (${response.status})`);
       const connection = data as SshConnection;
       if (!connection.id) throw new Error('SSH connection did not return an id.');
-      onConnected({ connection: connection.id, host: connection.host || host.trim() }, connection.home || '');
+      onConnected({
+        connection: connection.id,
+        host: connection.host || host.trim(),
+        port: connection.port || Number(port),
+      }, connection.home || '');
     } catch (err) {
       if (mounted.current) setError(err instanceof Error ? err.message : 'SSH connection failed.');
     } finally {
@@ -119,16 +123,14 @@ export function SshConnect({ onConnected, onClose }: {
               <input
                 id="ssh-key"
                 type="file"
-                required
-                onChange={(e) => {
-                  const file = e.target.files?.[0];
-                  setKeyName(file?.name ?? '');
-                  setPrivateKey('');
-                  setChallenge(undefined);
-                  if (file) void file.text().then(setPrivateKey).catch(() => setError('Could not read that private key.'));
-                }}
-              />
-              {keyName && <span title={keyName}>{keyName}</span>}
+                  required
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    setPrivateKey('');
+                    setChallenge(undefined);
+                    if (file) void file.text().then(setPrivateKey).catch(() => setError('Could not read that private key.'));
+                  }}
+                />
             </span>
 
             <label htmlFor="ssh-passphrase">passphrase</label>

@@ -102,7 +102,10 @@ async function safeReadDir(connection, dir) {
 
 export async function isDirectory(connection, dir) {
   try { return isDir(await call(await sftpFor(connection), 'stat', dir)); }
-  catch { return false; }
+  catch (error) {
+    if (missing(error) || error?.code === 'ENOTDIR') return false;
+    throw error;
+  }
 }
 
 export async function fsList(connection, root, relative = '') {

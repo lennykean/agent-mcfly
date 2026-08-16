@@ -148,7 +148,9 @@ dialog.pickerOverlay:not([open]) { display: none; }
 .sshGrid label { color: var(--fg-faint); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
 .sshGrid .pickerInput { width: 100%; box-sizing: border-box; }
 .sshFile { display: flex; min-width: 0; align-items: center; gap: 8px; color: var(--fg-dim); }
-.sshFile span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sshFile input { min-width: 0; width: 100%; color: var(--fg-dim); font: inherit; }
+.sshFile input::file-selector-button { margin-right: 8px; padding: 2px 8px; background: #3c3c3c; color: var(--fg); border: 1px solid #555; border-radius: 3px; cursor: pointer; font: inherit; }
+.sshFile input::file-selector-button:hover { background: #4a4a4a; }
 .sshFingerprint { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; border: 1px solid var(--yellow); border-radius: 4px; color: var(--yellow); font-size: 11px; }
 .sshFingerprint code { user-select: text; overflow-wrap: anywhere; }
 .sshError { color: var(--red); font-size: 11px; }

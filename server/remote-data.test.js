@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { execFileSync } from 'node:child_process';
 import * as git from './git.js';
-import { fsList, fsRead, gitIo, listProviders, listSessions, pasteImage, tailSession } from './remote-data.js';
+import { fsList, fsRead, gitIo, isDirectory, listProviders, listSessions, pasteImage, tailSession } from './remote-data.js';
 
 class FakeSftp {
   constructor(files = {}) {
@@ -170,13 +170,16 @@ function sudoCodexFixture(wrapper = [
 }
 
 test('browses and reads contained remote files over SFTP', async () => {
-  const { connection } = fixture();
+  const { connection, sftp } = fixture();
   assert.deepEqual(await fsList(connection, '/repo'), [
     { name: 'src', dir: true },
     { name: 'readme.txt', dir: false },
   ]);
   assert.deepEqual(await fsRead(connection, '/repo', 'readme.txt'), { content: 'hello remote' });
   await assert.rejects(() => fsRead(connection, '/repo', '../secret'), { code: 'EACCES' });
+  assert.equal(await isDirectory(connection, '/missing'), false);
+  sftp.stat = (_file, callback) => callback(Object.assign(new Error('connection lost'), { code: 'ECONNRESET' }));
+  await assert.rejects(() => isDirectory(connection, '/repo'), { code: 'ECONNRESET' });
 });
 
 test('discovers and incrementally parses remote Codex and Claude sessions locally', async () => {

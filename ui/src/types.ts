@@ -18,6 +18,7 @@ export interface SessionMeta {
 export interface WorkspaceSource {
   connection: string;
   host: string;
+  port: number;
 }
 
 export type RenderVerb = 'read_file' | 'patch_file' | 'write_file' | 'exec' | 'data' | 'spawn_agent' | 'other';
