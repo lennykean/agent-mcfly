@@ -139,7 +139,11 @@ function sudoCodexFixture(wrapper = [
         let stdout = '';
         let stderr = '';
         let code = 0;
-        if (command === 'command -v codex') stdout = '/usr/local/bin/codex\n';
+        if (command.includes('sudo ') && !command.includes('cd /tmp && sudo ')) {
+          code = 1;
+          stderr = 'cannot restore inaccessible working directory';
+        }
+        else if (command === 'command -v codex') stdout = '/usr/local/bin/codex\n';
         else if (command.startsWith('head -c 8192 -- ')) stdout = wrapper;
         else if (command.includes('CODEX_HOME')) stdout = `${stateDir}\n`;
         else if (command.includes(' find ')) stdout = [id, String(transcript.length), '2', ''].join('\0');
@@ -209,6 +213,7 @@ test('discovers and tails Codex through a validated sudo wrapper', async () => {
   assert.equal(tail.messages[0].content[0].text, 'Effective Codex');
   assert.equal(tail.cursor, transcript.length);
   assert.ok(commands.some((command) => command.includes("sudo -n -u 'codex' -H")));
+  assert.ok(commands.filter((command) => command.includes('sudo ')).every((command) => command.includes('cd /tmp && sudo ')));
   assert.ok(commands.some((command) => command.includes("'/srv/codex owner'\\''s state/sessions'")));
   assert.ok(commands.every((command) => !command.includes(`${connection.home}/.codex`)));
   assert.ok(commands.some((command) => command.includes(stateDir.replace("'", "'\\''"))));

@@ -163,7 +163,7 @@ async function detectSudoCodex(connection) {
     const wrapper = await exec(connection, `head -c 8192 -- ${quote(executable)}`, false, { timeout: 5_000, maxBytes: 8192 });
     const user = sudoWrapperUser(wrapper);
     if (!user) return null;
-    const prefix = `sudo -n -u ${quote(user)} -H`;
+    const prefix = `cd /tmp && sudo -n -u ${quote(user)} -H`;
     const stateDir = (await exec(connection,
       `${prefix} sh -c ${quote('printf "%s\\n" "${CODEX_HOME:-$HOME/.codex}"')}`, false,
       { timeout: 5_000, maxBytes: 4096 })).trim();
