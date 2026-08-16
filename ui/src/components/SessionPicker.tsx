@@ -45,8 +45,10 @@ export function SessionPicker({ initialPwd, initialProvider, initialFilter, sour
   // server-backed folder browser (the native dialog cannot give real paths)
   const [browse, setBrowse] = useState<string | null>(null);
   const [browseDirs, setBrowseDirs] = useState<string[] | null>(null);
+  const [browseError, setBrowseError] = useState('');
   useEffect(() => {
     if (browse === null) return;
+    setBrowseError('');
     setBrowseDirs(null);
     fetch(endpoint(`/api/fs/list?root=${encodeURIComponent(browse)}&path=`))
       .then((r) => r.json())
@@ -66,6 +68,22 @@ export function SessionPicker({ initialPwd, initialProvider, initialFilter, sour
     if (browse === null) return;
     const slash = browse.includes('\\') || /^[A-Za-z]:/.test(browse) ? '\\' : '/';
     setBrowse(browse === '/' ? `/${name}` : `${browse.replace(/[\\/]+$/, '')}${slash}${name}`);
+  };
+  const createFolder = async () => {
+    if (browse === null) return;
+    const name = window.prompt('New folder name')?.trim();
+    if (!name) return;
+    setBrowseError('');
+    try {
+      const response = await fetch(endpoint('/api/fs/mkdir'), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ root: browse, name }),
+      });
+      const data = await response.json().catch(() => null);
+      if (!response.ok) throw new Error(typeof data?.error === 'string' ? data.error : `Request failed (${response.status})`);
+      browseInto(name);
+    } catch (error) {
+      setBrowseError(`The server failed to create the folder: ${error instanceof Error ? error.message : String(error)}`);
+    }
   };
   const go = (raw: string) => {
     const clean = raw.trim();
@@ -208,7 +226,9 @@ export function SessionPicker({ initialPwd, initialProvider, initialFilter, sour
               ))}
               {browseDirs?.length === 0 && <div className="pickerHint">no subfolders</div>}
             </div>
+            {browseError && <div className="pickerError">{browseError}</div>}
             <div className="fbActions">
+              <button onClick={createFolder}><span className="codicon codicon-new-folder" /> new folder</button>
               <button onClick={() => openSessionsIn(browse)}>open a session in this folder</button>
               <button onClick={() => setBrowse(null)}>cancel</button>
             </div>

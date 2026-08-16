@@ -123,6 +123,10 @@ export async function fsList(connection, root, relative = '') {
     .sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name));
 }
 
+export async function fsMkdir(connection, root, name) {
+  await call(await sftpFor(connection), 'mkdir', contained(connection, root, name));
+}
+
 export async function fsRead(connection, root, relative = '') {
   const paths = pathsFor(connection);
   const target = contained(connection, root, relative);

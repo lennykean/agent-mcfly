@@ -391,7 +391,28 @@ const server = http.createServer(async (req, res) => {
         count: p.listForCwd(pwd).length,
       })));
     }
-    // read-only file explorer, contained under a caller-supplied root (the session cwd)
+    if (url.pathname === '/api/fs/mkdir' && req.method === 'POST') {
+      try {
+        const { root, name } = await requestJson(req);
+        if (typeof root !== 'string' || !root || typeof name !== 'string' || !name || name.trim() !== name || name === '.' || name === '..' || /[\\/\0]/.test(name)) {
+          return json(res, 400, { error: 'The folder name is not valid.' });
+        }
+        const remote = remoteConnection(url);
+        if (remote) await remoteData.fsMkdir(remote, root, name);
+        else {
+          if (!git.okRoot(root)) return json(res, 404, { error: 'The parent folder does not exist.' });
+          fs.mkdirSync(path.join(path.resolve(root), name));
+        }
+        return json(res, 200, { ok: true });
+      } catch (error) {
+        if (error.status) return errorJson(res, error);
+        const status = error.code === 'EACCES' || error.code === 'EPERM' ? 403
+          : error.code === 'EEXIST' ? 409
+            : error.code === 'ENOENT' || error.code === 2 ? 404 : 400;
+        return json(res, status, { error: String(error.message ?? error) });
+      }
+    }
+    // file explorer, contained under a caller-supplied root (the session cwd)
     if (url.pathname === '/api/fs/list' || url.pathname === '/api/fs/read') {
       const remote = remoteConnection(url);
       if (remote) {

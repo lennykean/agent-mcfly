@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { execFileSync } from 'node:child_process';
 import * as git from './git.js';
-import { fsList, fsRead, gitIo, isDirectory, listProviders, listSessions, pasteImage, tailSession } from './remote-data.js';
+import { fsList, fsMkdir, fsRead, gitIo, isDirectory, listProviders, listSessions, pasteImage, tailSession } from './remote-data.js';
 
 class FakeSftp {
   constructor(files = {}) {
@@ -179,6 +179,9 @@ test('browses and reads contained remote files over SFTP', async () => {
   ]);
   assert.deepEqual(await fsRead(connection, '/repo', 'readme.txt'), { content: 'hello remote' });
   await assert.rejects(() => fsRead(connection, '/repo', '../secret'), { code: 'EACCES' });
+  await fsMkdir(connection, '/repo', 'new-folder');
+  assert.equal(await isDirectory(connection, '/repo/new-folder'), true);
+  await assert.rejects(() => fsMkdir(connection, '/repo', '../outside'), { code: 'EACCES' });
   assert.equal(await isDirectory(connection, '/missing'), false);
   sftp.stat = (_file, callback) => callback(Object.assign(new Error('connection lost'), { code: 'ECONNRESET' }));
   await assert.rejects(() => isDirectory(connection, '/repo'), { code: 'ECONNRESET' });
