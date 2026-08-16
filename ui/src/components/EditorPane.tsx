@@ -1775,12 +1775,12 @@ export function EditorPane({
         <div
           key={`pf${pinnedFlash}`}
           ref={active === 'pinned' ? activeTabRef : undefined}
-          className={`tab pinnedTab ${active === 'pinned' ? 'active' : ''} ${pinnedFlash ? 'tabFlashAnim' : ''}`}
-          title={pinned?.path ?? 'the file being read or edited by the replay'}
+          className={`tab pinnedTab ${pinned ? '' : 'idle'} ${active === 'pinned' ? 'active' : ''} ${pinnedFlash ? 'tabFlashAnim' : ''}`}
+          title={pinned?.path ?? 'Agent workspace is idle'}
           onClick={() => onSelect('pinned')}
         >
-          <span className="pinDot" />
-          {pinned ? (pinned.mode === 'diff' ? '± ' : '') + shortName(pinned.path) : 'live'}
+          {pinned && <span className="pinDot" />}
+          {pinned ? (pinned.mode === 'diff' ? '± ' : '') + shortName(pinned.path) : <>agent workspace <span className="roBadge">idle</span></>}
           {pinned && tabReviewDot(pinned.path)}
           {pinned && onOpenCurrent && (
             <span
@@ -1981,7 +1981,7 @@ export function EditorPane({
           onVisualMode={setVisualMode}
         />
       ) : (
-        <div className="emptyHint">files the agent reads will open here</div>
+        <div className="emptyHint">waiting for agent file activity</div>
       )}
       {(vim || findOpen || cmdOpen) && (
         <div className="statusBar">
