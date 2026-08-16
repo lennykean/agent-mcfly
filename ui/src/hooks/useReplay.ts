@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { appendMessages, createTimeline, durationFor, foldState, indexAtTime } from '../lib/timeline';
 import type { SessionMeta, Step, TailResponse, Timeline } from '../types';
+import { withConnection } from '../lib/api';
 
 const POLL_MS = 2500;
 const POLL_HIDDEN_MS = 10_000; // backgrounded workbenches tail gently — a
@@ -13,7 +14,7 @@ export interface AgentNode {
   agentType?: string;
 }
 
-export function useReplay(active = true) {
+export function useReplay(active = true, connection?: string) {
   const [session, setSession] = useState<SessionMeta | null>(null);
   const timelines = useRef(new Map<string, Timeline>());
   const [viewKey, setViewKey] = useState('main');
@@ -43,7 +44,7 @@ export function useReplay(active = true) {
       // large sessions arrive in server-capped chunks; drain them back to back
       for (;;) {
         const res = await fetch(
-          `/api/session?provider=${encodeURIComponent(tl.provider)}&id=${encodeURIComponent(tl.sessionId)}&cursor=${tl.cursor}`,
+          withConnection(`/api/session?provider=${encodeURIComponent(tl.provider)}&id=${encodeURIComponent(tl.sessionId)}&cursor=${tl.cursor}`, connection),
         );
         if (!res.ok) return; // agent transcript may not exist yet
         const data: TailResponse = await res.json();
@@ -81,7 +82,7 @@ export function useReplay(active = true) {
     } finally {
       busy.current.delete(tl);
     }
-  }, []);
+  }, [connection]);
 
   // folder-only mode: scoped to a pwd with no session loaded
   const clearSession = useCallback(() => {

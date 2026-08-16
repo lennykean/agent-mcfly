@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { applySelect, clickMode } from '../lib/select';
 import { actionOf, focusEditor, synthClick } from '../lib/keys';
+import { withConnection } from '../lib/api';
 
 interface Entry { name: string; dir: boolean }
 
@@ -16,8 +17,9 @@ export function fileIcon(name: string): string {
   return 'file';
 }
 
-function Dir({ root, rel, name, depth, onFileClick, selection, onToggleSelect }: {
+function Dir({ root, rel, name, depth, connection, onFileClick, selection, onToggleSelect }: {
   root: string; rel: string; name?: string; depth: number;
+  connection?: string;
   onFileClick: (rel: string, ev: React.MouseEvent, dirFiles: string[]) => void;
   selection: string[]; onToggleSelect: (rel: string) => void;
 }) {
@@ -30,7 +32,7 @@ function Dir({ root, rel, name, depth, onFileClick, selection, onToggleSelect }:
   useEffect(() => {
     if (!open) return;
     const load = () =>
-      fetch(`/api/fs/list?root=${encodeURIComponent(root)}&path=${encodeURIComponent(rel)}`)
+      fetch(withConnection(`/api/fs/list?root=${encodeURIComponent(root)}&path=${encodeURIComponent(rel)}`, connection))
         .then((r) => r.json())
         .then((d) => {
           const next: Entry[] = Array.isArray(d) ? d : [];
@@ -40,7 +42,7 @@ function Dir({ root, rel, name, depth, onFileClick, selection, onToggleSelect }:
     void load();
     const id = setInterval(load, 5000);
     return () => clearInterval(id);
-  }, [open, root, rel]);
+  }, [open, root, rel, connection]);
 
   return (
     <div>
@@ -57,7 +59,7 @@ function Dir({ root, rel, name, depth, onFileClick, selection, onToggleSelect }:
       )}
       {open && entries?.map((e) =>
         e.dir ? (
-          <Dir key={e.name} root={root} rel={`${rel}${rel ? '/' : ''}${e.name}`} name={e.name} depth={depth + 1} onFileClick={onFileClick} selection={selection} onToggleSelect={onToggleSelect} />
+          <Dir key={e.name} root={root} rel={`${rel}${rel ? '/' : ''}${e.name}`} name={e.name} depth={depth + 1} connection={connection} onFileClick={onFileClick} selection={selection} onToggleSelect={onToggleSelect} />
         ) : (
           (() => {
             const fileRel = `${rel}${rel ? '/' : ''}${e.name}`;
@@ -86,8 +88,9 @@ function Dir({ root, rel, name, depth, onFileClick, selection, onToggleSelect }:
 // folder, left collapses (or jumps to the parent), Enter acts like a click.
 // Fully imperative — cursor in a ref, an overlay bar for the highlight — so
 // keys cost no renders and the 5s listing refresh cannot wipe it.
-export function Explorer({ root, onOpen, selection = [], onSelect, onEscapeTop }: {
+export function Explorer({ root, connection, onOpen, selection = [], onSelect, onEscapeTop }: {
   root?: string; onOpen: (relPath: string) => void;
+  connection?: string;
   selection?: string[]; onSelect?: (sel: string[]) => void;
   onEscapeTop?: () => void; // 'up' beyond the first row: focus climbs to the tab strip
 }) {
@@ -209,7 +212,7 @@ export function Explorer({ root, onOpen, selection = [], onSelect, onEscapeTop }
   return (
     <div className="explorer" ref={boxRef} tabIndex={-1} onKeyDown={onKeyDown} onMouseDown={onMouseDown}>
       <div className="expCursor" ref={barRef} style={{ display: 'none' }} />
-      <Dir root={root} rel="" depth={0} onFileClick={fileClick} selection={selection} onToggleSelect={toggle} />
+      <Dir root={root} rel="" depth={0} connection={connection} onFileClick={fileClick} selection={selection} onToggleSelect={toggle} />
     </div>
   );
 }

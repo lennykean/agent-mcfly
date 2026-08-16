@@ -26,11 +26,19 @@ const runLenient = (root, args) => new Promise((resolve, reject) => {
   });
 });
 
+const localIo = {
+  run,
+  runLenient,
+  stat: (file) => fs.promises.stat(file),
+  readFile: (file) => fs.promises.readFile(file, 'utf8'),
+  join: path.join,
+};
+
 // grep the work tree (tracked files) with an extended regex; smart case —
 // an all-lowercase query matches case-insensitively, any capital goes exact
-export async function grep(root, q) {
+export async function grep(root, q, io = localIo) {
   const smart = /[A-Z]/.test(q) ? [] : ['-i'];
-  const out = await runLenient(root, ['grep', '-n', '-I', '--no-color', '-E', ...smart, '--', q]);
+  const out = await io.runLenient(root, ['grep', '-n', '-I', '--no-color', '-E', ...smart, '--', q]);
   return out.split('\n').filter(Boolean).slice(0, 500).map((l) => {
     // CRLF work trees: the \r would block the $ anchor (JS "." skips \r)
     const m = l.replace(/\r$/, '').match(/^(.+?):(\d+):(.*)$/);
@@ -41,34 +49,36 @@ export async function grep(root, q) {
 // ---- review checklist: what differs between a base ref and the work tree ----
 // each file carries a cheap content signature (status:size:mtime) so a
 // checked-off file that changes afterward can be auto-unchecked
-export async function resolveRef(root, ref) {
-  const out = await run(root, ['rev-parse', '--verify', '--short', `${ref}^{commit}`]);
+export async function resolveRef(root, ref, io = localIo) {
+  const out = await io.run(root, ['rev-parse', '--verify', '--short', `${ref}^{commit}`]);
   return out.trim();
 }
-export async function diffFiles(root, ref) {
-  const out = await run(root, ['diff', '--name-status', '-M', ref, '--']);
-  return out.split('\n').filter(Boolean).map((l) => {
+export async function diffFiles(root, ref, io = localIo) {
+  const out = await io.run(root, ['diff', '--name-status', '-M', ref, '--']);
+  const files = out.split('\n').filter(Boolean).map((l) => {
     const parts = l.replace(/\r$/, '').split('\t');
     const status = (parts[0] ?? '?')[0];
     const p = (parts.length > 2 ? parts[2] : parts[1])?.replace(/\\/g, '/');
-    if (!p) return null;
+    return p ? { status, path: p } : null;
+  }).filter(Boolean);
+  return Promise.all(files.map(async ({ status, path: p }) => {
     let sig = `${status}:gone`;
     try {
-      const s = fs.statSync(path.join(root, p));
+      const s = await io.stat(io.join(root, p));
       sig = `${status}:${s.size}:${Math.round(s.mtimeMs)}`;
     } catch { /* deleted in the work tree */ }
     return { status, path: p, sig };
-  }).filter(Boolean);
+  }));
 }
-export async function diffAgainstRef(root, ref, file) {
-  const out = await run(root, ['diff', ref, '--', file]);
+export async function diffAgainstRef(root, ref, file, io = localIo) {
+  const out = await io.run(root, ['diff', ref, '--', file]);
   return parseUnified(out);
 }
 
 // find files by name substring, case-insensitive: tracked AND untracked
 // (minus ignored) — a freshly created file must be findable
-export async function listFiles(root, q) {
-  const out = await runLenient(root, ['ls-files', '--cached', '--others', '--exclude-standard']);
+export async function listFiles(root, q, io = localIo) {
+  const out = await io.runLenient(root, ['ls-files', '--cached', '--others', '--exclude-standard']);
   const needle = q.toLowerCase();
   return out.split('\n').filter(Boolean)
     .filter((p) => p.toLowerCase().includes(needle))
@@ -78,8 +88,8 @@ export async function listFiles(root, q) {
 // porcelain v1 -z: "XY path\0" — renames add the original as a second record.
 // -uall lists the files INSIDE untracked directories: without it git emits a
 // bare "dir/" entry, which renders as a nameless row in the tree
-export async function status(root) {
-  const out = await run(root, ['status', '--porcelain=v1', '-z', '--untracked-files=all']);
+export async function status(root, io = localIo) {
+  const out = await io.run(root, ['status', '--porcelain=v1', '-z', '--untracked-files=all']);
   const entries = out.split('\0').filter(Boolean);
   const staged = [];
   const changed = [];
@@ -98,12 +108,12 @@ export async function status(root) {
   return { staged, changed };
 }
 
-export async function log(root, limit = 150, skip = 0) {
+export async function log(root, limit = 150, skip = 0, io = localIo) {
   // the ancestry of HEAD, like the VS Code graph: merged branches show as
   // converging lanes; branches that never contributed to HEAD stay out.
   // %B is the FULL message (multiline), so records split on \x1e, not lines.
   const fmt = '%x1e%H\x1f%P\x1f%an\x1f%ct\x1f%D\x1f%s\x1f%B';
-  const out = await run(root, ['log', 'HEAD', '--topo-order', `-n${limit}`, `--skip=${skip}`, `--pretty=format:${fmt}`]);
+  const out = await io.run(root, ['log', 'HEAD', '--topo-order', `-n${limit}`, `--skip=${skip}`, `--pretty=format:${fmt}`]);
   return out.split('\x1e').filter((r) => r.trim()).map((rec) => {
     const [hash, parents, author, time, refs, subject, body] = rec.split('\x1f');
     return {
@@ -118,8 +128,8 @@ export async function log(root, limit = 150, skip = 0) {
   });
 }
 
-export async function worktrees(root) {
-  const out = await run(root, ['worktree', 'list', '--porcelain']);
+export async function worktrees(root, io = localIo) {
+  const out = await io.run(root, ['worktree', 'list', '--porcelain']);
   const list = [];
   let cur = null;
   for (const line of out.split('\n')) {
@@ -151,13 +161,13 @@ export function parseUnified(text) {
   return hunks;
 }
 
-export async function diff(root, file, staged) {
+export async function diff(root, file, staged, io = localIo) {
   const args = staged ? ['diff', '--cached', '--', file] : ['diff', '--', file];
-  const text = await run(root, args);
+  const text = await io.run(root, args);
   if (!text.trim() && !staged) {
     // untracked: git has no diff — the whole file is an addition
     try {
-      const content = fs.readFileSync(path.join(root, file), 'utf8');
+      const content = await io.readFile(io.join(root, file));
       const lines = content.split(/\r?\n/);
       if (lines.at(-1) === '') lines.pop();
       return [{ oldStart: 0, oldLines: 0, newStart: 1, newLines: lines.length, lines: lines.map((l) => `+${l}`) }];

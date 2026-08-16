@@ -21,6 +21,12 @@ test('lossy slug collisions stay isolated by persisted project', async () => {
     assert.deepEqual(review.listReviews(b).map((r) => r.id), [bReview.id]);
     assert.equal(review.closeReview(b, aReview.id), null);
     assert.equal(review.listReviews(a)[0].status, 'open');
+
+    const remoteA = review.createReview('/repo', { provider: 'codex', id: 'same' }, '["host-a",22,"u","/repo"]');
+    const remoteB = review.createReview('/repo', { provider: 'codex', id: 'same' }, '["host-b",22,"u","/repo"]');
+    assert.deepEqual(review.listReviews('/repo', '["host-a",22,"u","/repo"]').map((r) => r.id), [remoteA.id]);
+    assert.deepEqual(review.listReviews('/repo', '["host-b",22,"u","/repo"]').map((r) => r.id), [remoteB.id]);
+    assert.deepEqual(review.listReviews('/repo'), []);
   } finally {
     if (oldHome === undefined) delete process.env.HOME; else process.env.HOME = oldHome;
     if (oldProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = oldProfile;

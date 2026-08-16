@@ -1,6 +1,7 @@
 import { useRef } from 'react';
 import { actionOf } from '../lib/keys';
 import { rgba } from '../lib/palette';
+import type { WorkspaceSource } from '../types';
 
 // a node in the (possibly multi-root) agents tree; keys are opaque to this
 // component — the App prefixes them with the owning workspace
@@ -15,6 +16,9 @@ export interface TreeAgent {
   // opened or selected, only collapsed
   kind?: 'workspace';
   pwd?: string; // the group row's project folder (terminal quick-launch)
+  remote?: boolean;
+  title?: string;
+  source?: WorkspaceSource;
 }
 
 // The agents list is its OWN panel, not a tab of the strip below it: plain
@@ -135,7 +139,7 @@ export function AgentTree({
           }}
           data-key={node.key}
           onClick={() => (node.kind === 'workspace' ? toggle(node.key) : onSelect(node.key))}
-          title={node.label}
+          title={node.title ?? node.label}
         >
           {kids.length > 0 ? (
             <span
@@ -143,7 +147,7 @@ export function AgentTree({
               onClick={(e) => { e.stopPropagation(); toggle(node.key); }}
             />
           ) : <span className="agentChevron" />}
-          <span className={`codicon ${node.kind === 'workspace' ? 'codicon-folder' : 'codicon-hubot'} agentIcon`} />
+          <span className={`codicon ${node.kind === 'workspace' ? (node.remote ? 'codicon-radio-tower' : 'codicon-folder') : 'codicon-hubot'} agentIcon`} />
           <span className="agentLabel">
             {node.agentType ? `[${node.agentType}] ` : ''}
             {node.label}

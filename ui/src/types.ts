@@ -12,6 +12,14 @@ export interface SessionMeta {
   size: number;
 }
 
+// Local workspaces omit this. Remote workspaces keep the SSH connection
+// identity separate from their path so identical paths on two hosts do not
+// collapse into one project.
+export interface WorkspaceSource {
+  connection: string;
+  host: string;
+}
+
 export type RenderVerb = 'read_file' | 'patch_file' | 'write_file' | 'exec' | 'data' | 'spawn_agent' | 'other';
 
 // A note anchored to a line by its surrounding context (a zero-change hunk):

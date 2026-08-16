@@ -84,39 +84,48 @@ function listDir(dir, projName) {
 // fall back to a derived name: the stored summary, else the first real user
 // message — anything beats eight hex digits in a picker.
 export function scanHead(file) {
-  const out = {};
-  let derived;
   let fd;
+  const chunks = [];
   try {
     fd = fs.openSync(file, 'r');
     const size = fs.fstatSync(fd).size;
     for (const start of new Set([0, Math.max(0, size - 64 * 1024)])) {
       const buf = Buffer.alloc(Math.min(64 * 1024, size - start));
       const n = fs.readSync(fd, buf, 0, buf.length, start);
-      for (const line of buf.toString('utf8', 0, n).split('\n')) {
-        const wantName = !out.title && !derived
-          && (line.includes('"summary"') || line.includes('"type":"user"'));
-        if (!line.includes('"custom-title"') && (out.cwd || !line.includes('"cwd"')) && !wantName) continue;
-        try {
-          const o = JSON.parse(line);
-          if (o.type === 'custom-title' && o.customTitle) out.title = o.customTitle;
-          if (!out.cwd && typeof o.cwd === 'string') out.cwd = o.cwd;
-          if (!derived) {
-            if (o.type === 'summary' && typeof o.summary === 'string') derived = o.summary;
-            else if (o.type === 'user') {
-              const c = o.message?.content;
-              const text = typeof c === 'string' ? c
-                : Array.isArray(c) ? c.find((p) => p.type === 'text' && p.text)?.text : undefined;
-              const t = text?.trim();
-              // skip injected wrappers (command output, caveats, tag blobs)
-              if (t && !t.startsWith('<') && !t.startsWith('Caveat:')) derived = t;
-            }
-          }
-        } catch { /* partial line at chunk edge */ }
-      }
+      chunks.push(buf.toString('utf8', 0, n));
     }
   } catch { /* unreadable */ } finally {
     if (fd !== undefined) fs.closeSync(fd);
+  }
+  return scanHeadChunks(chunks);
+}
+
+// Shared by local files and remote SFTP reads; transcript semantics stay here.
+export function scanHeadChunks(chunks) {
+  const out = {};
+  let derived;
+  for (const chunk of chunks) {
+    for (const line of chunk.split('\n')) {
+      const wantName = !out.title && !derived
+        && (line.includes('"summary"') || line.includes('"type":"user"'));
+      if (!line.includes('"custom-title"') && (out.cwd || !line.includes('"cwd"')) && !wantName) continue;
+      try {
+        const o = JSON.parse(line);
+        if (o.type === 'custom-title' && o.customTitle) out.title = o.customTitle;
+        if (!out.cwd && typeof o.cwd === 'string') out.cwd = o.cwd;
+        if (!derived) {
+          if (o.type === 'summary' && typeof o.summary === 'string') derived = o.summary;
+          else if (o.type === 'user') {
+            const c = o.message?.content;
+            const text = typeof c === 'string' ? c
+              : Array.isArray(c) ? c.find((p) => p.type === 'text' && p.text)?.text : undefined;
+            const t = text?.trim();
+            // skip injected wrappers (command output, caveats, tag blobs)
+            if (t && !t.startsWith('<') && !t.startsWith('Caveat:')) derived = t;
+          }
+        }
+      } catch { /* partial line at chunk edge */ }
+    }
   }
   if (!out.title && derived) out.title = derived.replace(/\s+/g, ' ').slice(0, 60);
   return out;
@@ -130,11 +139,9 @@ const MAX_CHUNK = 2 * 1024 * 1024;
 export function tail(id, cursor = 0) {
   const file = resolveId(id);
   const st = fs.statSync(file);
-  const messages = [];
-  let offset = cursor;
+  let buf = Buffer.alloc(0);
   if (st.size > cursor) {
     const fd = fs.openSync(file, 'r');
-    let buf;
     try {
       let want = Math.min(st.size - cursor, MAX_CHUNK);
       for (;;) {
@@ -146,16 +153,23 @@ export function tail(id, cursor = 0) {
     } finally {
       fs.closeSync(fd);
     }
-    const end = buf.lastIndexOf(10); // \n
-    if (end >= 0) {
-      offset = cursor + end + 1;
-      const ctx = {
-        sessionDir: file.replace(/\.jsonl$/, ''),
-        allowSidechain: file.includes(`${path.sep}subagents${path.sep}`),
-      };
-      for (const line of buf.toString('utf8', 0, end).split('\n')) {
-        if (line.trim()) convertLine(line, ctx, messages);
-      }
+  }
+  return parseTailChunk(id, cursor, st, buf);
+}
+
+export function parseTailChunk(id, cursor, st, buf) {
+  const messages = [];
+  let offset = cursor;
+  const end = buf.lastIndexOf(10); // \n
+  if (end >= 0) {
+    offset = cursor + end + 1;
+    const normalizedId = String(id).replace(/\\/g, '/');
+    const ctx = {
+      sessionDirId: normalizedId.replace(/\.jsonl$/, ''),
+      allowSidechain: normalizedId.split('/').includes('subagents'),
+    };
+    for (const line of buf.toString('utf8', 0, end).split('\n')) {
+      if (line.trim()) convertLine(line, ctx, messages);
     }
   }
   return { messages, cursor: offset, mtime: st.mtimeMs, size: st.size };
@@ -465,7 +479,7 @@ function resultRender(tool, r, block, ctx) {
         return {
           verb: 'spawn_agent', agent_id: r.agentId, agent_type: r.agentType, status: r.status,
           summary: truncate(flatten(r.content), 2000),
-          child_session_id: rel(path.join(ctx.sessionDir, 'subagents', `agent-${r.agentId}.jsonl`)),
+          child_session_id: `${ctx.sessionDirId}/subagents/agent-${r.agentId}.jsonl`,
         };
       }
       return { verb: 'other' };

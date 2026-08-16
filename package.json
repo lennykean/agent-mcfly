@@ -13,6 +13,8 @@
     "server/mcfly-data.js",
     "server/review.js",
     "server/git.js",
+    "server/ssh.js",
+    "server/remote-data.js",
     "server/pty.js",
     "server/loaders/claude-code.js",
     "server/loaders/codex.js",
@@ -46,6 +48,7 @@
   "dependencies": {
     "@lydell/node-pty": "^1.2.0-beta.15",
     "@xterm/headless": "^6.0.0",
+    "ssh2": "^1.17.0",
     "ws": "^8.21.3"
   }
 }

@@ -5,6 +5,7 @@ import { fileIcon } from './Explorer';
 import { applySelect, clickMode } from '../lib/select';
 import { actionOf, focusEditor, synthClick } from '../lib/keys';
 import { normPath } from '../lib/timeline';
+import { withConnection } from '../lib/api';
 
 export interface GitFile { path: string; status: string }
 export interface GitSelection { path: string; area: 'staged' | 'changed' }
@@ -111,9 +112,10 @@ const refClass = (r: string) => (r.startsWith('tag: ') ? 'ggTag' : r.includes('/
 // workspace_state and act in their own terminal.
 // memo: worktrees + changes tree + a big commit graph — unrelated app
 // renders (splitter drags, selections elsewhere) must not re-reconcile it
-export const GitPane = memo(function GitPane({ root, visible, selection, onSelect, commitSelection, onSelectCommits, onOpenDiff, onOpenWorktree, currentRoot, onEscapeTop, onReviewFrom }: {
+export const GitPane = memo(function GitPane({ root, connection, visible, selection, onSelect, commitSelection, onSelectCommits, onOpenDiff, onOpenWorktree, currentRoot, onEscapeTop, onReviewFrom }: {
   onReviewFrom?: (hash: string) => void; // "diff from here" -> review checklist
   root: string;
+  connection?: string;
   visible: boolean;
   selection: GitSelection[];
   onSelect: (sel: GitSelection[]) => void;
@@ -136,15 +138,15 @@ export const GitPane = memo(function GitPane({ root, visible, selection, onSelec
   const paneRef = useRef<HTMLDivElement>(null);
 
   const refreshStatus = useCallback(() => {
-    fetch(`/api/git/status?root=${encodeURIComponent(root)}`)
+    fetch(withConnection(`/api/git/status?root=${encodeURIComponent(root)}`, connection))
       .then((r) => r.json())
       .then((d) => setStatus(d.error ? { staged: [], changed: [], error: d.error } : d))
       .catch(() => { /* keep last */ });
-  }, [root]);
+  }, [root, connection]);
   const LOG_PAGE = 150;
   const [logDone, setLogDone] = useState(false);
   const refreshLog = useCallback(() => {
-    fetch(`/api/git/log?root=${encodeURIComponent(root)}&limit=${LOG_PAGE}`)
+    fetch(withConnection(`/api/git/log?root=${encodeURIComponent(root)}&limit=${LOG_PAGE}`, connection))
       .then((r) => r.json())
       .then((d) => {
         if (!Array.isArray(d)) return;
@@ -152,9 +154,9 @@ export const GitPane = memo(function GitPane({ root, visible, selection, onSelec
         setLogDone(d.length < LOG_PAGE);
       })
       .catch(() => { /* keep last */ });
-  }, [root]);
+  }, [root, connection]);
   const loadMoreLog = useCallback(() => {
-    fetch(`/api/git/log?root=${encodeURIComponent(root)}&limit=${LOG_PAGE}&skip=${log.length}`)
+    fetch(withConnection(`/api/git/log?root=${encodeURIComponent(root)}&limit=${LOG_PAGE}&skip=${log.length}`, connection))
       .then((r) => r.json())
       .then((d) => {
         if (!Array.isArray(d)) return;
@@ -162,13 +164,13 @@ export const GitPane = memo(function GitPane({ root, visible, selection, onSelec
         setLogDone(d.length < LOG_PAGE);
       })
       .catch(() => { /* retry by clicking again */ });
-  }, [root, log.length]);
+  }, [root, log.length, connection]);
   const refreshWts = useCallback(() => {
-    fetch(`/api/git/worktrees?root=${encodeURIComponent(root)}`)
+    fetch(withConnection(`/api/git/worktrees?root=${encodeURIComponent(root)}`, connection))
       .then((r) => r.json())
       .then((d) => setWts(Array.isArray(d) ? d : []))
       .catch(() => { /* keep last */ });
-  }, [root]);
+  }, [root, connection]);
 
   // slow poll while visible; the graph only loads on reveal and on refresh
   useEffect(() => {

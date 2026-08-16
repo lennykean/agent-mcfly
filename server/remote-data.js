@@ -1,0 +1,333 @@
+// Remote read-only workspace/session data over one existing SSH connection.
+// Nothing is installed or run persistently on the remote host: SFTP supplies
+// bytes and SSH exec supplies the same git output parsed by git.js.
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
+import * as claudeCode from './loaders/claude-code.js';
+import * as codex from './loaders/codex.js';
+import { execSsh } from './ssh.js';
+
+const MAX_CHUNK = 2 * 1024 * 1024;
+const sftpByClient = new WeakMap();
+// ponytail: process-lifetime cursor cache; add disconnect eviction if host churn becomes measurable.
+const codexThrough = new Map();
+const IMG = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
+
+const pathsFor = (connection) => connection.platform === 'win32' ? path.win32 : path.posix;
+const mtimeMs = (attrs) => attrs.mtimeMs ?? Number(attrs.mtime ?? 0) * 1000;
+const statShape = (attrs) => ({ size: Number(attrs.size ?? 0), mtimeMs: mtimeMs(attrs) });
+const isDir = (attrs) => typeof attrs.isDirectory === 'function' ? attrs.isDirectory() : !!attrs.dir;
+const missing = (error) => error?.code === 2 || error?.code === 'ENOENT';
+
+function call(target, method, ...args) {
+  return new Promise((resolve, reject) => {
+    target[method](...args, (error, value) => error ? reject(error) : resolve(value));
+  });
+}
+
+async function sftpFor(connection) {
+  let pending = sftpByClient.get(connection.client);
+  if (pending) return pending;
+  pending = new Promise((resolve, reject) => {
+    connection.client.sftp((error, sftp) => {
+      if (error) return reject(error);
+      sftp?.once?.('close', () => sftpByClient.delete(connection.client));
+      resolve(sftp);
+    });
+  });
+  sftpByClient.set(connection.client, pending);
+  try { return await pending; }
+  catch (error) { sftpByClient.delete(connection.client); throw error; }
+}
+
+function contained(connection, root, input = '') {
+  const paths = pathsFor(connection);
+  const resolvedRoot = paths.resolve(root);
+  const target = paths.resolve(resolvedRoot, input);
+  const key = connection.platform === 'win32' ? (value) => value.toLowerCase() : (value) => value;
+  if (key(target) !== key(resolvedRoot) && !key(target).startsWith(key(resolvedRoot + paths.sep))) {
+    const error = new Error('outside root');
+    error.code = 'EACCES';
+    throw error;
+  }
+  return target;
+}
+
+async function stat(connection, file) {
+  return statShape(await call(await sftpFor(connection), 'stat', file));
+}
+
+async function readRange(connection, file, start, length) {
+  if (length <= 0) return Buffer.alloc(0);
+  const sftp = await sftpFor(connection);
+  const handle = await call(sftp, 'open', file, 'r');
+  const buffer = Buffer.alloc(length);
+  let offset = 0;
+  try {
+    while (offset < length) {
+      const read = await new Promise((resolve, reject) => {
+        sftp.read(handle, buffer, offset, length - offset, start + offset, (error, bytesRead) => {
+          if (error) reject(error);
+          else resolve(bytesRead);
+        });
+      });
+      if (!read) break;
+      offset += read;
+    }
+  } finally {
+    await call(sftp, 'close', handle).catch(() => {});
+  }
+  return buffer.subarray(0, offset);
+}
+
+async function readFile(connection, file) {
+  return call(await sftpFor(connection), 'readFile', file);
+}
+
+async function readTailChunk(connection, file, cursor, size) {
+  if (size <= cursor) return Buffer.alloc(0);
+  let want = Math.min(size - cursor, MAX_CHUNK);
+  for (;;) {
+    const buffer = await readRange(connection, file, cursor, want);
+    if (buffer.lastIndexOf(10) >= 0 || want >= size - cursor || buffer.length < want) return buffer;
+    want = Math.min(want * 2, size - cursor);
+  }
+}
+
+async function safeReadDir(connection, dir) {
+  try { return await call(await sftpFor(connection), 'readdir', dir); }
+  catch (error) { if (missing(error)) return []; throw error; }
+}
+
+export async function isDirectory(connection, dir) {
+  try { return isDir(await call(await sftpFor(connection), 'stat', dir)); }
+  catch { return false; }
+}
+
+export async function fsList(connection, root, relative = '') {
+  const target = contained(connection, root, relative);
+  const attrs = await call(await sftpFor(connection), 'stat', target);
+  if (!isDir(attrs)) {
+    const error = new Error('not a directory');
+    error.code = 'ENOTDIR';
+    throw error;
+  }
+  const entries = await safeReadDir(connection, target);
+  return entries
+    .filter((entry) => !['node_modules', '.git'].includes(entry.filename))
+    .map((entry) => ({ name: entry.filename, dir: isDir(entry.attrs) }))
+    .sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name));
+}
+
+export async function fsRead(connection, root, relative = '') {
+  const paths = pathsFor(connection);
+  const target = contained(connection, root, relative);
+  const attrs = await stat(connection, target);
+  const ext = paths.extname(target).toLowerCase();
+  if (IMG[ext]) {
+    if (attrs.size > 8 * 1024 * 1024) return { error: 'image too large' };
+    return { image_src: `data:${IMG[ext]};base64,${(await readFile(connection, target)).toString('base64')}` };
+  }
+  if (attrs.size > 2 * 1024 * 1024) return { error: `file too large (${Math.round(attrs.size / 1024)} KB)` };
+  return { content: (await readFile(connection, target)).toString('utf8') };
+}
+
+async function codexFiles(connection, dir, base = '') {
+  const paths = pathsFor(connection);
+  const out = [];
+  for (const entry of await safeReadDir(connection, dir)) {
+    const relative = base ? `${base}/${entry.filename}` : entry.filename;
+    const full = paths.join(dir, entry.filename);
+    if (isDir(entry.attrs)) out.push(...await codexFiles(connection, full, relative));
+    else if (entry.filename.startsWith('rollout-') && entry.filename.endsWith('.jsonl')) {
+      out.push({ id: relative, file: full, attrs: statShape(entry.attrs) });
+    }
+  }
+  return out;
+}
+
+async function listCodex(connection, cwd) {
+  const paths = pathsFor(connection);
+  const root = paths.join(connection.home, '.codex', 'sessions');
+  const index = paths.join(connection.home, '.codex', 'session_index.jsonl');
+  let names = new Map();
+  try { names = codex.parseThreadNames((await readFile(connection, index)).toString('utf8')); }
+  catch { /* optional */ }
+  const want = codex.projectPathKey(cwd);
+  const out = [];
+  for (const item of await codexFiles(connection, root)) {
+    let head;
+    try {
+      head = codex.parseHead((await readRange(connection, item.file, 0, Math.min(64 * 1024, item.attrs.size))).toString('utf8'));
+    } catch (error) {
+      if (missing(error)) continue;
+      throw error;
+    }
+    if (codex.projectPathKey(head.cwd) !== want) continue;
+    const base = paths.basename(item.file, '.jsonl').replace(/^rollout-/, '');
+    out.push({
+      id: item.id, provider: 'codex',
+      label: names.get(head.id) ?? head.label ?? (head.nickname ? `agent ${head.nickname}` : base.slice(0, 19)),
+      cwd: head.cwd, updated_at: item.attrs.mtimeMs, size: item.attrs.size,
+    });
+  }
+  return out.sort((a, b) => b.updated_at - a.updated_at);
+}
+
+async function listClaude(connection, cwd) {
+  const paths = pathsFor(connection);
+  const root = paths.join(connection.home, '.claude', 'projects');
+  const out = [];
+  for (const project of await safeReadDir(connection, root)) {
+    if (!isDir(project.attrs) || !claudeCode.projectSlugMatches(cwd, project.filename)) continue;
+    const dir = paths.join(root, project.filename);
+    for (const entry of await safeReadDir(connection, dir)) {
+      if (isDir(entry.attrs) || !entry.filename.endsWith('.jsonl')) continue;
+      const file = paths.join(dir, entry.filename);
+      const attrs = statShape(entry.attrs);
+      const starts = [...new Set([0, Math.max(0, attrs.size - 64 * 1024)])];
+      let chunks;
+      try {
+        chunks = await Promise.all(starts.map(async (start) =>
+          (await readRange(connection, file, start, Math.min(64 * 1024, attrs.size - start))).toString('utf8')));
+      } catch (error) {
+        if (missing(error)) continue;
+        throw error;
+      }
+      const head = claudeCode.scanHeadChunks(chunks);
+      out.push({
+        id: `${project.filename}/${entry.filename}`, provider: 'claude-code', project: project.filename,
+        label: head.title ?? entry.filename.replace(/\.jsonl$/, '').slice(0, 8), cwd: head.cwd,
+        updated_at: attrs.mtimeMs, size: attrs.size,
+      });
+    }
+  }
+  return out.sort((a, b) => b.updated_at - a.updated_at);
+}
+
+export function listSessions(connection, provider, cwd) {
+  if (!connection.home) throw new Error('remote home unavailable');
+  if (provider === 'codex') return listCodex(connection, cwd);
+  if (provider === 'claude-code') return listClaude(connection, cwd);
+  throw new Error('unknown provider');
+}
+
+export async function listProviders(connection, cwd) {
+  if (!connection.home) throw new Error('remote home unavailable');
+  const [claude, codexSessions] = await Promise.all([
+    listClaude(connection, cwd), listCodex(connection, cwd),
+  ]);
+  return [
+    { provider: 'claude-code', count: claude.length },
+    { provider: 'codex', count: codexSessions.length },
+  ];
+}
+
+export async function tailSession(connection, provider, id, cursor = 0) {
+  const paths = pathsFor(connection);
+  const providerRoot = provider === 'codex'
+    ? paths.join(connection.home, '.codex', 'sessions')
+    : provider === 'claude-code' ? paths.join(connection.home, '.claude', 'projects') : null;
+  if (!providerRoot) throw new Error('unknown provider');
+  const file = contained(connection, providerRoot, String(id).replace(/[\\/]/g, paths.sep));
+  const attrs = await stat(connection, file);
+  const fileKey = `ssh:${connection.id}:${id}`;
+  if (provider === 'codex' && cursor > 0) {
+    let through = Math.min(codexThrough.get(fileKey) ?? 0, attrs.size);
+    if (through >= cursor) through = 0;
+    while (through < cursor) {
+      const prefix = await readTailChunk(connection, file, through, cursor);
+      const primed = codex.parseTailChunk(fileKey, through, { ...attrs, size: cursor }, prefix);
+      if (primed.cursor <= through) break;
+      through = primed.cursor;
+    }
+    codexThrough.set(fileKey, through);
+  }
+  const buffer = await readTailChunk(connection, file, cursor, attrs.size);
+  if (provider !== 'codex') return claudeCode.parseTailChunk(id, cursor, attrs, buffer);
+  const result = codex.parseTailChunk(fileKey, cursor, attrs, buffer);
+  codexThrough.set(fileKey, Math.max(codexThrough.get(fileKey) ?? 0, result.cursor));
+  return result;
+}
+
+const quote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
+const powershellQuote = (value) => `'${String(value).replace(/'/g, "''")}'`;
+function win32Quote(value) {
+  let quoted = '"';
+  let slashes = 0;
+  for (const char of String(value)) {
+    if (char === '\\') { slashes++; continue; }
+    if (char === '"') {
+      quoted += '\\'.repeat(slashes * 2 + 1) + '"';
+      slashes = 0;
+      continue;
+    }
+    quoted += '\\'.repeat(slashes) + char;
+    slashes = 0;
+  }
+  return quoted + '\\'.repeat(slashes * 2) + '"';
+}
+
+async function exec(connection, command, allowOne = false) {
+  const result = await execSsh(connection, command, { maxBytes: 16 * 1024 * 1024 });
+  if (result.signal || (result.code && !(allowOne && result.code === 1))) {
+    const failure = new Error(String(result.stderr || `remote command exited ${result.signal ?? result.code}`).split('\n')[0]);
+    failure.code = result.code;
+    throw failure;
+  }
+  return result.stdout;
+}
+
+export function gitIo(connection) {
+  const paths = pathsFor(connection);
+  const run = (root, args, lenient) => {
+    let command = `git -C ${quote(root)} ${args.map(quote).join(' ')}`;
+    if (connection.platform === 'win32') {
+      const nativeArgs = ['-C', root, ...args].map(win32Quote).join(' ');
+      const script = `$ErrorActionPreference = 'Stop'\n`
+        + '$start = [System.Diagnostics.ProcessStartInfo]::new()\n'
+        + "$start.FileName = 'git.exe'\n"
+        + `$start.Arguments = ${powershellQuote(nativeArgs)}\n`
+        + '$start.UseShellExecute = $false\n'
+        + '$start.RedirectStandardOutput = $true\n'
+        + '$start.RedirectStandardError = $true\n'
+        + '$process = [System.Diagnostics.Process]::new()\n'
+        + '$process.StartInfo = $start\n'
+        + '[void]$process.Start()\n'
+        + '$stdout = $process.StandardOutput.BaseStream.CopyToAsync([Console]::OpenStandardOutput())\n'
+        + '$stderr = $process.StandardError.BaseStream.CopyToAsync([Console]::OpenStandardError())\n'
+        + '$process.WaitForExit()\n'
+        + '[Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdout, $stderr))\n'
+        + 'exit $process.ExitCode';
+      command = `powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, 'utf16le').toString('base64')}`;
+    }
+    return exec(connection, command, lenient);
+  };
+  return {
+    run: (root, args) => run(root, args, false),
+    runLenient: (root, args) => run(root, args, true),
+    stat: (file) => stat(connection, file),
+    readFile: async (file) => (await readFile(connection, file)).toString('utf8'),
+    join: paths.join,
+  };
+}
+
+async function ensureDirectory(connection, dir) {
+  const sftp = await sftpFor(connection);
+  try { await call(sftp, 'mkdir', dir); }
+  catch (error) {
+    try { if (isDir(await call(sftp, 'stat', dir))) return; } catch { /* original error below */ }
+    throw error;
+  }
+}
+
+export async function pasteImage(connection, bytes, ext) {
+  const paths = pathsFor(connection);
+  const base = paths.join(connection.home, '.mcfly');
+  const dir = paths.join(base, 'tmp');
+  await ensureDirectory(connection, base);
+  await ensureDirectory(connection, dir);
+  const file = paths.join(dir, `mcfly-paste-${Date.now()}-${randomUUID()}${ext}`);
+  await call(await sftpFor(connection), 'writeFile', file, bytes);
+  return file;
+}

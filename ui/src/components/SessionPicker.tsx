@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { SessionMeta } from '../types';
+import { withConnection } from '../lib/api';
+import type { SessionMeta, WorkspaceSource } from '../types';
 
 interface ProviderInfo { provider: string; count: number }
 
@@ -8,16 +9,18 @@ const PROVIDER_LABELS: Record<string, string> = { 'claude-code': 'claude', codex
 // Open-session flow: choose a folder -> confirm session history -> agent type
 // -> type-ahead over that project's sessions. Opening only the project is a
 // separate action. The ... button browses folders through the server.
-export function SessionPicker({ initialPwd, initialProvider, initialFilter, onPick, onGo, onClose }: {
+export function SessionPicker({ initialPwd, initialProvider, initialFilter, source, onPick, onGo, onClose }: {
   initialPwd: string;
   initialProvider?: string; // pre-select this agent and load its sessions
   initialFilter?: string; // pre-fill the filter (e.g. an ambiguous title match)
+  source?: WorkspaceSource;
   onPick: (pwd: string, session: SessionMeta) => void;
   onGo?: (pwd: string) => void; // scope the workbench to this folder, no session needed
   onClose: () => void;
 }) {
   // the currently-open project wins; last-used pwd only seeds a bare open
-  const [pwd, setPwd] = useState(() => initialPwd || localStorage.getItem('mcfly.lastPwd') || '');
+  const [pwd, setPwd] = useState(() => initialPwd || (!source ? localStorage.getItem('mcfly.lastPwd') : '') || '');
+  const endpoint = (path: string) => withConnection(path, source?.connection);
 
   const dialogRef = useRef<HTMLDialogElement>(null);
   const projectRef = useRef<HTMLInputElement>(null);
@@ -44,19 +47,30 @@ export function SessionPicker({ initialPwd, initialProvider, initialFilter, onPi
   useEffect(() => {
     if (browse === null) return;
     setBrowseDirs(null);
-    fetch(`/api/fs/list?root=${encodeURIComponent(browse)}&path=`)
+    fetch(endpoint(`/api/fs/list?root=${encodeURIComponent(browse)}&path=`))
       .then((r) => r.json())
       .then((d) => setBrowseDirs(Array.isArray(d) ? d.filter((e) => e.dir).map((e) => e.name) : []))
       .catch(() => setBrowseDirs([]));
-  }, [browse]);
-  const atRoot = browse !== null && /^[A-Za-z]:[\\/]?$/.test(browse);
-  const browseUp = () => setBrowse((b) => (b === null || atRoot ? b : b.replace(/[\\/][^\\/]+[\\/]?$/, '') || b));
+  }, [browse, source?.connection]); // eslint-disable-line react-hooks/exhaustive-deps
+  const atRoot = browse !== null && (browse === '/' || /^[A-Za-z]:[\\/]?$/.test(browse));
+  const browseUp = () => setBrowse((b) => {
+    if (b === null || atRoot) return b;
+    const clean = b.replace(/[\\/]+$/, '');
+    const cut = Math.max(clean.lastIndexOf('/'), clean.lastIndexOf('\\'));
+    if (cut === 0) return '/';
+    if (cut === 2 && /^[A-Za-z]:/.test(clean)) return clean.slice(0, 3);
+    return cut > 0 ? clean.slice(0, cut) : clean;
+  });
+  const browseInto = (name: string) => {
+    if (browse === null) return;
+    const slash = browse.includes('\\') || /^[A-Za-z]:/.test(browse) ? '\\' : '/';
+    setBrowse(browse === '/' ? `/${name}` : `${browse.replace(/[\\/]+$/, '')}${slash}${name}`);
+  };
   const go = (raw: string) => {
-    // typed paths arrive messy: collapse repeated separators (UNC prefix stays)
-    const dir = raw.trim().replace(/(?!^)[\\/]{2,}/g, '\\').replace(/[\\/]+$/, '');
+    const clean = raw.trim();
+    const dir = clean === '/' ? clean : clean.replace(/[\\/]+$/, '');
     if (!dir) return;
     onGo?.(dir);
-    onClose();
   };
 
   const loadProviders = (dir: string) => {
@@ -67,7 +81,7 @@ export function SessionPicker({ initialPwd, initialProvider, initialFilter, onPi
     setProvider(undefined);
     setSessions(null);
     sessionLoad.current++;
-    fetch(`/api/providers?pwd=${encodeURIComponent(dir)}`)
+    fetch(endpoint(`/api/providers?pwd=${encodeURIComponent(dir)}`))
       .then((r) => r.json())
       .then((d) => { if (load === providerLoad.current) setProviders(Array.isArray(d) ? d : []); })
       .catch(() => { if (load === providerLoad.current) setProviders([]); })
@@ -84,7 +98,8 @@ export function SessionPicker({ initialPwd, initialProvider, initialFilter, onPi
   };
 
   const openSessionsIn = (raw: string) => {
-    const dir = raw.trim().replace(/[\\/]+$/, '');
+    const clean = raw.trim();
+    const dir = clean === '/' ? clean : clean.replace(/[\\/]+$/, '');
     if (!dir) return;
     setPwd(dir);
     setBrowse(null);
@@ -97,19 +112,20 @@ export function SessionPicker({ initialPwd, initialProvider, initialFilter, onPi
     setSessions(null);
     setFilter('');
     setHi(0);
-    fetch(`/api/sessions?pwd=${encodeURIComponent(pwd)}&provider=${encodeURIComponent(prov)}`)
+    fetch(endpoint(`/api/sessions?pwd=${encodeURIComponent(pwd)}&provider=${encodeURIComponent(prov)}`))
       .then((r) => r.json())
       .then((d) => { if (load === sessionLoad.current) setSessions(Array.isArray(d) ? d : []); })
       .catch(() => { if (load === sessionLoad.current) setSessions([]); });
   };
 
   useEffect(() => {
-    const dir = initialPwd || localStorage.getItem('mcfly.lastPwd');
+    const dir = initialPwd || (!source ? localStorage.getItem('mcfly.lastPwd') : null);
     if (dir) { setPwd(dir); return; }
-    fetch('/api/config').then((r) => r.json()).then((d) => {
-      if (typeof d.pwd === 'string') setPwd((current) => current || d.pwd);
+    fetch(endpoint('/api/config')).then((r) => r.json()).then((d) => {
+      const seed = source ? d.home ?? d.pwd : d.pwd;
+      if (typeof seed === 'string') setPwd((current) => current || seed);
     }).catch(() => {});
-  }, [initialPwd]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [initialPwd, source?.connection]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Follow-resolve already carries an explicit provider intent, so it keeps
   // its direct jump. A normal picker waits for the folder confirmation.
@@ -156,7 +172,7 @@ export function SessionPicker({ initialPwd, initialProvider, initialFilter, onPi
     >
       <div className="pickerModal" onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
         <div className="pickerHead">
-          <span id="session-picker-title">open a session</span>
+          <span id="session-picker-title">open a session{source ? ` on ${source.host}` : ''}</span>
           <button className="pickerClose" aria-label="Close session picker" onClick={onClose}>✕</button>
         </div>
 
@@ -173,7 +189,7 @@ export function SessionPicker({ initialPwd, initialProvider, initialFilter, onPi
             }}
             spellCheck={false}
           />
-          <button aria-label="Browse folders" title="Browse folders" onClick={() => setBrowse((b) => (b === null ? (pwd.trim() || 'C:\\') : null))}>…</button>
+          <button aria-label="Browse folders" title="Browse folders" onClick={() => setBrowse((b) => (b === null ? (pwd.trim() || (source ? '/' : 'C:\\')) : null))}>…</button>
           <button onClick={() => go(pwd)} title="Open the project without choosing a session">open project folder</button>
         </div>
 
@@ -184,7 +200,7 @@ export function SessionPicker({ initialPwd, initialProvider, initialFilter, onPi
               {!atRoot && <button className="fbRow" onClick={browseUp}><span className="codicon codicon-arrow-up" /> ..</button>}
               {browseDirs === null && <div className="pickerHint">listing…</div>}
               {browseDirs?.map((d) => (
-                <button key={d} className="fbRow" onClick={() => setBrowse(`${browse.replace(/[\\/]+$/, '')}\\${d}`)}>
+                <button key={d} className="fbRow" onClick={() => browseInto(d)}>
                   <span className="codicon codicon-folder expFolder" /> {d}
                 </button>
               ))}

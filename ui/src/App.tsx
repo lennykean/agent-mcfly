@@ -14,7 +14,8 @@ import { Splitter } from './components/Splitter';
 import { HumanReview } from './components/HumanReview';
 import { HistoryBar } from './components/HistoryBar';
 import type { TermCtl } from './components/LivePane';
-import type { Review, ReviewComment, SessionMeta } from './types';
+import type { Review, ReviewComment, SessionMeta, WorkspaceSource } from './types';
+import { withConnection } from './lib/api';
 import { normPath, pathWithin, resolveWaypoint, type WaypointEntry } from './lib/timeline';
 import { APP_CHORDS, actionOf, focusEditor, justArmed, setDeferredSink, termReleasedChord, type Action } from './lib/keys';
 import { QuickPick } from './components/QuickPick';
@@ -44,6 +45,7 @@ export interface WsInfo {
 export interface RootInfo {
   id: number; label: string; active: boolean; hasSession: boolean;
   pwd?: string;
+  source?: WorkspaceSource;
   color?: string; // ephemeral hue, assigned when 2+ roots exist
   colorIndex?: number;
   agents?: AgentNode[];
@@ -61,22 +63,24 @@ export interface WorkbenchHandle {
 export interface WorkbenchProps {
   wsId: number;
   active: boolean;
+  source?: WorkspaceSource;
   url: UrlState; // desired state from the URL; the workbench adopts changes
   roots: RootInfo[];
   onState: (wsId: number, info: WsInfo) => void;
   onAddRoot: () => void;
+  onAddRemote: () => void;
   onCloseRoot: (wsId: number) => void;
   // a subagent row of ANOTHER root was picked: switch there and open it
   onSelectAgent: (wsId: number, key: string) => void;
   // a session appeared for a terminal launched here — the shell decides
   // whether it lands in this workbench, an existing one, or nowhere
-  onSessionFound: (pwd: string, s: SessionMeta) => void;
+  onSessionFound: (pwd: string, s: SessionMeta, source?: WorkspaceSource) => void;
   // the user picked a session in THIS workbench's picker; the shell dedupes
   // (already open elsewhere → switch there)
   onPickSession: (wsId: number, pwd: string, s: SessionMeta) => void;
   // a session picked to FOLLOW a terminal: ties the pty and ATTACHES a root
   // (never replaces what this workbench is watching)
-  onFollowedPick: (pwd: string, s: SessionMeta, ptyId?: string) => void;
+  onFollowedPick: (pwd: string, s: SessionMeta, ptyId?: string, source?: WorkspaceSource) => void;
   // terminals⇄workbench sync mode: the titlebar link toggle
   sync: boolean;
   onToggleSync: () => void;
@@ -119,12 +123,12 @@ function useStoredTab<T extends string>(key: string, initial: T) {
 }
 
 export default function Workbench({
-  wsId, active, url, roots, onState, onAddRoot, onCloseRoot, onSelectAgent, onSessionFound,
+  wsId, active, source, url, roots, onState, onAddRoot, onAddRemote, onCloseRoot, onSelectAgent, onSessionFound,
   onPickSession, onFollowedPick,
   sync, onToggleSync, treeCollapsed, onTreeToggle, onPickColor,
   settings, onOpenSettings, termCtl, termSlot, registerHandle,
 }: WorkbenchProps) {
-  const r = useReplay(active);
+  const r = useReplay(active, source?.connection);
   // hidden workbenches stay mounted (state retention) but must not act on
   // global surfaces: window keys, the snapshot, the document title
   const activeRef = useRef(active);
@@ -155,13 +159,14 @@ export default function Workbench({
   const [timelinePath, setTimelinePath] = useState<string>();
   const [pwd, setPwd] = useState<string>();
   const cwd = pwd ?? r.session?.cwd;
-  const workspaceScope = cwd ?? '';
+  const workspaceScope = source ? `${source.connection}\u0000${cwd ?? ''}` : cwd ?? '';
   const [pickerOpen, setPickerOpen] = useState(false);
   const [colorPick, setColorPick] = useState(false);
   const centerRef = useRef<HTMLDivElement>(null);
   const addRootRef = useRef<HTMLButtonElement>(null);
+  const addRemoteRef = useRef<HTMLButtonElement>(null);
 
-  useEffect(() => { if (pwd) localStorage.setItem('mcfly.lastPwd', pwd); }, [pwd]);
+  useEffect(() => { if (pwd && !source) localStorage.setItem('mcfly.lastPwd', pwd); }, [pwd, source]);
 
   // the URL (via the shell) is the source of truth: the `url` prop carries
   // this workspace's desired pwd/provider/session; adopting is idempotent —
@@ -181,7 +186,7 @@ export default function Workbench({
         let meta: SessionMeta | undefined;
         try {
           const list: SessionMeta[] = await (
-            await fetch(`/api/sessions?pwd=${encodeURIComponent(uPwd)}&provider=${encodeURIComponent(provider)}`)
+            await fetch(withConnection(`/api/sessions?pwd=${encodeURIComponent(uPwd)}&provider=${encodeURIComponent(provider)}`, source?.connection))
           ).json();
           meta = Array.isArray(list) ? list.find((s) => s.id === sid || shortSessionId(s.id) === sid) : undefined;
         } catch { /* fall through to minimal meta */ }
@@ -211,7 +216,7 @@ export default function Workbench({
     for (const provider of ['claude-code', 'codex']) {
       try {
         const list: SessionMeta[] = await (
-          await fetch(`/api/sessions?pwd=${encodeURIComponent(dir)}&provider=${provider}`)
+          await fetch(withConnection(`/api/sessions?pwd=${encodeURIComponent(dir)}&provider=${provider}`, source?.connection))
         ).json();
         if (!Array.isArray(list) || !p.title) continue;
         for (const s of list) {
@@ -219,7 +224,7 @@ export default function Workbench({
         }
       } catch { /* picker fallback */ }
     }
-    if (cands.length === 1) { onFollowedPick(dir, cands[0].s, p.id); return; }
+    if (cands.length === 1) { onFollowedPick(dir, cands[0].s, p.id, source); return; }
     // '' still marks the pick as a FOLLOW (attach semantics) when the pty
     // id is unknown — only the labeling is skipped then
     setPickerSeed({ pwd: dir, provider: cands[0]?.provider, filter: cands[0]?.s.label, followPty: p.id ?? '' });
@@ -231,6 +236,8 @@ export default function Workbench({
   // "go" in the picker: the workbench opens the folder BARE, right away —
   // no session until one is picked. The picker stays open offering them.
   const scopeFolder = useCallback((newPwd: string) => {
+    setPickerOpen(false);
+    setPickerSeed(undefined);
     setPwd(newPwd);
     setUserTabs([]);
     setEditorTab('pinned');
@@ -302,7 +309,7 @@ export default function Workbench({
         if (!dir) continue;
         try {
           const list: SessionMeta[] = await (
-            await fetch(`/api/sessions?pwd=${encodeURIComponent(dir)}&provider=${encodeURIComponent(h.provider)}`)
+            await fetch(withConnection(`/api/sessions?pwd=${encodeURIComponent(dir)}&provider=${encodeURIComponent(h.provider)}`, source?.connection))
           ).json();
           const cand = Array.isArray(list)
             ? (h.adopt
@@ -313,7 +320,7 @@ export default function Workbench({
           if (!cand) continue;
           if (h.adopt) {
             setHunts((hs) => hs.filter((x) => x.key !== h.key));
-            void fetch('/api/pty-session', {
+            void fetch(withConnection('/api/pty-session', source?.connection), {
               method: 'POST',
               body: JSON.stringify({ ptyId: h.ptyId, provider: cand.provider, session: cand.id, pwd: dir }),
             });
@@ -321,10 +328,10 @@ export default function Workbench({
           }
           claimed.current.add(cand.id);
           setHunts((hs) => hs.filter((x) => x.key !== h.key));
-          onSessionFound(dir, cand); // the shell routes it: here, elsewhere, or a new root
+          onSessionFound(dir, cand, source); // the shell routes it: here, elsewhere, or a new root
           // label the PTY with its transcript so the live-terminal picker can offer it
           if (h.ptyId) {
-            void fetch('/api/pty-session', {
+            void fetch(withConnection('/api/pty-session', source?.connection), {
               method: 'POST',
               body: JSON.stringify({ ptyId: h.ptyId, provider: cand.provider, session: cand.id, pwd: dir }),
             });
@@ -356,10 +363,10 @@ export default function Workbench({
   // project (~-relative when under home), then the app. Bare = just the app.
   const [home, setHome] = useState<string>();
   useEffect(() => {
-    fetch('/api/config').then((r) => r.json())
+    fetch(withConnection('/api/config', source?.connection)).then((r) => r.json())
       .then((d) => { if (typeof d.home === 'string') setHome(d.home); })
       .catch(() => { /* title just shows the full path */ });
-  }, []);
+  }, [source?.connection]);
   useEffect(() => {
     if (!active) return; // the visible workbench owns the title
     const tildePwd = pwd && home && pathWithin(pwd, home)
@@ -507,14 +514,18 @@ export default function Workbench({
       const color = roots.length > 1 ? rt.color : undefined;
       let parent: string | null = null;
       if (rt.pwd) {
-        const norm = normPath(rt.pwd);
+        const folder = rt.pwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? rt.pwd;
+        const norm = `${rt.source?.connection ?? 'local'}${SEP}${normPath(rt.pwd)}`;
         let gk = groups.get(norm);
         if (!gk) {
           gk = `g${SEP}${norm}`;
           groups.set(norm, gk);
           out.push({
             key: gk, parentKey: null, kind: 'workspace', pwd: rt.pwd,
-            label: rt.pwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop() ?? rt.pwd,
+            source: rt.source,
+            remote: !!rt.source,
+            label: rt.source ? `${rt.source.host}: ${folder}` : folder,
+            title: rt.source ? `${rt.source.host}: ${rt.pwd}` : rt.pwd,
           });
         }
         parent = gk;
@@ -552,11 +563,11 @@ export default function Workbench({
   }, [onCloseRoot]);
   // the folder row's terminal icon: a new shell in THAT project
   const onTreeOpenTerminal = useCallback((k: string) => {
-    const dir = treeAgents.find((a) => a.key === k)?.pwd;
-    if (!dir) return;
+    const project = treeAgents.find((a) => a.key === k);
+    if (!project?.pwd) return;
     setRightOpen(true);
     setRightTab('term');
-    termCtl.current?.startNew(dir);
+    termCtl.current?.startNew({ cwd: project.pwd, source: project.source });
     requestAnimationFrame(() => requestAnimationFrame(() => {
       ([...(appRef.current?.querySelectorAll('.livePane .xterm-helper-textarea') ?? [])]
         .find((x) => (x as HTMLElement).offsetParent !== null) as HTMLElement | undefined)?.focus();
@@ -765,14 +776,14 @@ export default function Workbench({
   const gitRoot = explorerRoot ?? cwd ?? '';
   useEffect(() => {
     if (!cwd) return;
-    const load = () => fetch(`/api/git/worktrees?root=${encodeURIComponent(cwd)}`)
+    const load = () => fetch(withConnection(`/api/git/worktrees?root=${encodeURIComponent(cwd)}`, source?.connection))
       .then((res) => res.json())
       .then((d) => setWorktreeList(Array.isArray(d) ? d : []))
       .catch(() => { /* keep last */ });
     void load();
     const t = setInterval(load, active ? 10_000 : 30_000);
     return () => clearInterval(t);
-  }, [cwd, active]);
+  }, [cwd, active, source?.connection]);
   useEffect(() => {
     if (!explorerRoot || !worktreeList.length) return;
     if (!worktreeList.some((w) => normPath(w.path) === normPath(explorerRoot))) setExplorerRoot(undefined);
@@ -804,13 +815,13 @@ export default function Workbench({
       if (tabs.some((t) => t.key === abs)) {
         return tabs.map((t) => (t.key === abs ? { ...t, line, nonce, waypoint, waypointOpen: !!waypoint } : t));
       }
-      fetch(`/api/fs/read?root=${encodeURIComponent(dir)}&path=${encodeURIComponent(name)}`)
+      fetch(withConnection(`/api/fs/read?root=${encodeURIComponent(dir)}&path=${encodeURIComponent(name)}`, source?.connection))
         .then((res) => res.json())
         .then((d) => setUserTabs((cur) => cur.map((t) => (t.key === abs ? { ...t, ...d } : t))))
         .catch(() => setUserTabs((cur) => cur.map((t) => (t.key === abs ? { ...t, error: 'failed to read' } : t))));
       return [...tabs, { key: abs, path: abs, line, nonce, waypoint, waypointOpen: !!waypoint }];
     });
-  }, []);
+  }, [source?.connection]);
 
   const toggleWaypoint = useCallback((key: string) => {
     setUserTabs((tabs) => tabs.map((t) => (t.key === key ? { ...t, waypointOpen: !t.waypointOpen } : t)));
@@ -833,7 +844,7 @@ export default function Workbench({
   const openWaypoint = useCallback((wp: WaypointEntry) => {
     const m = wp.path.match(/^(.*)[\\/]([^\\/]+)$/);
     if (!m) { openSnapshot(wp); return; }
-    fetch(`/api/fs/read?root=${encodeURIComponent(m[1])}&path=${encodeURIComponent(m[2])}`)
+    fetch(withConnection(`/api/fs/read?root=${encodeURIComponent(m[1])}&path=${encodeURIComponent(m[2])}`, source?.connection))
       .then((res) => res.json())
       .then((d: { content?: string }) => {
         const line = typeof d.content === 'string' ? resolveWaypoint(d.content, wp) : null;
@@ -841,7 +852,7 @@ export default function Workbench({
         else openAbs(wp.path, line, { line, note: wp.note });
       })
       .catch(() => openSnapshot(wp));
-  }, [openAbs, openSnapshot]);
+  }, [openAbs, openSnapshot, source?.connection]);
 
   // clicking a resolved (purple) marker in a real file opens/toggles its card
   const activateTabWaypoint = useCallback((key: string, line: number, note: string) => {
@@ -859,11 +870,11 @@ export default function Workbench({
   const [focusThreadId, setFocusThreadId] = useState<string | undefined>();
   const refreshReviews = useCallback(() => {
     if (!cwd) return;
-    fetch(`/api/reviews?pwd=${encodeURIComponent(cwd)}`)
+    fetch(withConnection(`/api/reviews?pwd=${encodeURIComponent(cwd)}`, source?.connection))
       .then((res) => res.json())
       .then((d) => setReviews(Array.isArray(d) ? d : []))
       .catch(() => { /* keep last */ });
-  }, [cwd]);
+  }, [cwd, source?.connection]);
   useEffect(() => {
     refreshReviews();
     // agent replies appear live; backgrounded workbenches check gently
@@ -876,8 +887,8 @@ export default function Workbench({
 
   const reviewPost = useCallback((route: string, body: Record<string, unknown>) => {
     if (!cwd) return;
-    void fetch(route, { method: 'POST', body: JSON.stringify({ pwd: cwd, ...body }) }).then(refreshReviews);
-  }, [cwd, refreshReviews]);
+    void fetch(withConnection(route, source?.connection), { method: 'POST', body: JSON.stringify({ pwd: cwd, connection: source?.connection, ...body }) }).then(refreshReviews);
+  }, [cwd, refreshReviews, source?.connection]);
 
   const createReview = useCallback(() => {
     if (!r.session) return;
@@ -889,13 +900,13 @@ export default function Workbench({
   const reviewComment = useCallback(async (c: { path: string; line: number; line_end?: number; step?: number; before: string[]; anchor: string; after: string[]; body: string }) => {
     if (!activeReview || !cwd) return;
     try {
-      const res = await fetch('/api/review-comment', { method: 'POST', body: JSON.stringify({ pwd: cwd, id: activeReview.id, comment: c }) });
+      const res = await fetch(withConnection('/api/review-comment', source?.connection), { method: 'POST', body: JSON.stringify({ pwd: cwd, connection: source?.connection, id: activeReview.id, comment: c }) });
       const updated: Review = await res.json();
       setReviews((cur) => cur.map((v) => (v.id === updated.id ? updated : v)));
       const newest = updated.comments.at(-1);
       if (newest) setFocusThreadId(newest.id);
     } catch { /* next poll reconciles */ }
-  }, [activeReview, cwd]);
+  }, [activeReview, cwd, source?.connection]);
 
   const openReviewComment = useCallback((_review: Review, c: ReviewComment) => {
     // the live tab first: when the session view holds content the comment
@@ -910,7 +921,7 @@ export default function Workbench({
     }
     const m = c.path.match(/^(.*)[\\/]([^\\/]+)$/);
     if (!m) return;
-    fetch(`/api/fs/read?root=${encodeURIComponent(m[1])}&path=${encodeURIComponent(m[2])}`)
+    fetch(withConnection(`/api/fs/read?root=${encodeURIComponent(m[1])}&path=${encodeURIComponent(m[2])}`, source?.connection))
       .then((res) => res.json())
       .then((d: { content?: string }) => {
         const found = typeof d.content === 'string'
@@ -922,7 +933,7 @@ export default function Workbench({
       })
       .catch(() => { openAbs(c.path, c.line); setFocusThreadId(c.id); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [openAbs, r.view.tabs]);
+  }, [openAbs, r.view.tabs, source?.connection]);
 
   const reviewViewOriginal = useCallback((c: ReviewComment) => {
     const key = `snapshot:review:${c.id}`;
@@ -984,9 +995,9 @@ export default function Workbench({
     const key = `diff:${area}:${abs}`;
     const m = abs.match(/^(.*)[\\/]([^\\/]+)$/);
     Promise.all([
-      fetch(`/api/git/diff?root=${encodeURIComponent(root)}&path=${encodeURIComponent(f.path)}&staged=${area === 'staged' ? '1' : '0'}`).then((res) => res.json()),
+      fetch(withConnection(`/api/git/diff?root=${encodeURIComponent(root)}&path=${encodeURIComponent(f.path)}&staged=${area === 'staged' ? '1' : '0'}`, source?.connection)).then((res) => res.json()),
       // the on-disk file rides along so gaps between hunks can expand
-      m ? fetch(`/api/fs/read?root=${encodeURIComponent(m[1])}&path=${encodeURIComponent(m[2])}`).then((res) => res.json()).catch(() => ({})) : Promise.resolve({}),
+      m ? fetch(withConnection(`/api/fs/read?root=${encodeURIComponent(m[1])}&path=${encodeURIComponent(m[2])}`, source?.connection)).then((res) => res.json()).catch(() => ({})) : Promise.resolve({}),
     ])
       .then(([d, fileData]) => {
         const fileLines = typeof fileData?.content === 'string' ? fileData.content.replace(/\r\n/g, '\n').split('\n') : undefined;
@@ -998,7 +1009,7 @@ export default function Workbench({
         setEditorTab(key);
       })
       .catch(() => { /* refresh will heal it */ });
-  }, [gitRoot]);
+  }, [gitRoot, source?.connection]);
 
   // a review-checklist click: diff a file against the checklist's base ref
   const openRefDiff = useCallback((relPath: string, ref: string, activate = true) => {
@@ -1008,8 +1019,8 @@ export default function Workbench({
     const key = `diff:review:${abs}`;
     const m = abs.match(/^(.*)[\\/]([^\\/]+)$/);
     Promise.all([
-      fetch(`/api/git/refdiff?root=${encodeURIComponent(root)}&ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(relPath)}`).then((res) => res.json()),
-      m ? fetch(`/api/fs/read?root=${encodeURIComponent(m[1])}&path=${encodeURIComponent(m[2])}`).then((res) => res.json()).catch(() => ({})) : Promise.resolve({}),
+      fetch(withConnection(`/api/git/refdiff?root=${encodeURIComponent(root)}&ref=${encodeURIComponent(ref)}&path=${encodeURIComponent(relPath)}`, source?.connection)).then((res) => res.json()),
+      m ? fetch(withConnection(`/api/fs/read?root=${encodeURIComponent(m[1])}&path=${encodeURIComponent(m[2])}`, source?.connection)).then((res) => res.json()).catch(() => ({})) : Promise.resolve({}),
     ])
       .then(([d, fileData]) => {
         const fileLines = typeof fileData?.content === 'string' ? fileData.content.replace(/\r\n/g, '\n').split('\n') : undefined;
@@ -1023,7 +1034,7 @@ export default function Workbench({
         if (activate) setEditorTab(key);
       })
       .catch(() => { /* refresh will heal it */ });
-  }, [gitRoot]);
+  }, [gitRoot, source?.connection]);
 
   // ---- the review checklist: a punch list of files differing from a base
   // ref. Pure tracking — ticks live on the review record; a file that
@@ -1036,7 +1047,7 @@ export default function Workbench({
   useEffect(() => {
     if (!clBase || !gitRoot) { setClFiles([]); setClRef(null); setClError(null); return; }
     let dead = false;
-    const load = () => fetch(`/api/git/reffiles?root=${encodeURIComponent(gitRoot)}&ref=${encodeURIComponent(clBase)}`)
+    const load = () => fetch(withConnection(`/api/git/reffiles?root=${encodeURIComponent(gitRoot)}&ref=${encodeURIComponent(clBase)}`, source?.connection))
       .then((res) => res.json())
       .then((d) => {
         if (dead) return;
@@ -1050,7 +1061,7 @@ export default function Workbench({
     // the diff moves as the agent works; backgrounded workbenches idle
     const t = setInterval(load, active ? 10000 : 30000);
     return () => { dead = true; clearInterval(t); };
-  }, [clBase, gitRoot, active]);
+  }, [clBase, gitRoot, active, source?.connection]);
   // auto-uncheck what changed since it was ticked, and refresh its open tab
   useEffect(() => {
     const checked = activeReview?.checklist?.checked;
@@ -1489,22 +1500,42 @@ export default function Workbench({
               <div className="agentsSection" style={{ height: agentsH }}>
                 <div className="sideHead">
                   AGENTS
-                  <button
-                    ref={addRootRef}
-                    type="button"
-                    className="codicon codicon-add rootAdd"
-                    title="Attach another agent (a new root workspace)"
-                    aria-label="Attach another agent"
-                    onClick={onAddRoot}
-                    onKeyDown={(e) => {
-                      const action = actionOf(e, ['down', 'activate']);
-                      if (!action) return;
-                      e.preventDefault();
-                      e.stopPropagation();
-                      if (action === 'activate') onAddRoot();
-                      else (e.currentTarget.closest('.agentsSection')?.querySelector('.agentTree') as HTMLElement | null)?.focus();
-                    }}
-                  />
+                  <span className="rootActions">
+                    <button
+                      ref={addRemoteRef}
+                      type="button"
+                      className="codicon codicon-radio-tower rootAdd"
+                      title="Connect to a remote host over SSH"
+                      aria-label="Connect to a remote host over SSH"
+                      onClick={onAddRemote}
+                      onKeyDown={(e) => {
+                        const action = actionOf(e, ['right', 'down', 'activate']);
+                        if (!action) return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (action === 'activate') onAddRemote();
+                        else if (action === 'right') addRootRef.current?.focus();
+                        else (e.currentTarget.closest('.agentsSection')?.querySelector('.agentTree') as HTMLElement | null)?.focus();
+                      }}
+                    />
+                    <button
+                      ref={addRootRef}
+                      type="button"
+                      className="codicon codicon-add rootAdd"
+                      title="Attach another local agent (a new root workspace)"
+                      aria-label="Attach another local agent"
+                      onClick={onAddRoot}
+                      onKeyDown={(e) => {
+                        const action = actionOf(e, ['left', 'down', 'activate']);
+                        if (!action) return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (action === 'activate') onAddRoot();
+                        else if (action === 'left') addRemoteRef.current?.focus();
+                        else (e.currentTarget.closest('.agentsSection')?.querySelector('.agentTree') as HTMLElement | null)?.focus();
+                      }}
+                    />
+                  </span>
                 </div>
                 <AgentTree
                   agents={treeAgents}
@@ -1540,11 +1571,12 @@ export default function Workbench({
                     <span className="wtBannerAction" onClick={() => setExplorerRoot(undefined)}>back to main</span>
                   </div>
                 )}
-                <Explorer key={explorerRoot ?? cwd} root={explorerRoot ?? cwd} onOpen={openFile} selection={explorerSelection} onSelect={setExplorerSelection} onEscapeTop={escapeLeft} />
+                <Explorer key={`${source?.connection ?? 'local'}:${explorerRoot ?? cwd}`} root={explorerRoot ?? cwd} connection={source?.connection} onOpen={openFile} selection={explorerSelection} onSelect={setExplorerSelection} onEscapeTop={escapeLeft} />
               </div>
               <div className={leftTab === 'git' ? 'tabBody' : 'tabBody hiddenTab'}>
                 <GitPane
                   root={gitRoot}
+                  connection={source?.connection}
                   visible={leftTab === 'git'}
                   selection={gitSelection}
                   onSelect={setGitSelection}
@@ -1713,11 +1745,12 @@ export default function Workbench({
           initialPwd={pickerSeed?.pwd ?? pwd ?? ''}
           initialProvider={pickerSeed?.provider}
           initialFilter={pickerSeed?.filter}
+          source={source}
           onPick={(p, s) => {
             const followPty = pickerSeed?.followPty;
             setPickerOpen(false);
             setPickerSeed(undefined);
-            if (followPty !== undefined) onFollowedPick(p, s, followPty || undefined);
+            if (followPty !== undefined) onFollowedPick(p, s, followPty || undefined, source);
             else onPickSession(wsId, p, s);
           }}
           onGo={scopeFolder}
@@ -1740,7 +1773,7 @@ export default function Workbench({
             const root = explorerRoot ?? cwd;
             if (!q.trim()) return [];
             const kind = quick === 'grep' ? 'grep' : 'files';
-            const r2 = await fetch(`/api/${kind}?root=${encodeURIComponent(root ?? '')}&q=${encodeURIComponent(q)}`).catch(() => null);
+            const r2 = await fetch(withConnection(`/api/${kind}?root=${encodeURIComponent(root ?? '')}&q=${encodeURIComponent(q)}`, source?.connection)).catch(() => null);
             if (!r2) return [{ label: '⚠ server unreachable', path: '' }];
             if (!r2.ok) return [{ label: `⚠ server too old for /${kind} — restart mcfly after updating`, path: '' }];
             const res = await r2.json().catch(() => null);

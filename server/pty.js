@@ -55,8 +55,16 @@ function sanitizedEnv() {
   return { ...env, TERM: 'xterm-256color', COLORTERM: 'truecolor', FORCE_COLOR: '3' };
 }
 
-// ptyId -> { p, buffer: string[], size, ws, reap, tool, cwd, created, session }
+// ptyId -> { p, buffer: string[], size, ws, tool, cwd, created, session }
 const sessions = new Map();
+// SSH PTYs are channels owned by this local McFly process. They need the
+// connection in their identity because two hosts can produce the same id.
+const remoteSessions = new Map();
+
+const remoteKey = (connection, id) => `${connection}\0${id}`;
+const sessionOf = (id, connection) => connection
+  ? remoteSessions.get(remoteKey(connection, id))
+  : sessions.get(id);
 
 const ctl = (obj) => '\x00' + JSON.stringify(obj);
 
@@ -77,8 +85,11 @@ function screenOf(s) {
 }
 
 // registry view for the live-terminal picker (agent tmux: list-sessions)
-export function listPtys() {
-  return [...sessions.values()].map((s) => ({
+export function listPtys(connection) {
+  const values = connection
+    ? [...remoteSessions.values()].filter((s) => s.connection === connection)
+    : [...sessions.values()];
+  return values.map((s) => ({
     id: s.id,
     tool: s.tool,
     cwd: s.cwd,
@@ -87,11 +98,12 @@ export function listPtys() {
     session: s.session ?? null, // { provider, id, pwd } once the hunter maps it
     title: s.title || null, // live terminal title (OSC), the agent's own words
     screen: screenOf(s),
+    ...(s.connection ? { connection: s.connection } : {}),
   }));
 }
 
-export function setPtySession(ptyId, mapping) {
-  const s = sessions.get(ptyId);
+export function setPtySession(ptyId, mapping, connection) {
+  const s = sessionOf(ptyId, connection);
   if (!s) return false;
   s.session = mapping;
   return true;
@@ -165,9 +177,14 @@ export function reapOrphans() {
   try { fs.writeFileSync(LIVE_FILE, JSON.stringify(next)); } catch { /* best effort */ }
 }
 
-export function killPty(id) {
-  const s = sessions.get(id);
+export function killPty(id, connection) {
+  const s = sessionOf(id, connection);
   if (!s) return false;
+  if (s.connection) {
+    try { s.p.signal('KILL'); } catch { /* server may not support signals */ }
+    try { s.p.close(); } catch { /* close event cleans up */ }
+    return true;
+  }
   killTree(s.p.pid); // the whole tree: the shell AND the agent inside it
   try { s.p.kill(); } catch { /* onExit cleans up */ }
   return true;
@@ -175,6 +192,7 @@ export function killPty(id) {
 
 export function killAllPtys() {
   for (const id of sessions.keys()) killPty(id);
+  for (const s of remoteSessions.values()) killPty(s.id, s.connection);
   saveLive();
 }
 
@@ -186,7 +204,8 @@ function wire(s, ws) {
       const j = JSON.parse(m.toString());
       if (j.t === 'i') s.p.write(j.d);
       else if (j.t === 'r' && j.cols > 0 && j.rows > 0) {
-        s.p.resize(j.cols, j.rows);
+        if (s.connection) s.p.setWindow(j.rows, j.cols, 0, 0);
+        else s.p.resize(j.cols, j.rows);
         try { s.shadow?.resize(j.cols, j.rows); } catch { /* preview only */ }
       }
     } catch { /* ignore malformed frames */ }
@@ -196,7 +215,24 @@ function wire(s, ws) {
   });
 }
 
-export function attachPty(server, allowedHosts) {
+const shQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+const powershellQuote = (s) => String(s).replace(/'/g, "''");
+
+function remoteShell(record, cwd, cb) {
+  const ps = `try { Set-Location -LiteralPath '${powershellQuote(cwd)}' -ErrorAction Stop } catch { Write-Error $_; exit 1 }`;
+  const command = record.platform === 'win32'
+    ? `powershell.exe -NoLogo -NoExit -EncodedCommand ${Buffer.from(ps, 'utf16le').toString('base64')}`
+    : `cd -- ${shQuote(cwd)} && exec "\${SHELL:-/bin/sh}" -il`;
+  try {
+    record.client.exec(command, {
+      pty: { term: 'xterm-256color', cols: 100, rows: 30, width: 0, height: 0 },
+    }, cb);
+  } catch (error) {
+    cb(error);
+  }
+}
+
+export function attachPty(server, allowedHosts, getRemote = () => undefined) {
   const wss = new WebSocketServer({ noServer: true });
   server.on('upgrade', (req, socket, head) => {
     const url = new URL(req.url, 'http://localhost');
@@ -209,10 +245,17 @@ export function attachPty(server, allowedHosts) {
       return;
     }
     wss.handleUpgrade(req, socket, head, (ws) => {
+      const connection = url.searchParams.get('connection') || undefined;
+      const remote = connection ? getRemote(connection) : undefined;
+      if (connection && !remote) {
+        ws.send(ctl({ gone: true, error: 'SSH connection unavailable' }));
+        ws.close();
+        return;
+      }
       // ---- (re-)attach to a surviving pty; steal=1 takes it from a live holder ----
       const attach = url.searchParams.get('attach');
       if (attach) {
-        const s = sessions.get(attach);
+        const s = sessionOf(attach, connection);
         if (!s) {
           ws.send(ctl({ gone: true }));
           ws.close();
@@ -230,7 +273,7 @@ export function attachPty(server, allowedHosts) {
           try { old.send(ctl({ taken: true })); old.close(); } catch { /* already gone */ }
         }
         ws.send(ctl({ ptyId: s.id, attached: true }));
-        if (s.buffer.length) ws.send(s.buffer.join(''));
+        for (const chunk of s.buffer) ws.send(chunk);
         wire(s, ws);
         return;
       }
@@ -238,6 +281,67 @@ export function attachPty(server, allowedHosts) {
       // ---- fresh session ----
       const tool = url.searchParams.get('tool') ?? '_';
       const cwdParam = url.searchParams.get('cwd');
+      if (remote) {
+        const cwd = cwdParam || remote.home || '.';
+        remoteShell(remote, cwd, (err, p) => {
+          if (err || !p) {
+            if (ws.readyState === 1) {
+              ws.send(`\r\nfailed to start remote shell: ${err?.message ?? 'unknown error'}\r\n`);
+              ws.close();
+            }
+            return;
+          }
+          if (ws.readyState !== 1) {
+            try { p.close(); } catch { /* client left before SSH opened */ }
+            return;
+          }
+          p.setEncoding?.('utf8');
+          p.stderr?.setEncoding?.('utf8');
+          const s = {
+            id: crypto.randomBytes(8).toString('hex'), p, buffer: [], size: 0, ws: null,
+            connection, tool, cwd, created: Date.now(), session: null, title: '',
+            shadow: new ShadowTerminal({ cols: 100, rows: 30, scrollback: 20, allowProposedApi: true }),
+          };
+          try { s.shadow.onTitleChange((t) => { s.title = t; }); } catch { /* preview only */ }
+          remoteSessions.set(remoteKey(connection, s.id), s);
+          if (tool !== '_' && /^[\w.-]+$/.test(tool)) setTimeout(() => { try { p.write(tool + '\r'); } catch { /* ended */ } }, 600);
+          const onData = (d) => {
+            s.buffer.push(d);
+            s.size += typeof d === 'string' ? Buffer.byteLength(d) : d.length;
+            while (s.size > BUFFER_CAP && s.buffer.length > 1) {
+              const old = s.buffer.shift();
+              s.size -= typeof old === 'string' ? Buffer.byteLength(old) : old.length;
+            }
+            try { s.shadow.write(d); } catch { /* preview only */ }
+            if (s.ws?.readyState === 1) s.ws.send(d);
+          };
+          let ended = false;
+          const end = (error) => {
+            if (ended) return;
+            ended = true;
+            if (s.ws?.readyState === 1) {
+              if (error) s.ws.send(`\r\nSSH terminal error: ${error.message ?? error}\r\n`);
+              s.ws.send(ctl({ exit: true }));
+              s.ws.close();
+            }
+            try { s.shadow?.dispose(); } catch { /* already gone */ }
+            remoteSessions.delete(remoteKey(connection, s.id));
+          };
+          p.on('data', onData);
+          p.stderr?.on('data', onData);
+          p.once('error', end);
+          p.once('close', () => end());
+          if (ws.readyState === 1) {
+            ws.send(ctl({ ptyId: s.id }));
+            wire(s, ws);
+          } else {
+            remoteSessions.delete(remoteKey(connection, s.id));
+            try { s.shadow?.dispose(); } catch { /* already gone */ }
+            try { p.close(); } catch { /* client left during setup */ }
+          }
+        });
+        return;
+      }
       let cwd = os.homedir();
       try {
         if (cwdParam && fs.statSync(cwdParam).isDirectory()) cwd = cwdParam;

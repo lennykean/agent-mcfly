@@ -34,34 +34,42 @@ const headCache = new Map();
 function headMeta(file, st) {
   const hit = headCache.get(file);
   if (hit && hit.mtime === st.mtimeMs) return hit.meta;
-  const meta = { id: undefined, cwd: undefined, label: undefined, nickname: undefined };
   let fd;
+  let text = '';
   try {
     fd = fs.openSync(file, 'r');
     const buf = Buffer.alloc(64 * 1024);
     const n = fs.readSync(fd, buf, 0, buf.length, 0);
-    for (const line of buf.toString('utf8', 0, n).split('\n')) {
-      if (meta.cwd && meta.label) break;
-      if (!line.trim()) continue;
-      let o;
-      try { o = JSON.parse(line); } catch { continue; }
-      if (o.type === 'session_meta') {
-        meta.id = o.payload?.id ?? o.payload?.session_id;
-        meta.cwd = o.payload?.cwd;
-        meta.nickname = o.payload?.source?.subagent?.thread_spawn?.agent_nickname;
-      } else if (!meta.label && o.type === 'response_item' && o.payload?.type === 'message' && o.payload.role === 'user') {
-        // skip injected context blobs (<environment_context>, AGENTS.md dumps)
-        const text = (o.payload.content ?? [])
-          .filter((c) => c.type === 'input_text' && c.text)
-          .map((c) => c.text.trim())
-          .find((t) => t.length && !t.startsWith('<') && !t.startsWith('#'));
-        if (text) meta.label = text.slice(0, 60);
-      }
-    }
+    text = buf.toString('utf8', 0, n);
   } catch { /* unreadable */ } finally {
     if (fd !== undefined) fs.closeSync(fd);
   }
+  const meta = parseHead(text);
   headCache.set(file, { mtime: st.mtimeMs, meta });
+  return meta;
+}
+
+// Shared by local files and remote SFTP reads; transcript semantics stay here.
+export function parseHead(text) {
+  const meta = { id: undefined, cwd: undefined, label: undefined, nickname: undefined };
+  for (const line of text.split('\n')) {
+    if (meta.cwd && meta.label) break;
+    if (!line.trim()) continue;
+    let o;
+    try { o = JSON.parse(line); } catch { continue; }
+    if (o.type === 'session_meta') {
+      meta.id = o.payload?.id ?? o.payload?.session_id;
+      meta.cwd = o.payload?.cwd;
+      meta.nickname = o.payload?.source?.subagent?.thread_spawn?.agent_nickname;
+    } else if (!meta.label && o.type === 'response_item' && o.payload?.type === 'message' && o.payload.role === 'user') {
+      // skip injected context blobs (<environment_context>, AGENTS.md dumps)
+      const label = (o.payload.content ?? [])
+        .filter((c) => c.type === 'input_text' && c.text)
+        .map((c) => c.text.trim())
+        .find((t) => t.length && !t.startsWith('<') && !t.startsWith('#'));
+      if (label) meta.label = label.slice(0, 60);
+    }
+  }
   return meta;
 }
 
@@ -112,6 +120,7 @@ export function listForCwd(cwd) {
 
 // transcript + call_id -> render metadata (one entry per file for multi-file patches)
 const callMeta = new Map();
+const completedCallMeta = new Map();
 const callKey = (file, id) => `${file}\0${id}`;
 
 export function tail(id, cursor = 0) {
@@ -120,11 +129,9 @@ export function tail(id, cursor = 0) {
 
 export function tailFile(file, cursor = 0) {
   const st = fs.statSync(file);
-  const messages = [];
-  let offset = cursor;
+  let buf = Buffer.alloc(0);
   if (st.size > cursor) {
     const fd = fs.openSync(file, 'r');
-    let buf;
     try {
       let want = Math.min(st.size - cursor, MAX_CHUNK);
       for (;;) {
@@ -136,12 +143,18 @@ export function tailFile(file, cursor = 0) {
     } finally {
       fs.closeSync(fd);
     }
-    const end = buf.lastIndexOf(10);
-    if (end >= 0) {
-      offset = cursor + end + 1;
-      for (const line of buf.toString('utf8', 0, end).split('\n')) {
-        if (line.trim()) convertLine(line, messages, file, cursor);
-      }
+  }
+  return parseTailChunk(file, cursor, st, buf);
+}
+
+export function parseTailChunk(fileKey, cursor, st, buf) {
+  const messages = [];
+  let offset = cursor;
+  const end = buf.lastIndexOf(10);
+  if (end >= 0) {
+    offset = cursor + end + 1;
+    for (const line of buf.toString('utf8', 0, end).split('\n')) {
+      if (line.trim()) convertLine(line, messages, fileKey, cursor);
     }
   }
   return { messages, cursor: offset, mtime: st.mtimeMs, size: st.size };
@@ -247,7 +260,7 @@ function convertLine(line, messages, file, recoveryEnd) {
     case 'function_call_output': {
       const text = typeof p.output === 'string' ? p.output : texts(p.output);
       const key = callKey(file, p.call_id);
-      const metas = callMeta.get(key) ?? recoverCallMeta(file, p.call_id, recoveryEnd);
+      const metas = callMeta.get(key) ?? completedCallMeta.get(key) ?? recoverCallMeta(file, p.call_id, recoveryEnd);
       if (!metas.length) {
         push('user', [{
           type: 'tool_result',
@@ -276,6 +289,9 @@ function convertLine(line, messages, file, recoveryEnd) {
         };
       }));
       callMeta.delete(key);
+      completedCallMeta.delete(key);
+      completedCallMeta.set(key, metas);
+      if (completedCallMeta.size > 5000) completedCallMeta.delete(completedCallMeta.keys().next().value);
       return;
     }
     default:

@@ -66,6 +66,14 @@ test('workspace state: ingests snapshots and events, serves filtered queries', a
     assert.deepEqual(missing.snapshot, {});
     assert.deepEqual(missing.events, []);
 
+    const remoteScope = `connection-id\0/remote/project`;
+    await fetch(`${base}/api/workspace-events`, {
+      method: 'POST', body: JSON.stringify({ scope: remoteScope, snapshot: { marker: 'remote' } }),
+    });
+    const remote = await (await fetch(`${base}/api/workspace-state?project=${encodeURIComponent('/remote/project/child')}`)).json();
+    assert.equal(remote.scope, remoteScope);
+    assert.equal(remote.snapshot.marker, 'remote');
+
     await fetch(`${base}/api/workspace-events`, {
       method: 'POST', body: JSON.stringify({ scope: '/repo/Foo', snapshot: { marker: 'upper' } }),
     });
