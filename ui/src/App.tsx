@@ -1613,10 +1613,10 @@ export default function Workbench({
                     <span className="wtBannerAction" onClick={() => setExplorerRoot(undefined)}>back to main</span>
                   </div>
                 )}
-                <Explorer key={`${source?.connection ?? 'local'}:${explorerRoot ?? cwd}`} root={explorerRoot ?? cwd} connection={source?.connection} onOpen={openFile} selection={explorerSelection} onSelect={setExplorerSelection} onEscapeTop={escapeLeft} />
+                {gitRoot && <Explorer key={`${source?.connection ?? 'local'}:${gitRoot}`} root={gitRoot} connection={source?.connection} onOpen={openFile} selection={explorerSelection} onSelect={setExplorerSelection} onEscapeTop={escapeLeft} />}
               </div>
               <div className={leftTab === 'git' ? 'tabBody' : 'tabBody hiddenTab'}>
-                <GitPane
+                {gitRoot && <GitPane
                   root={gitRoot}
                   connection={source?.connection}
                   visible={leftTab === 'git'}
@@ -1629,7 +1629,7 @@ export default function Workbench({
                   currentRoot={explorerRoot ?? cwd ?? ''}
                   onEscapeTop={escapeLeft}
                   onReviewFrom={activeReview && !clBase ? reviewFrom : undefined}
-                />
+                />}
               </div>
             </div>
             <Splitter dir="col" onDrag={dragSide} />
