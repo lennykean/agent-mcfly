@@ -1780,7 +1780,7 @@ export function EditorPane({
           onClick={() => onSelect('pinned')}
         >
           {pinned && <span className="pinDot" />}
-          {pinned ? (pinned.mode === 'diff' ? '± ' : '') + shortName(pinned.path) : <>agent workspace <span className="roBadge">idle</span></>}
+          {pinned ? (pinned.mode === 'diff' ? '± ' : '') + shortName(pinned.path) : 'agent workspace'}
           {pinned && tabReviewDot(pinned.path)}
           {pinned && onOpenCurrent && (
             <span
