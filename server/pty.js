@@ -69,8 +69,15 @@ const sessionOf = (id, connection) => connection
 const ctl = (obj) => '\x00' + JSON.stringify(obj);
 
 // "screenshot": the shadow's full viewport — actual rendered terminal state,
-// with dimensions so the client can scale it into a thumbnail
+// with dimensions so the client can scale it into a thumbnail.
+// Rendering a viewport drains the shadow's pending writes, which costs real
+// CPU on a busy agent — so it is CACHED: gallery thumbnails at ~1fps are
+// plenty, and the event loop stays free for the PTY sockets (keystrokes).
+const SCREEN_TTL_MS = 1000;
 function screenOf(s) {
+  const now = Date.now();
+  if (s.screenCache && now - s.screenCache.at < SCREEN_TTL_MS) return s.screenCache.value;
+  let value = null;
   try {
     const b = s.shadow.buffer.active;
     const rows = s.shadow.rows;
@@ -78,14 +85,18 @@ function screenOf(s) {
     for (let y = Math.max(0, b.length - rows); y < b.length; y++) {
       lines.push(b.getLine(y)?.translateToString(true) ?? '');
     }
-    return { text: lines.join('\n'), cols: s.shadow.cols, rows };
+    value = { text: lines.join('\n'), cols: s.shadow.cols, rows };
   } catch {
-    return null;
+    value = null;
   }
+  s.screenCache = { at: now, value };
+  return value;
 }
 
-// registry view for the live-terminal picker (agent tmux: list-sessions)
-export function listPtys(connection) {
+// registry view for the live-terminal picker (agent tmux: list-sessions).
+// screens are OPT-IN: tab badges only need identity, and rendering every
+// terminal's viewport on every poll is what starves the sockets
+export function listPtys(connection, { screens = false } = {}) {
   const values = connection
     ? [...remoteSessions.values()].filter((s) => s.connection === connection)
     : [...sessions.values()];
@@ -97,7 +108,7 @@ export function listPtys(connection) {
     attached: !!s.ws,
     session: s.session ?? null, // { provider, id, pwd } once the hunter maps it
     title: s.title || null, // live terminal title (OSC), the agent's own words
-    screen: screenOf(s),
+    screen: screens ? screenOf(s) : null,
     ...(s.connection ? { connection: s.connection } : {}),
   }));
 }

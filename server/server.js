@@ -153,7 +153,8 @@ const server = http.createServer(async (req, res) => {
     // mapped sessions carry their transcript title so the picker reads human
     if (url.pathname === '/api/ptys') {
       const remote = remoteConnection(url);
-      const ptys = listPtys(remote?.id);
+      // ?screens=1 only from the gallery — see listPtys
+      const ptys = listPtys(remote?.id, { screens: url.searchParams.get('screens') === '1' });
       // Remote mappings are made by the same post-launch session hunt as
       // local mappings. Avoid rescanning every remote transcript over SFTP
       // on this frequent terminal-registry poll.

@@ -1192,6 +1192,21 @@ export default function Workbench({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [r.steps, r.head],
   );
+  // chat: every step that renders a bubble — the same set the message walk
+  // steps through (turns, thinking blocks, spawned-agent cards)
+  const chatSteps = useMemo(
+    () => r.steps.flatMap((s, i) => (
+      s.kind === 'user' || s.kind === 'assistant' || s.kind === 'thinking'
+      || (s.kind === 'tool' && s.call.verb === 'spawn_agent') ? [i] : [])),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [r.steps, r.head],
+  );
+  // tool call detail: every tool step (the pane shows the current one)
+  const toolSteps = useMemo(
+    () => r.steps.flatMap((s, i) => (s.kind === 'tool' ? [i] : [])),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [r.steps, r.head],
+  );
 
   // the active editor view shows a file inside a linked worktree: orange
   // banner, wherever the file came from (explorer, diff, or a subagent)
@@ -1742,6 +1757,7 @@ export default function Workbench({
                   />
                 </div>
                 <div className={bottomTab === 'tool' ? 'tabBody' : 'tabBody hiddenTab'} tabIndex={-1} onKeyDown={scrollKeys}>
+                  <HistoryBar positions={toolSteps} pointer={r.pointer} onJump={r.jump} />
                   <ToolDetail step={currentTool} />
                 </div>
               </div>
@@ -1758,6 +1774,7 @@ export default function Workbench({
                 <div className={`paneTab ${rightTab === 'term' ? 'active' : ''}`} onClick={() => setRightTab('term')}>LIVE TERMINAL</div>
               </div>
               <div className={rightTab === 'chat' ? 'tabBody rightChat' : 'tabBody rightChat hiddenTab'}>
+                <HistoryBar positions={chatSteps} pointer={r.pointer} onJump={r.jump} />
                 <ChatPane
                   steps={r.steps}
                   pointer={r.pointer}

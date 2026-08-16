@@ -400,7 +400,8 @@ export function LiveTerm({ cwd, source, projects, currentSession, linkedRoots, o
       const batches = await Promise.all([...sources.values()].map(async (item) => {
         try {
           const [ptyResponse, configResponse] = await Promise.all([
-            fetch(withConnection('/api/ptys', item?.connection)),
+            // thumbnails only when the gallery is showing (active === null)
+            fetch(withConnection(active === null ? '/api/ptys?screens=1' : '/api/ptys', item?.connection)),
             fetch(withConnection('/api/config', item?.connection)),
           ]);
           if (!ptyResponse.ok || !configResponse.ok) throw new Error('unavailable');
@@ -422,6 +423,11 @@ export function LiveTerm({ cwd, source, projects, currentSession, linkedRoots, o
         if (liveConnections) {
           setTerms((cur) => {
             const next = cur.filter((term) => !term.source || liveConnections!.has(term.source.connection));
+            // identity MUST survive a no-op sweep: `terms` feeds seedSources,
+            // which is this effect's own dependency — handing back a fresh
+            // array restarts the poll, which sweeps again, which restarts…
+            // a self-feeding request storm that pegs the server
+            if (next.length === cur.length) return cur;
             setActive((key) => key !== null && !next.some((term) => term.key === key) ? null : key);
             return next;
           });
