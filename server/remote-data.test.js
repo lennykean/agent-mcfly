@@ -112,6 +112,59 @@ function fixture() {
   return { connection: { id: 'remote-1', home: '/home/u', platform: 'linux', client }, sftp, commands };
 }
 
+function sudoCodexFixture(wrapper = [
+  '#!/usr/bin/env bash',
+  'set -e',
+  'executable=/home/codex/.codex/packages/standalone/current/codex',
+  'if [ "$(id -un)" = codex ]; then exec "$executable" "$@"; fi',
+  'exec sudo -u codex -H "$executable" "$@"',
+  '',
+].join('\n')) {
+  const stateDir = "/srv/codex owner's state";
+  const id = '2026/08/rollout-effective.jsonl';
+  const transcript = Buffer.from('é\n' + [
+    { type: 'session_meta', payload: { id: 'effective-id', cwd: '/repo' } },
+    { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Effective Codex' }] } },
+  ].map(JSON.stringify).join('\n') + '\n');
+  const index = Buffer.from('{"id":"effective-id","thread_name":"Effective remote"}\n');
+  const sftp = new FakeSftp(); // the SSH login cannot read the effective user's home
+  const commands = [];
+  const client = {
+    sftp(callback) { callback(null, sftp); },
+    exec(command, callback) {
+      commands.push(command);
+      const channel = new FakeChannel();
+      callback(null, channel);
+      queueMicrotask(() => {
+        let stdout = '';
+        let stderr = '';
+        let code = 0;
+        if (command === 'command -v codex') stdout = '/usr/local/bin/codex\n';
+        else if (command.startsWith('head -c 8192 -- ')) stdout = wrapper;
+        else if (command.includes('CODEX_HOME')) stdout = `${stateDir}\n`;
+        else if (command.includes(' find ')) stdout = [id, String(transcript.length), '2', ''].join('\0');
+        else if (command.includes(' stat -c ')) {
+          const bytes = command.includes('session_index.jsonl') ? index : transcript;
+          stdout = `${bytes.length}\t2\n`;
+        }
+        else if (command.includes(' dd ')) {
+          const bytes = command.includes('session_index.jsonl') ? index : transcript;
+          const start = Number(command.match(/\bskip=(\d+)/)?.[1] ?? 0);
+          const count = Number(command.match(/\bcount=(\d+)/)?.[1] ?? bytes.length);
+          stdout = bytes.subarray(start, start + count).toString('base64');
+        } else { code = 127; stderr = 'unexpected command'; }
+        if (stdout) channel.emit('data', stdout);
+        if (stderr) channel.stderr.emit('data', stderr);
+        channel.emit('close', code, null);
+      });
+    },
+  };
+  return {
+    connection: { id: 'sudo-codex', home: '/home/login', platform: 'linux', tools: ['codex'], client },
+    commands, stateDir, id, transcript,
+  };
+}
+
 test('browses and reads contained remote files over SFTP', async () => {
   const { connection } = fixture();
   assert.deepEqual(await fsList(connection, '/repo'), [
@@ -141,6 +194,31 @@ test('discovers and incrementally parses remote Codex and Claude sessions locall
   assert.equal(claudeSessions[0].label, 'Remote Claude');
   const claude = await tailSession(connection, 'claude-code', claudeSessions[0].id, 0);
   assert.deepEqual(claude.messages.map((message) => message.role), ['user', 'assistant']);
+});
+
+test('discovers and tails Codex through a validated sudo wrapper', async () => {
+  const { connection, commands, stateDir, id, transcript } = sudoCodexFixture();
+  assert.deepEqual(await listProviders(connection, '/repo'), [
+    { provider: 'claude-code', count: 0 },
+    { provider: 'codex', count: 1 },
+  ]);
+  const sessions = await listSessions(connection, 'codex', '/repo');
+  assert.equal(sessions[0].label, 'Effective remote');
+  assert.equal(sessions[0].id, id);
+  const tail = await tailSession(connection, 'codex', id, 1); // starts inside the two-byte é
+  assert.equal(tail.messages[0].content[0].text, 'Effective Codex');
+  assert.equal(tail.cursor, transcript.length);
+  assert.ok(commands.some((command) => command.includes("sudo -n -u 'codex' -H")));
+  assert.ok(commands.some((command) => command.includes("'/srv/codex owner'\\''s state/sessions'")));
+  assert.ok(commands.every((command) => !command.includes(`${connection.home}/.codex`)));
+  assert.ok(commands.some((command) => command.includes(stateDir.replace("'", "'\\''"))));
+  assert.ok(commands.filter((command) => command.includes(' dd ')).every((command) => command.endsWith('| base64 -w0')));
+});
+
+test('rejects an unsafe user in a Codex sudo wrapper', async () => {
+  const { connection, commands } = sudoCodexFixture('#!/bin/sh\nexec sudo -u bad;touch -H /opt/codex/bin/codex "$@"\n');
+  assert.deepEqual(await listSessions(connection, 'codex', '/repo'), []);
+  assert.ok(commands.every((command) => !command.startsWith('sudo ')));
 });
 
 test('skips remote session files that disappear after directory listing', async () => {

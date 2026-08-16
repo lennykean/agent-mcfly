@@ -9,6 +9,7 @@ import { execSsh } from './ssh.js';
 
 const MAX_CHUNK = 2 * 1024 * 1024;
 const sftpByClient = new WeakMap();
+const codexIoByClient = new WeakMap();
 // ponytail: process-lifetime cursor cache; add disconnect eviction if host churn becomes measurable.
 const codexThrough = new Map();
 const IMG = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
@@ -84,11 +85,11 @@ async function readFile(connection, file) {
   return call(await sftpFor(connection), 'readFile', file);
 }
 
-async function readTailChunk(connection, file, cursor, size) {
+async function readTailChunk(reader, file, cursor, size) {
   if (size <= cursor) return Buffer.alloc(0);
   let want = Math.min(size - cursor, MAX_CHUNK);
   for (;;) {
-    const buffer = await readRange(connection, file, cursor, want);
+    const buffer = await reader(file, cursor, want);
     if (buffer.lastIndexOf(10) >= 0 || want >= size - cursor || buffer.length < want) return buffer;
     want = Math.min(want * 2, size - cursor);
   }
@@ -132,6 +133,107 @@ export async function fsRead(connection, root, relative = '') {
   return { content: (await readFile(connection, target)).toString('utf8') };
 }
 
+const REMOTE_USER = /^[a-z_][a-z0-9_-]{0,31}$/;
+
+function sudoWrapperUser(source) {
+  const lines = String(source).replace(/^\uFEFF/, '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (lines[0]?.startsWith('#!')) lines.shift();
+  const word = "('[^'\\r\\n]*'|\"[^\"$`\\\\\\r\\n]*\"|[A-Za-z0-9_@%+=:,./-]+)";
+  const direct = lines.length === 1
+    ? new RegExp(`^exec\\s+sudo\\s+-u\\s+([a-z_][a-z0-9_-]{0,31})\\s+-H\\s+${word}\\s+"\\$@"$`).exec(lines[0])
+    : null;
+  if (direct) {
+    const target = /^['"]/.test(direct[2]) ? direct[2].slice(1, -1) : direct[2];
+    return REMOTE_USER.test(direct[1]) && path.posix.isAbsolute(target) ? direct[1] : null;
+  }
+  if (lines.length !== 4 || lines[0] !== 'set -e') return null;
+  const assigned = new RegExp(`^executable=${word}$`).exec(lines[1]);
+  const checked = /^if\s+\[\s+"\$\(id -un\)"\s+=\s+([a-z_][a-z0-9_-]{0,31})\s+\];\s+then\s+exec\s+"\$executable"\s+"\$@";\s+fi$/.exec(lines[2]);
+  const elevated = /^exec\s+sudo\s+-u\s+([a-z_][a-z0-9_-]{0,31})\s+-H\s+"\$executable"\s+"\$@"$/.exec(lines[3]);
+  if (!assigned || !checked || !elevated || checked[1] !== elevated[1] || !REMOTE_USER.test(elevated[1])) return null;
+  const target = /^['"]/.test(assigned[1]) ? assigned[1].slice(1, -1) : assigned[1];
+  return path.posix.isAbsolute(target) ? elevated[1] : null;
+}
+
+async function detectSudoCodex(connection) {
+  if (connection.platform !== 'linux' || !connection.tools?.includes('codex')) return null;
+  try {
+    const executable = (await exec(connection, 'command -v codex', false, { timeout: 5_000, maxBytes: 4096 })).trim();
+    if (!path.posix.isAbsolute(executable) || /[\r\n]/.test(executable)) return null;
+    const wrapper = await exec(connection, `head -c 8192 -- ${quote(executable)}`, false, { timeout: 5_000, maxBytes: 8192 });
+    const user = sudoWrapperUser(wrapper);
+    if (!user) return null;
+    const prefix = `sudo -n -u ${quote(user)} -H`;
+    const stateDir = (await exec(connection,
+      `${prefix} sh -c ${quote('printf "%s\\n" "${CODEX_HOME:-$HOME/.codex}"')}`, false,
+      { timeout: 5_000, maxBytes: 4096 })).trim();
+    return path.posix.isAbsolute(stateDir) && !/[\r\n]/.test(stateDir) ? { prefix, stateDir } : null;
+  } catch { return null; }
+}
+
+async function sudoCodexFiles(connection, access, root) {
+  const format = '%P\\0%s\\0%T@\\0';
+  const command = `if ${access.prefix} test -d ${quote(root)}; then ${access.prefix} find ${quote(root)} -type f -name ${quote('rollout-*.jsonl')} -printf ${quote(format)}; fi`;
+  const fields = (await exec(connection, command, false, { maxBytes: MAX_CHUNK })).split('\0');
+  if (fields.at(-1) === '') fields.pop();
+  if (fields.length % 3) throw new Error('invalid remote Codex file list');
+  const out = [];
+  for (let i = 0; i < fields.length; i += 3) {
+    const size = Number(fields[i + 1]);
+    const mtime = Number(fields[i + 2]);
+    if (!fields[i] || !Number.isFinite(size) || size < 0 || !Number.isFinite(mtime)) continue;
+    out.push({ id: fields[i], file: contained(connection, root, fields[i]), attrs: { size, mtimeMs: mtime * 1000 } });
+  }
+  return out;
+}
+
+async function codexIo(connection) {
+  let pending = codexIoByClient.get(connection.client);
+  if (pending) return pending;
+  pending = (async () => {
+    const access = await detectSudoCodex(connection);
+    if (!access) return {
+      stateDir: pathsFor(connection).join(connection.home, '.codex'),
+      files: (root) => codexFiles(connection, root),
+      stat: (file) => stat(connection, file),
+      readRange: (file, start, length) => readRange(connection, file, start, length),
+      readIndex: (file) => readFile(connection, file),
+    };
+    const statAsUser = async (file) => {
+      const [size, mtime] = (await exec(connection,
+        `${access.prefix} stat -c ${quote('%s\t%Y')} -- ${quote(file)}`, false,
+        { maxBytes: 4096 })).trim().split(/\s+/).map(Number);
+      if (!Number.isFinite(size) || !Number.isFinite(mtime)) throw new Error('invalid remote Codex stat');
+      return { size, mtimeMs: mtime * 1000 };
+    };
+    const readRangeAsUser = async (file, start, length) => {
+      const count = Math.min(length, MAX_CHUNK);
+      if (!Number.isSafeInteger(start) || start < 0 || !Number.isSafeInteger(count) || count < 0) throw new Error('invalid remote Codex range');
+      if (!count) return Buffer.alloc(0);
+      const encoded = await exec(connection,
+        `${access.prefix} dd if=${quote(file)} bs=1 skip=${start} count=${count} status=none | base64 -w0`, false,
+        { maxBytes: Math.ceil(count / 3) * 4 + 4096 });
+      if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) throw new Error('invalid remote Codex bytes');
+      const buffer = Buffer.from(encoded, 'base64');
+      if (buffer.length > count) throw new Error('invalid remote Codex range');
+      return buffer;
+    };
+    return {
+      stateDir: access.stateDir,
+      files: (root) => sudoCodexFiles(connection, access, root),
+      stat: statAsUser,
+      readRange: readRangeAsUser,
+      readIndex: async (file) => {
+        const attrs = await statAsUser(file);
+        const count = Math.min(attrs.size, MAX_CHUNK);
+        return readRangeAsUser(file, attrs.size - count, count);
+      },
+    };
+  })();
+  codexIoByClient.set(connection.client, pending);
+  return pending;
+}
+
 async function codexFiles(connection, dir, base = '') {
   const paths = pathsFor(connection);
   const out = [];
@@ -148,17 +250,18 @@ async function codexFiles(connection, dir, base = '') {
 
 async function listCodex(connection, cwd) {
   const paths = pathsFor(connection);
-  const root = paths.join(connection.home, '.codex', 'sessions');
-  const index = paths.join(connection.home, '.codex', 'session_index.jsonl');
+  const io = await codexIo(connection);
+  const root = paths.join(io.stateDir, 'sessions');
+  const index = paths.join(io.stateDir, 'session_index.jsonl');
   let names = new Map();
-  try { names = codex.parseThreadNames((await readFile(connection, index)).toString('utf8')); }
+  try { names = codex.parseThreadNames((await io.readIndex(index)).toString('utf8')); }
   catch { /* optional */ }
   const want = codex.projectPathKey(cwd);
   const out = [];
-  for (const item of await codexFiles(connection, root)) {
+  for (const item of await io.files(root)) {
     let head;
     try {
-      head = codex.parseHead((await readRange(connection, item.file, 0, Math.min(64 * 1024, item.attrs.size))).toString('utf8'));
+      head = codex.parseHead((await io.readRange(item.file, 0, Math.min(64 * 1024, item.attrs.size))).toString('utf8'));
     } catch (error) {
       if (missing(error)) continue;
       throw error;
@@ -225,25 +328,27 @@ export async function listProviders(connection, cwd) {
 
 export async function tailSession(connection, provider, id, cursor = 0) {
   const paths = pathsFor(connection);
+  const codexData = provider === 'codex' ? await codexIo(connection) : null;
   const providerRoot = provider === 'codex'
-    ? paths.join(connection.home, '.codex', 'sessions')
+    ? paths.join(codexData.stateDir, 'sessions')
     : provider === 'claude-code' ? paths.join(connection.home, '.claude', 'projects') : null;
   if (!providerRoot) throw new Error('unknown provider');
   const file = contained(connection, providerRoot, String(id).replace(/[\\/]/g, paths.sep));
-  const attrs = await stat(connection, file);
+  const reader = codexData?.readRange ?? ((target, start, length) => readRange(connection, target, start, length));
+  const attrs = codexData ? await codexData.stat(file) : await stat(connection, file);
   const fileKey = `ssh:${connection.id}:${id}`;
   if (provider === 'codex' && cursor > 0) {
     let through = Math.min(codexThrough.get(fileKey) ?? 0, attrs.size);
     if (through >= cursor) through = 0;
     while (through < cursor) {
-      const prefix = await readTailChunk(connection, file, through, cursor);
+      const prefix = await readTailChunk(reader, file, through, cursor);
       const primed = codex.parseTailChunk(fileKey, through, { ...attrs, size: cursor }, prefix);
       if (primed.cursor <= through) break;
       through = primed.cursor;
     }
     codexThrough.set(fileKey, through);
   }
-  const buffer = await readTailChunk(connection, file, cursor, attrs.size);
+  const buffer = await readTailChunk(reader, file, cursor, attrs.size);
   if (provider !== 'codex') return claudeCode.parseTailChunk(id, cursor, attrs, buffer);
   const result = codex.parseTailChunk(fileKey, cursor, attrs, buffer);
   codexThrough.set(fileKey, Math.max(codexThrough.get(fileKey) ?? 0, result.cursor));
@@ -268,8 +373,8 @@ function win32Quote(value) {
   return quoted + '\\'.repeat(slashes * 2) + '"';
 }
 
-async function exec(connection, command, allowOne = false) {
-  const result = await execSsh(connection, command, { maxBytes: 16 * 1024 * 1024 });
+async function exec(connection, command, allowOne = false, options = {}) {
+  const result = await execSsh(connection, command, { maxBytes: 16 * 1024 * 1024, ...options });
   if (result.signal || (result.code && !(allowOne && result.code === 1))) {
     const failure = new Error(String(result.stderr || `remote command exited ${result.signal ?? result.code}`).split('\n')[0]);
     failure.code = result.code;
