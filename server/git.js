@@ -6,8 +6,8 @@ import path from 'node:path';
 import { execFile } from 'node:child_process';
 
 const run = (root, args) => new Promise((resolve, reject) => {
-  execFile('git', args, { cwd: root, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (err, stdout) => {
-    if (err) reject(err);
+  execFile('git', args, { cwd: root, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (err, stdout, stderr) => {
+    if (err) reject(new Error(String(stderr || err.message).split('\n')[0]));
     else resolve(stdout);
   });
 });
@@ -15,6 +15,9 @@ const run = (root, args) => new Promise((resolve, reject) => {
 export const okRoot = (root) => {
   try { return fs.statSync(root).isDirectory(); } catch { return false; }
 };
+
+export const isNotRepositoryError = (error) =>
+  /not a git repository/i.test(String(error?.stderr || error?.message || error));
 
 // exit 1 with no output is git grep's "no matches" — an empty result;
 // anything else (not a repo, git missing) must SURFACE, not silently read

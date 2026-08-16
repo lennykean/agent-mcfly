@@ -126,7 +126,7 @@ export const GitPane = memo(function GitPane({ root, connection, visible, select
   currentRoot: string; // what the explorer shows now, to badge the active worktree
   onEscapeTop?: () => void; // 'up' beyond the first row: focus climbs to the tab strip
 }) {
-  const [status, setStatus] = useState<{ staged: GitFile[]; changed: GitFile[]; error?: string }>({ staged: [], changed: [] });
+  const [status, setStatus] = useState<{ staged: GitFile[]; changed: GitFile[]; repo?: boolean; error?: string }>({ staged: [], changed: [] });
   const [log, setLog] = useState<GitCommit[]>([]);
   const [wts, setWts] = useState<GitWorktree[]>([]);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
@@ -140,7 +140,10 @@ export const GitPane = memo(function GitPane({ root, connection, visible, select
   const refreshStatus = useCallback(() => {
     fetch(withConnection(`/api/git/status?root=${encodeURIComponent(root)}`, connection))
       .then((r) => r.json())
-      .then((d) => setStatus(d.error ? { staged: [], changed: [], error: d.error } : d))
+      .then((d) => {
+        setStatus(d.error ? { staged: [], changed: [], error: d.error } : d);
+        if (d.repo === false) { setLog([]); setWts([]); }
+      })
       .catch(() => { /* keep last */ });
   }, [root, connection]);
   const LOG_PAGE = 150;
@@ -404,6 +407,7 @@ export const GitPane = memo(function GitPane({ root, connection, visible, select
     });
   };
 
+  if (status.repo === false) return <div className="gitPane" />;
   const mainWt = wts[0]?.path;
   return (
     <div className="gitPane" ref={paneRef} tabIndex={-1} onKeyDown={kbKeyDown} onMouseDown={kbMouseDown}>

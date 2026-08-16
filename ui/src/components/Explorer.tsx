@@ -25,6 +25,7 @@ function Dir({ root, rel, name, depth, connection, onFileClick, selection, onTog
 }) {
   const [open, setOpen] = useState(depth === 0);
   const [entries, setEntries] = useState<Entry[] | null>(null);
+  const [error, setError] = useState('');
 
   // an open directory stays fresh: re-list on an interval so files created
   // or deleted by live agents appear without a reload; keep identity when
@@ -33,12 +34,22 @@ function Dir({ root, rel, name, depth, connection, onFileClick, selection, onTog
     if (!open) return;
     const load = () =>
       fetch(withConnection(`/api/fs/list?root=${encodeURIComponent(root)}&path=${encodeURIComponent(rel)}`, connection))
-        .then((r) => r.json())
-        .then((d) => {
-          const next: Entry[] = Array.isArray(d) ? d : [];
+        .then(async (r) => ({ ok: r.ok, status: r.status, data: await r.json().catch(() => null) }))
+        .then(({ ok, status, data }) => {
+          if (!ok || !Array.isArray(data)) {
+            const reason = typeof data?.error === 'string' ? data.error : `Request failed (${status})`;
+            setError(`Cannot open this folder: ${reason}`);
+            setEntries((cur) => cur ?? []);
+            return;
+          }
+          setError('');
+          const next: Entry[] = data;
           setEntries((cur) => (JSON.stringify(cur) === JSON.stringify(next) ? cur : next));
         })
-        .catch(() => setEntries((cur) => cur ?? []));
+        .catch(() => {
+          setError('Cannot open this folder: The server did not respond.');
+          setEntries((cur) => cur ?? []);
+        });
     void load();
     const id = setInterval(load, 5000);
     return () => clearInterval(id);
@@ -75,6 +86,8 @@ function Dir({ root, rel, name, depth, connection, onFileClick, selection, onTog
         ),
       )}
       {open && entries === null && <div className="expRow expDim" style={{ paddingLeft: 24 + depth * 12 }}>…</div>}
+      {open && error && <div className="expRow expDim pickerError" style={{ paddingLeft: 24 + depth * 12 }}>{error}</div>}
+      {open && !error && entries?.length === 0 && <div className="expRow expDim" style={{ paddingLeft: 24 + depth * 12 }}>folder is empty</div>}
     </div>
   );
 }

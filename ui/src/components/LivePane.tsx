@@ -208,7 +208,8 @@ function PtySession({ tool, token, cwd, source, reportScope, platform, attachId,
           try {
             const c = JSON.parse(e.data.slice(1));
             if (c.ptyId) { myPty.current = c.ptyId; onPtyIdRef.current(c.ptyId); }
-            if (c.exit || c.gone) onExitRef.current();
+            if (c.exit) setStatus('closed');
+            if (c.gone) onExitRef.current();
             if (c.busy || c.taken) setStatus('taken'); // take-back stays possible
           } catch { /* not a control frame after all */ }
           return;

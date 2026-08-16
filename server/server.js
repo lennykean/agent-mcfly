@@ -219,7 +219,10 @@ const server = http.createServer(async (req, res) => {
           return json(res, 200, { hunks: await git.diffAgainstRef(root, ref, file, io) });
         }
       } catch (e) {
-        // not a repo, or git absent: the pane shows the message, nothing breaks
+        if (git.isNotRepositoryError(e)) {
+          if (url.pathname === '/api/git/status') return json(res, 200, { repo: false, staged: [], changed: [] });
+          if (url.pathname === '/api/git/log' || url.pathname === '/api/git/worktrees') return json(res, 200, []);
+        }
         return json(res, 200, { error: String(e.message ?? e).split('\n')[0] });
       }
     }
