@@ -100,7 +100,7 @@ pre, code { font-family: var(--font-mono); }
 .sessionToggle.on { opacity: 1; background: none; border-color: #3d5a3d; color: var(--green); }
 .sessionToggle .liveDotT { color: #141414; }
 .sessionToggle.on .liveDotT { color: var(--green); animation: pulse 1.5s infinite; }
-button.sessionToggle:disabled, button.sessionToggle:disabled:hover { opacity: 0.25; background: none; border-color: transparent; color: var(--fg-faint); }
+button.sessionToggle:disabled, button.sessionToggle:disabled:hover { opacity: 0.6; background: none; border-color: transparent; color: var(--fg-dim); }
 
 /* settings icon; session controls share sessionToggle above */
 .tourToggle { font-size: 13px; padding: 0 7px; opacity: 0.5; background: none; border: 1px solid transparent; }
