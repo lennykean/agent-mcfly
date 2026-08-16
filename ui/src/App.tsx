@@ -1427,6 +1427,7 @@ export default function Workbench({
     wasActive.current = active;
   }, [active, wsId]);
 
+  const hasSession = !!r.session;
   return (
     <div className="app" ref={appRef}>
       <div className="titlebar" style={activeColor ? { background: tintOver(activeColor, 0.18, '#323233') } : undefined}>
@@ -1493,28 +1494,17 @@ export default function Workbench({
         })()}
         <span className="titleRight">
           <button
-            className={`tourToggle ${sync ? 'on' : ''}`}
-            title={sync
+            className={`sessionToggle ${hasSession && sync ? 'on' : ''}`}
+            disabled={!hasSession}
+            title={!hasSession ? 'Open an agent session to sync terminals.' : sync
               ? 'Terminals synced: picking an agent shows its terminal, picking a linked terminal switches the workbench. Click to unsync.'
               : 'Sync terminals to sessions: picking an agent will show its terminal and vice versa.'}
             onClick={onToggleSync}
           ><span className="codicon codicon-link" /></button>
-          {r.session && (
-            <button
-              className={`liveToggle ${r.follow ? 'on' : ''}`}
-              title={r.follow
-                ? 'Following the end of the session. Click to stop.'
-                : 'Jump to the end and follow new activity live.'}
-              onClick={() => {
-                if (r.follow) { r.stopLive(); return; }
-                setPinnedOverride(undefined); // live means the end, hold included
-                r.goLive();
-              }}
-            ><span className="liveDotT">●</span> LIVE</button>
-          )}
           <button
-            className={`tourToggle ${autoFollow ? 'on' : ''}`}
-            title={autoFollow
+            className={`sessionToggle ${hasSession && autoFollow ? 'on' : ''}`}
+            disabled={!hasSession}
+            title={!hasSession ? 'Open an agent session to use the tour guide.' : autoFollow
               ? 'Tour guide ON: the view takes you to files, tables, and waypoints as they happen. Click to wander freely.'
               : 'Tour guide OFF: activity flashes its tab instead of moving you. Click to be shown around.'}
             onClick={() => {
@@ -1522,8 +1512,20 @@ export default function Workbench({
               setAutoFollow(!autoFollow);
             }}
           >
-            <span className={`codicon codicon-${autoFollow ? 'eye' : 'eye-closed'}`} />
+            <span className={`codicon codicon-${hasSession && autoFollow ? 'eye' : 'eye-closed'}`} />
           </button>
+          <button
+            className={`sessionToggle ${hasSession && r.follow ? 'on' : ''}`}
+            disabled={!hasSession}
+            title={!hasSession ? 'No agent session to follow.' : r.follow
+              ? 'Following the end of the session. Click to stop.'
+              : 'Jump to the end and follow new activity live.'}
+            onClick={() => {
+              if (r.follow) { r.stopLive(); return; }
+              setPinnedOverride(undefined); // live means the end, hold included
+              r.goLive();
+            }}
+          ><span className="liveDotT">●</span> LIVE</button>
           <span className="layoutToggles">
             <button className={leftOpen ? 'on' : ''} title="Toggle left pane" onClick={() => setLeftOpen(!leftOpen)}>◧</button>
             <button className={bottomOpen ? 'on' : ''} title="Toggle bottom pane" onClick={() => setBottomOpen(!bottomOpen)}>⬓</button>
