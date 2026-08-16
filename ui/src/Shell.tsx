@@ -135,6 +135,13 @@ export default function Shell() {
   // ---- settings: one popover, one persisted file, one keymap module sync ----
   const [settings, setSettings] = useState<McflySettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState<false | 'settings' | 'keys'>(false);
+  // agent CLIs on PATH, for the default-terminal picker
+  const [cliTools, setCliTools] = useState<string[]>();
+  useEffect(() => {
+    void fetch('/api/config').then((r) => r.json())
+      .then((d) => { if (Array.isArray(d?.tools)) setCliTools(d.tools); })
+      .catch(() => { /* picker falls back to a blank shell */ });
+  }, []);
   useEffect(() => {
     void fetch('/api/settings').then((r2) => r2.json()).then((s: McflySettings) => {
       if (s && Object.keys(s).length) { setSettings(s); return; }
@@ -597,6 +604,7 @@ export default function Shell() {
             currentSession={activeInfo?.provider && activeInfo.sessionFull
               ? { provider: activeInfo.provider, id: activeInfo.sessionFull, source: activeSource } : null}
             linkedRoots={linkedRoots}
+            defaultTool={settings?.defaultTool}
             onToolStart={(tool, project) => withProjectHandle(project, (handle) => handle.onToolStart(tool, project?.cwd))}
             onPtyId={(id, tool, fresh, project) => withProjectHandle(project, (handle) => handle.onPtyStart(id, tool, fresh))}
             onOpenFileRef={(p, line, project) => withProjectHandle(project, (handle) => handle.openFileRef(p, line))}
@@ -651,6 +659,7 @@ export default function Shell() {
           settings={settings}
           initialPage={settingsOpen}
           keysVersion={keysVersion}
+          tools={cliTools}
           onSave={saveSettings}
           onClose={() => { setSettingsOpen(false); focusEditor(); }}
         />

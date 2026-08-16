@@ -460,6 +460,19 @@ const server = http.createServer(async (req, res) => {
       if (remote) return json(res, 200, await remoteData.listSessions(remote, providerName, pwd));
       return json(res, 200, provider.listForCwd(pwd));
     }
+    // last-activity of specific transcripts (the agent tree asks about the
+    // children it still considers alive). A stat each, no parsing, no state:
+    // the client freezes an agent once its tip falls behind the playhead and
+    // stops asking about it entirely.
+    if (url.pathname === '/api/session-tips') {
+      const provider = PROVIDERS[url.searchParams.get('provider') ?? 'claude-code'];
+      if (!provider?.tip) return json(res, 200, {});
+      const out = {};
+      for (const id of (url.searchParams.get('ids') ?? '').split(',').filter(Boolean).slice(0, 64)) {
+        try { out[id] = provider.tip(id); } catch { /* not written yet, or gone */ }
+      }
+      return json(res, 200, out);
+    }
     if (url.pathname === '/api/session') {
       const providerName = url.searchParams.get('provider') ?? 'claude-code';
       const provider = PROVIDERS[providerName];

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { type Action, bindingsFor, overlayActions, parseKeys } from '../lib/keys';
 
 // Everything the app remembers about the user, stored server-side in
@@ -12,11 +12,38 @@ export interface McflySettings {
   autoLive?: boolean;
   autoTour?: boolean;
   autoSync?: boolean; // start with terminals synced to sessions
+  // extra CLI flags per tool, appended when mcfly launches it in a terminal
+  flags?: Record<string, string>;
+  defaultTool?: string; // what a new terminal starts as ('_' = blank shell)
   keymap?: Record<string, string[]>;
 }
 
 // a small notation input for the vim leader / tmux prefix: saves on Enter
 // or blur, keeps the default on bad notation
+// a plain text row (extra CLI flags): commits on Enter or blur, no validation
+// beyond the server's control-character strip
+function TextRow({ label, hint, value, placeholder, onSave }: {
+  label: string; hint: string; value: string; placeholder: string; onSave: (v: string) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => { setDraft(value); }, [value]);
+  return (
+    <div className="setSub">
+      <span className="setLabel">{label}</span>
+      <input
+        className="pickerInput setFlags"
+        value={draft}
+        placeholder={placeholder}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={() => onSave(draft.trim())}
+        onKeyDown={(e) => { e.stopPropagation(); if (e.key === 'Enter') onSave(draft.trim()); }}
+        spellCheck={false}
+      />
+      <span className="setHint">{hint}</span>
+    </div>
+  );
+}
+
 function LeaderInput({ label, hint, value, placeholder, onSave }: {
   label: string; hint: string; value: string; placeholder: string; onSave: (v: string) => void;
 }) {
@@ -51,10 +78,11 @@ function LeaderInput({ label, hint, value, placeholder, onSave }: {
 // click a row to override in vim notation). Enabling vim/tmux over custom
 // bindings asks before overwriting them; disabling a mode removes only what
 // the mode itself brought.
-export function Settings({ settings, initialPage = 'settings', keysVersion = 0, onSave, onClose }: {
+export function Settings({ settings, initialPage = 'settings', keysVersion = 0, tools, onSave, onClose }: {
   settings: McflySettings;
   initialPage?: 'settings' | 'keys';
   keysVersion?: number; // bumped AFTER the keys module absorbed the settings
+  tools?: string[]; // agent CLIs found on PATH, for the default-terminal picker
   onSave: (patch: Partial<McflySettings>) => void;
   onClose: () => void;
 }) {
@@ -158,6 +186,32 @@ export function Settings({ settings, initialPage = 'settings', keysVersion = 0, 
               settings.autoTour !== false, (v) => onSave({ autoTour: v }))}
             {toggleRow('auto-sync terminals', 'start with terminals synced: picking an agent shows its terminal and vice versa',
               !!settings.autoSync, (v) => onSave({ autoSync: v }))}
+
+            <div className="setSection">terminals</div>
+            <div className="setSub">
+              <span className="setLabel">default terminal</span>
+              <select
+                className="pickerInput setMini"
+                value={settings.defaultTool ?? '_'}
+                onChange={(e) => onSave({ defaultTool: e.target.value })}
+                onKeyDown={(e) => e.stopPropagation()}
+              >
+                {['_', ...(tools ?? []).filter((t) => t !== '_')].map((t) => (
+                  <option key={t} value={t}>{t === '_' ? 'blank shell' : t}</option>
+                ))}
+              </select>
+              <span className="setHint">what a new terminal starts as</span>
+            </div>
+            {['claude', 'codex'].map((tool) => (
+              <TextRow
+                key={tool}
+                label={`${tool} flags`}
+                hint={`appended when mcfly launches ${tool}`}
+                value={settings.flags?.[tool] ?? ''}
+                placeholder={tool === 'claude' ? '--model opus' : '--search'}
+                onSave={(v) => onSave({ flags: { ...(settings.flags ?? {}), [tool]: v } })}
+              />
+            ))}
             {ask && (
               <div className="setAsk">
                 <div>

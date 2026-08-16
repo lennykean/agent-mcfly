@@ -199,7 +199,7 @@ function convertLine(line, ctx, messages) {
           tool_request_id: c.id,
           tool: displayTool,
           params: c.input,
-          extended: { render: inferredRead ?? callRender(c.name, c.input ?? {}) },
+          extended: { render: inferredRead ?? callRender(c.name, c.input ?? {}, ctx, c.id) },
         });
       }
     }
@@ -369,7 +369,31 @@ export function bashReadResult(read, result, block) {
 
 // ---- render verbs: the provider-neutral contract the UI consumes ----
 
-function callRender(tool, input) {
+// tool_use id -> the subagent it started, from the agent-<id>.meta.json
+// sidecars written when a subagent boots. Cached per session dir, and
+// re-scanned only while a call has no child yet (spawns are rare).
+const childByToolUse = new Map();
+function childOfToolUse(sessionDirId, toolUseId) {
+  const hit = childByToolUse.get(toolUseId);
+  if (hit) return hit;
+  const dir = path.join(ROOT, sessionDirId, 'subagents');
+  let names = [];
+  try { names = fs.readdirSync(dir).filter((n) => n.endsWith('.meta.json')); } catch { return {}; }
+  for (const name of names) {
+    let meta;
+    try { meta = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')); } catch { continue; }
+    if (!meta?.toolUseId) continue;
+    const agentId = name.replace(/^agent-/, '').replace(/\.meta\.json$/, '');
+    childByToolUse.set(meta.toolUseId, {
+      agent_id: agentId,
+      ...(meta.agentType ? { agent_type: meta.agentType } : {}),
+      child_session_id: `${sessionDirId}/subagents/agent-${agentId}.jsonl`,
+    });
+  }
+  return childByToolUse.get(toolUseId) ?? {};
+}
+
+function callRender(tool, input, ctx, id) {
   if (isTableTool(tool)) return tableCall(input);
   if (isHighlightTool(tool)) return highlightCall(input);
   if (isWaypointRemoveTool(tool)) return waypointRemoveCall(input);
@@ -396,7 +420,16 @@ function callRender(tool, input) {
       return { verb: 'exec', command: `glob "${input.pattern}"${input.path ? ' ' + input.path : ''}`, title: truncate(input.pattern, 60) };
     case 'Agent':
     case 'Task':
-      return { verb: 'spawn_agent', agent_type: input.subagent_type, title: input.description ?? 'agent' };
+      // the child is findable AS SOON AS IT STARTS: every subagent drops an
+      // agent-<id>.meta.json naming the tool_use that spawned it, long before
+      // its result comes back. Linking here is what makes a RUNNING agent
+      // visible in the tree instead of only appearing once it dies.
+      return {
+        verb: 'spawn_agent',
+        agent_type: input.subagent_type,
+        title: input.description ?? 'agent',
+        ...(ctx?.sessionDirId && id ? childOfToolUse(ctx.sessionDirId, id) : {}),
+      };
     default:
       return { verb: 'other', title: summarizeParams(tool, input) };
   }
@@ -520,3 +553,11 @@ function summarizeParams(tool, input) {
 
 const shortPath = (p) => (p ? String(p).split(/[\\/]/).slice(-2).join('/') : '');
 const truncate = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + '…' : (s ?? ''));
+
+// last-activity probe for the agent tree: a stat, no parsing. Transcripts are
+// append-only, so once a tip falls behind the playhead the client can freeze
+// it and never ask again.
+export function tip(id) {
+  const st = fs.statSync(resolveId(id));
+  return { updated_at: st.mtimeMs, size: st.size };
+}

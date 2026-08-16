@@ -318,9 +318,10 @@ export interface TermCtl {
 // to one get the green dot, the agent's name, and the root's color
 export interface LinkedRoot { provider: string; id: string; label: string; color?: string; active: boolean; source?: WorkspaceSource }
 
-export function LiveTerm({ cwd, source, projects, currentSession, linkedRoots, onToolStart, onPtyId, onOpenFileRef, onFollowSession, onFollowResolve, onActiveSession, ctl }: {
+export function LiveTerm({ cwd, source, projects, currentSession, linkedRoots, defaultTool, onToolStart, onPtyId, onOpenFileRef, onFollowSession, onFollowResolve, onActiveSession, ctl }: {
   cwd?: string;
   source?: WorkspaceSource;
+  defaultTool?: string; // settings: what the new-terminal chord launches
   // distinct open project folders; local and server PTYs add any surviving
   // folders that are no longer open in the workbench
   projects?: TerminalProject[];
@@ -589,7 +590,8 @@ export function LiveTerm({ cwd, source, projects, currentSession, linkedRoots, o
       onActiveSession?.(sessionOf(entry.ptyId, entry.source), entry.source);
     };
     ctl.current = {
-      startNew: (target?: TerminalProject) => startNew('_', target),
+      // the chord starts whatever the settings call default ('_' = blank shell)
+      startNew: (target?: TerminalProject) => startNew(defaultTool || '_', target),
       focusProjects: () => focusProjectTabs(),
       focusOrNext: (fromTerm: boolean) => {
         if (!scopedTerms.length) { openPicker(); return; }

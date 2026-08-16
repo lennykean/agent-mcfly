@@ -655,3 +655,11 @@ export function patchRenders(input) {
     };
   });
 }
+
+// last-activity probe for the agent tree: a stat, no parsing. Transcripts are
+// append-only, so once a tip falls behind the playhead the client can freeze
+// it and never ask again.
+export function tip(id) {
+  const st = fs.statSync(resolveId(id));
+  return { updated_at: st.mtimeMs, size: st.size };
+}

@@ -294,6 +294,12 @@ dialog.pickerOverlay:not([open]) { display: none; }
 .agentRow:hover { background: #2a2d2e; }
 .agentRow.active { background: var(--accent-bg); color: #fff; }
 
+/* an agent whose last activity is behind the playhead: it leaves gently and
+   comes back the same way on rewind (the row keeps its height while fading
+   so the rows below don't jump) */
+.agentRow { transition: opacity 0.3s ease; }
+.agentGone > .agentRow { opacity: 0; pointer-events: none; }
+
 /* multi-root AGENTS tree: workspace group rows (grouping only) > roots >
    subagents; roots carry their hue as a row tint */
 .agentRow { display: flex; align-items: center; min-width: 0; }
@@ -744,3 +750,7 @@ pre.code.hljs { padding: 0; background: transparent; }
 .transport select option { color: #000; }
 .scrub { flex: 1; accent-color: #fff; }
 .pos { color: #fff; font-size: 12px; white-space: nowrap; }
+
+/* settings: a section heading, and the wider input extra CLI flags need */
+.setSection { margin: 10px 0 2px; font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--fg-faint); }
+.setFlags { flex: 1 1 260px; min-width: 180px; font-family: var(--font-mono); font-size: 12px; }

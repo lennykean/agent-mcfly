@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { actionOf } from '../lib/keys';
 import { rgba } from '../lib/palette';
 import type { WorkspaceSource } from '../types';
@@ -12,6 +12,9 @@ export interface TreeAgent {
   agentType?: string;
   color?: string; // the root's hue; rows get a tinted background
   root?: boolean; // a top-level agent (closable)
+  // false once the playhead has moved past this agent's last activity — it
+  // fades out, and fades back in when you rewind into its life
+  present?: boolean;
   // a workspace GROUP row: pure grouping, informational — it cannot be
   // opened or selected, only collapsed
   kind?: 'workspace';
@@ -20,6 +23,8 @@ export interface TreeAgent {
   title?: string;
   source?: WorkspaceSource;
 }
+
+const FADE_MS = 320; // matches .agentGone in app.css
 
 // The agents list is its OWN panel, not a tab of the strip below it: plain
 // arrows walk (soft select), left/right collapse/expand subagent subtrees at
@@ -42,6 +47,18 @@ export function AgentTree({
 }) {
   const children = (parent: string | null) => agents.filter((a) => a.parentKey === parent);
   const byKey = new Map(agents.map((a) => [a.key, a]));
+
+  // departing rows stay mounted for the fade, then leave. Arriving ones just
+  // appear and the CSS transition carries them in.
+  const [keepMounted, setKeepMounted] = useState<ReadonlySet<string>>(new Set());
+  const goneKeys = agents.filter((a) => a.present === false).map((a) => a.key).join(',');
+  useEffect(() => {
+    const leaving = new Set(goneKeys ? goneKeys.split(',') : []);
+    if (!leaving.size) { setKeepMounted((cur) => (cur.size ? new Set() : cur)); return; }
+    setKeepMounted(leaving); // hold them through the transition
+    const t = setTimeout(() => setKeepMounted(new Set()), FADE_MS);
+    return () => clearTimeout(t);
+  }, [goneKeys]);
   const toggle = onToggle;
 
   const boxRef = useRef<HTMLDivElement>(null);
@@ -129,8 +146,12 @@ export function AgentTree({
   const renderNode = (node: TreeAgent, depth: number) => {
     const kids = children(node.key);
     const closed = collapsed.has(node.key);
+    // a departed agent whose subtree still holds someone present stays (its
+    // children need a parent to hang from); the row itself dims either way
+    const gone = node.present === false && !kids.some((k) => k.present !== false);
+    if (gone && !keepMounted.has(node.key)) return null;
     return (
-      <div key={node.key}>
+      <div key={node.key} className={node.present === false ? 'agentGone' : undefined}>
         <div
           className={`agentRow ${node.key === viewKey ? 'active' : ''} ${node.kind === 'workspace' ? 'wsGroupRow' : ''}`}
           style={{

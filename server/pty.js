@@ -36,6 +36,20 @@ function which(name) {
 const SHELL = WIN ? (which('pwsh') ? 'pwsh.exe' : 'powershell.exe') : process.env.SHELL || 'bash';
 
 let tools; // detected once, first request
+// Extra CLI flags per tool, from ~/.mcfly/settings.json ({"flags":{"claude":
+// "--model opus"}}). Read at launch so a settings change applies to the next
+// terminal without a restart. Control characters are stripped — the launch
+// line is TYPED into the shell, so a stray newline would run half a command.
+export function toolFlags(tool) {
+  try {
+    const file = path.join(os.homedir(), '.mcfly', 'settings.json');
+    const raw = JSON.parse(fs.readFileSync(file, 'utf8'))?.flags?.[tool];
+    // eslint-disable-next-line no-control-regex
+    const clean = typeof raw === 'string' ? raw.replace(/[\u0000-\u001f\u007f]/g, ' ').trim() : '';
+    return clean ? ` ${clean}` : '';
+  } catch { return ''; }
+}
+
 export function detectTools() {
   tools ??= CANDIDATE_TOOLS.filter(which);
   return tools;
@@ -315,7 +329,7 @@ export function attachPty(server, allowedHosts, getRemote = () => undefined) {
           };
           try { s.shadow.onTitleChange((t) => { s.title = t; }); } catch { /* preview only */ }
           remoteSessions.set(remoteKey(connection, s.id), s);
-          if (tool !== '_' && /^[\w.-]+$/.test(tool)) setTimeout(() => { try { p.write(tool + '\r'); } catch { /* ended */ } }, 600);
+          if (tool !== '_' && /^[\w.-]+$/.test(tool)) setTimeout(() => { try { p.write(tool + toolFlags(tool) + '\r'); } catch { /* ended */ } }, 600);
           const onData = (d) => {
             s.buffer.push(d);
             s.size += typeof d === 'string' ? Buffer.byteLength(d) : d.length;
@@ -390,7 +404,7 @@ export function attachPty(server, allowedHosts, getRemote = () => undefined) {
       // launch the picked tool inside the shell so PATH/shims resolve the
       // same way they do for the user; '_' stays a bare shell
       if (tool !== '_' && /^[\w.-]+$/.test(tool)) {
-        setTimeout(() => p.write(tool + '\r'), 600);
+        setTimeout(() => p.write(tool + toolFlags(tool) + '\r'), 600);
       }
       p.onData((d) => {
         s.buffer.push(d);

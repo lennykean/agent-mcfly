@@ -43,6 +43,10 @@ export interface CallRender {
   removed?: boolean;
   command?: string;
   agent_type?: string;
+  // a spawn knows its child as soon as the child announces itself (claude's
+  // meta sidecar, codex's spawn result) — the tree needs no death to show it
+  agent_id?: string;
+  child_session_id?: string;
 }
 
 export interface PatchHunk {

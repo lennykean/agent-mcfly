@@ -1491,7 +1491,7 @@ export default function Workbench({
             chain.unshift(n);
             k = n.parentKey;
           }
-          if (!chain.length) chain.push({ key: 'main', parentKey: null, label: r.session.label || r.session.id.slice(0, 8) });
+          if (!chain.length) chain.push({ key: 'main', parentKey: null, label: r.session.label || r.session.id.slice(0, 8), present: true });
           return (
             <span className="crumb">
               {chain.map((n, i) => (

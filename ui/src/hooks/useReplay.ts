@@ -4,6 +4,11 @@ import type { SessionMeta, Step, TailResponse, Timeline } from '../types';
 import { withConnection } from '../lib/api';
 
 const POLL_MS = 2500;
+// how long after an agent's last activity we still count it as "around":
+// covers a thinking pause, and keeps a scrub from flickering nodes
+const GRACE_MS = 90_000;
+// ...and how far behind before we stop tracking it entirely (frozen tip)
+const SETTLE_MS = 10 * 60_000;
 const POLL_HIDDEN_MS = 10_000; // backgrounded workbenches tail gently — a
 // heavy hidden session refolding mid-drag steals frames from the visible one
 
@@ -12,6 +17,7 @@ export interface AgentNode {
   parentKey: string | null;
   label: string;
   agentType?: string;
+  spawnedAt?: number; // ms; the moment its parent started it
 }
 
 export function useReplay(active = true, connection?: string) {
@@ -219,18 +225,30 @@ export function useReplay(active = true, connection?: string) {
   }, [viewKey, head]);
 
   // All agents discovered across loaded timelines (full file, not pointer-limited).
+  // A node appears at the step that FIRST links a child — the call side when
+  // the transcript already knows the child (claude's meta sidecar, codex's
+  // spawn result), so a running agent is in the tree instead of only showing
+  // up once it dies. spawnedAt is that step's moment: the tree fades a node
+  // out once the playhead passes the child's last activity, and back in on
+  // rewind, so "done" needs no completion event at all.
   const agents = useMemo<AgentNode[]>(() => {
     const nodes: AgentNode[] = [{ key: 'main', parentKey: null, label: session?.label ?? 'main' }];
+    const seen = new Set<string>();
     for (const tl of timelines.current.values()) {
       for (const s of tl.steps) {
-        if (s.kind === 'tool' && s.result?.verb === 'spawn_agent' && s.result.child_session_id) {
-          nodes.push({
-            key: s.result.child_session_id,
-            parentKey: tl.key,
-            label: s.call.title ?? s.result.agent_id ?? 'agent',
-            agentType: s.result.agent_type ?? s.call.agent_type,
-          });
-        }
+        if (s.kind !== 'tool') continue;
+        const link = s.result?.verb === 'spawn_agent' && s.result.child_session_id ? s.result
+          : s.call.verb === 'spawn_agent' && s.call.child_session_id ? s.call
+            : null;
+        if (!link?.child_session_id || seen.has(link.child_session_id)) continue;
+        seen.add(link.child_session_id);
+        nodes.push({
+          key: link.child_session_id,
+          parentKey: tl.key,
+          label: s.call.title ?? link.agent_id ?? 'agent',
+          agentType: link.agent_type ?? s.call.agent_type,
+          spawnedAt: s.ts,
+        });
       }
     }
     return nodes;
@@ -287,13 +305,64 @@ export function useReplay(active = true, connection?: string) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, tailOnce, viewKey, pointers, agents]);
 
+  // ---- agent liveness by last activity ----
+  // Each child transcript's tip (its file mtime) says when that agent last
+  // did anything. An agent is SETTLED once its tip falls behind the head by
+  // more than the grace window: transcripts are append-only, so a settled
+  // tip can never change on its own — we freeze it and stop asking. Only a
+  // fresh reference from the parent (a new step naming it) re-arms tracking.
+  const [tips, setTips] = useState<Record<string, number>>({});
+  const settled = useRef(new Set<string>());
+  const headTs = steps[head]?.ts ?? Date.now();
+  const agentKeys = agents.filter((a) => a.key !== 'main').map((a) => a.key).join(',');
+  useEffect(() => {
+    if (!session) return;
+    const live = () => agents
+      .filter((a) => a.key !== 'main' && !settled.current.has(a.key))
+      .map((a) => a.key);
+    const poll = async () => {
+      const ids = live();
+      if (!ids.length) return;
+      try {
+        const got: Record<string, { updated_at: number }> = await (await fetch(
+          `/api/session-tips?provider=${encodeURIComponent(session.provider)}&ids=${ids.map(encodeURIComponent).join(',')}`,
+        )).json();
+        const next: Record<string, number> = {};
+        for (const [id, t] of Object.entries(got ?? {})) {
+          if (typeof t?.updated_at !== 'number') continue;
+          next[id] = t.updated_at;
+          // fallen far behind the newest activity: it is done moving
+          if (Date.now() - t.updated_at > SETTLE_MS) settled.current.add(id);
+        }
+        if (Object.keys(next).length) setTips((cur) => ({ ...cur, ...next }));
+      } catch { /* keep the last tips; agents stay visible */ }
+    };
+    void poll();
+    const id = setInterval(poll, active ? 4000 : 20_000);
+    return () => clearInterval(id);
+    // a new agent (or a re-reference) re-arms: agentKeys changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session, agentKeys, active]);
+
   const view = useMemo(() => foldState(steps, pointer), [steps, pointer, tick]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const animateIndex = animate?.key === viewKey ? animate.index : -1;
 
+  // an agent belongs on screen while the playhead sits inside its life:
+  // from the step that started it until its own last activity (+grace).
+  // Rewind walks back into that window and it returns — no death event needed.
+  const pointerTs = steps[pointer]?.ts ?? headTs;
+  const agentsLive = useMemo(() => agents.map((a) => {
+    if (a.key === 'main') return { ...a, present: true };
+    const tip = tips[a.key];
+    const started = a.spawnedAt === undefined || pointerTs >= a.spawnedAt;
+    const present = started && (tip === undefined || pointerTs <= tip + GRACE_MS);
+    return { ...a, present };
+  }), [agents, tips, pointerTs]);
+
   return {
     session, selectSession, clearSession,
-    viewKey, switchView, agents,
+    viewKey, switchView, agents: agentsLive,
     steps, pointer, head, view, animateIndex, follow, seekTick,
     playing, togglePlay, speed, setSpeed,
     jump, stepBy, goLive, stopLive,
