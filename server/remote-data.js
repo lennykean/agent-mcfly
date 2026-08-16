@@ -221,7 +221,7 @@ async function codexIo(connection) {
       if (!count) return Buffer.alloc(0);
       const encoded = (await exec(connection,
         `${access.prefix} od -A n -v -t x1 -j ${start} -N ${count} ${quote(file)}`, false,
-        { maxBytes: count * 3 + 4096 })).replace(/\s/g, '');
+        { maxBytes: count * 4 + 4096 })).replace(/\s/g, '');
       if (!/^(?:[0-9a-fA-F]{2})*$/.test(encoded)) throw new Error('invalid remote Codex bytes');
       const buffer = Buffer.from(encoded, 'hex');
       if (buffer.length > count) throw new Error('invalid remote Codex range');

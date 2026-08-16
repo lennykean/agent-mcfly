@@ -119,13 +119,14 @@ function sudoCodexFixture(wrapper = [
   'if [ "$(id -un)" = codex ]; then exec "$executable" "$@"; fi',
   'exec sudo -u codex -H "$executable" "$@"',
   '',
-].join('\n')) {
+].join('\n'), padding = 0) {
   const stateDir = "/srv/codex owner's state";
   const id = '2026/08/rollout-effective.jsonl';
   const transcript = Buffer.from('é\n' + [
     { type: 'session_meta', payload: { id: 'effective-id', cwd: '/repo' } },
+    ...(padding ? [' '.repeat(padding)] : []),
     { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'Effective Codex' }] } },
-  ].map(JSON.stringify).join('\n') + '\n');
+  ].map((line) => typeof line === 'string' ? line : JSON.stringify(line)).join('\n') + '\n');
   const index = Buffer.from('{"id":"effective-id","thread_name":"Effective remote"}\n');
   const sftp = new FakeSftp(); // the SSH login cannot read the effective user's home
   const commands = [];
@@ -155,7 +156,8 @@ function sudoCodexFixture(wrapper = [
           const bytes = command.includes('session_index.jsonl') ? index : transcript;
           const start = Number(command.match(/\s-j (\d+)/)?.[1] ?? 0);
           const count = Number(command.match(/\s-N (\d+)/)?.[1] ?? bytes.length);
-          stdout = `${bytes.subarray(start, start + count).toString('hex').match(/../g)?.join(' ') ?? ''}\n`;
+          const lines = bytes.subarray(start, start + count).toString('hex').match(/.{1,32}/g) ?? [];
+          stdout = lines.map((line) => ` ${line.match(/../g)?.join(' ') ?? ''}\n`).join('');
         } else { code = 127; stderr = 'unexpected command'; }
         if (stdout) channel.emit('data', stdout);
         if (stderr) channel.stderr.emit('data', stderr);
@@ -204,7 +206,7 @@ test('discovers and incrementally parses remote Codex and Claude sessions locall
 });
 
 test('discovers and tails Codex through a validated sudo wrapper', async () => {
-  const { connection, commands, stateDir, id, transcript } = sudoCodexFixture();
+  const { connection, commands, stateDir, id, transcript } = sudoCodexFixture(undefined, 70 * 1024);
   assert.deepEqual(await listProviders(connection, '/repo'), [
     { provider: 'claude-code', count: 0 },
     { provider: 'codex', count: 1 },
