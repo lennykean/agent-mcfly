@@ -1,6 +1,6 @@
 # Agent McFly
 
-Agent McFly is a browser workbench for Codex and Claude Code sessions. It replays completed sessions step by step, and it follows live sessions while they run. You can start an agent in a McFly terminal, see its session live, and talk to the agent in the same window. The workbench shows the chat, the tool calls, the file changes, and the terminal output. All panes show the same step.
+Agent McFly is a browser workbench for Codex and Claude Code sessions. It replays a completed session step by step. It also follows a live session while the agent works. You can start an agent in a McFly terminal, watch its session, and speak to the agent in one window. The chat, the tool calls, the files, and the terminal always show the same step.
 
 ![The Agent McFly workbench during a replay](docs/hero.png)
 
@@ -20,47 +20,47 @@ The server starts on port 7777 and opens the browser.
 
 ## The workbench
 
-**Replay.** The workbench plays a session step by step. The chat, the editor, and the terminal always show the same step. You can move the playhead to each step. You can click a message, a tool call, or a line of code to go to its step. The tour guide toggle controls the view. When the toggle is on, the view goes to each new item. When the toggle is off, the tab of the item flashes.
+**Replay.** A replay shows one step of a session at a time. The play bar at the bottom moves the playhead. All panes follow the playhead. To go to a step, click a message, a tool call, or a line of code. The tour guide toggle sets what the view does with a new item. When the tour guide is on, the view goes to the new item. When it is off, the tab of the item flashes.
 
 ![A replay in motion, with the typing animation](docs/playback.gif)
 
-**Live sessions.** McFly follows an agent while it works. You can also start the agent in a McFly terminal. Then one window shows the session and the terminal that controls it.
+**Live sessions.** McFly follows a session while the agent works. New steps come in at the end, and the playhead stays at the end. To control the agent from McFly, start it in a McFly terminal. Then one window shows the session and the terminal that drives it.
 
-![A live claude terminal next to a replay](docs/terminal.png)
+![A live claude terminal next to the session it runs](docs/terminal.png)
 
-**File history.** The editor shows each file with the content that the agent read or wrote at the current step. You can also open a timeline view for a file. The timeline view opens as a separate tab. It shows each change to the file from the session, with the source step for each line.
+**File history.** The editor shows each file as it was at the current step. The content is what the agent read or wrote at that time. To see all changes to one file, open its timeline. The timeline opens as a new tab. It lists each change from the session, and it names the step that made each line.
 
 ![The file timeline with the blame gutter and the pager](docs/timeline.png)
 
-**Sub-agents.** When an agent starts a sub-agent, the sub-agent appears under it in the AGENTS list. Click the sub-agent to watch its own session. A sub-agent leaves the list when the playhead moves past its last action. Move the playhead back into its life, and it returns. Codex teams and Claude Code sub-agents both work this way.
-
 ## Many agents at once
 
-McFly holds several agents in one window. Each agent is a root workspace with its own playhead, tabs, and panes. The AGENTS list groups the roots by project folder.
+McFly shows more than one agent in one window. Each agent is a root workspace. A root workspace keeps its own playhead, tabs, and panes. The AGENTS list groups the roots by project folder.
 
-Use the **+** button in the AGENTS header to attach another agent. Click a root to switch to it. The workspace you leave keeps its state. The URL carries every open root, so a bookmark restores the whole set.
+To attach another agent, click **+** in the AGENTS header. To change to another root, click it. The root that you leave keeps its state. The URL holds each open root, thus a bookmark opens the full set again.
 
-With two or more roots, each root takes a color. The color marks its rows in the AGENTS list, its terminal tab, and the title bar of the workbench you are in. Click the color square next to the project name to choose another color.
+Each root has a color when two or more roots are open. The color marks the rows of that root in the AGENTS list, its terminal tab, and the title bar. To change the color, click the color square next to the project name.
 
-Each project row also has two actions. The terminal icon starts a terminal in that folder. The VS Code icon opens that folder in VS Code. The VS Code icon needs the `code` command on your PATH, and it shows for local folders only.
+Each project row has two buttons. The terminal button starts a terminal in that folder. The VS Code button opens that folder in VS Code. The VS Code button needs the `code` command on the PATH, and it shows only for a local folder.
 
-**Remote agents.** The radio-tower button in the AGENTS header connects to a host over SSH. McFly then reads that host's sessions and runs terminals there. A remote root behaves like a local one, and its address stays in the URL.
+**Sub-agents.** A sub-agent is an agent that another agent starts. The AGENTS list shows a sub-agent below its parent. To watch the session of a sub-agent, click it. A sub-agent leaves the list when the playhead moves past its last action. It comes back when the playhead moves into its life again. Codex teams and Claude Code sub-agents work the same way.
+
+**Remote agents.** The radio-tower button in the AGENTS header connects to a host with SSH. McFly then reads the sessions of that host and runs terminals on it. A remote root works like a local root. Its address stays in the URL.
 
 ## Terminals
 
-The LIVE TERMINAL pane holds several terminals as tabs. The **+** tab starts a new one or attaches a terminal that already runs. When more than one project is open, the picker asks which project the terminal starts in.
+The LIVE TERMINAL pane keeps more than one terminal as tabs. To start a terminal, or to attach a terminal that already runs, click the **+** tab. When more than one project is open, McFly asks for the project first.
 
-**Follow.** A terminal that runs an agent can be tied to that agent's session. Click **follow** on the terminal. McFly ties the terminal to the session and opens the session as a root. A tied terminal shows a green dot and the agent's name.
+**Follow.** A terminal that runs an agent can tie to the session of that agent. Click **follow** on the terminal. McFly ties the terminal to the session, and opens that session as a root. A tied terminal shows a green dot and the name of the agent.
 
-**Sync.** The link button in the title bar syncs terminals and agents. When sync is on, picking an agent shows its terminal, and picking a tied terminal switches the workbench. Terminals never reorder, and switching agents never changes the terminal list.
+**Sync.** The link button in the title bar syncs the terminals with the agents. When sync is on, McFly shows the terminal of the agent that you select. It also changes the workbench when you select a tied terminal. The terminals keep their order at all times.
 
 ## Keyboard
 
-Every pane answers the keyboard. Arrow keys walk the rows of a pane. Enter opens the row. `Ctrl` with an arrow key moves between panels, and `Ctrl+H` or `Ctrl+J` do the same from inside a terminal.
+Every pane accepts keyboard commands. The arrow keys move along the rows of a pane, and Enter opens a row. `Ctrl` with an arrow key moves to the adjacent panel. `Ctrl+H` and `Ctrl+J` do the same from a terminal.
 
-Each tab has a direct chord, such as `Alt+Shift+E` for the explorer. The transport keys are contextual. In a pane with its own history bar, they walk that pane. Everywhere else they move the session playhead.
+Each tab has a chord, for example `Alt+Shift+E` for the explorer. The transport keys change with the pane. In a pane with a history bar, they move along that pane. In all other panes, they move the session playhead.
 
-**Vim mode.** Turn on vim mode in the settings to add a leader key. Space is the default leader. Vim mode also adds a block caret, visual mode, word motions, counts, `Ctrl+F` search, and a `:N` command bar.
+**Vim mode.** Vim mode adds a leader key to the workbench. The default leader is the space bar. Vim mode also adds a block caret, visual mode, word motions, counts, `Ctrl+F` search, and a `:N` command bar.
 
 | Keys | Action |
 |---|---|
@@ -74,33 +74,31 @@ Each tab has a direct chord, such as `Alt+Shift+E` for the explorer. The transpo
 | `<leader>gg` `<leader>G` | First step, last step |
 | `<leader>q` `<leader>?` | Close the tab, show all bindings |
 
-**tmux style terminals.** Turn on tmux style terminals for a prefix chord (`Ctrl+B` by default): `c` starts a terminal, `n` and `p` cycle them, and `x` kills one after a confirmation.
+**tmux style terminals.** This mode adds a prefix chord for the terminals. The default prefix is `Ctrl+B`. After the prefix, `c` starts a terminal. `n` and `p` change to the next or the previous terminal. `x` kills a terminal after a confirmation.
 
 ## Settings
 
-The gear icon opens the settings. The SETTINGS page holds the modes and the start behavior. The KEYBINDINGS page lists every action with its keys, and you can rebind an action in vim notation.
+To open the settings, click the gear icon. The SETTINGS page holds the modes and the start behavior. The KEYBINDINGS page lists each action with its keys. To change the keys of an action, write the new chord in vim notation.
 
 | Setting | Function |
 |---|---|
 | vim mode | Adds the leader bindings, the caret, and the command bar. |
-| tmux style terminal | Adds the prefix chord for terminals. |
-| auto-live | Opens a session at its end, following new activity. |
+| tmux style terminal | Adds the prefix chord for the terminals. |
+| auto-live | Opens a session at its end, and follows new activity. |
 | auto tour guide | Opens a session with the tour guide on. |
-| auto-sync terminals | Starts with terminals and agents synced. |
+| auto-sync terminals | Starts with the terminals and the agents synced. |
 | default terminal | Sets what a new terminal starts as. A blank shell is the default. |
 | claude flags, codex flags | Adds flags to the command when McFly starts that agent. |
 
 ## Agent tools (MCP)
 
-Configure the McFly MCP for local agents:
+The McFly MCP gives your agent tools that write to the workbench. To configure it for local agents:
 
 ```bash
 mcfly mcp config
 ```
 
-This command writes `~/.mcfly/mcp.json`. When Codex and Claude Code are installed, the command also adds the MCP to them.
-
-The MCP gives agents these tools:
+This command writes `~/.mcfly/mcp.json`. When Codex or Claude Code is installed, the command also adds the MCP to it.
 
 | Tool | Function |
 |---|---|
@@ -110,19 +108,19 @@ The MCP gives agents these tools:
 | `waypoint_remove` | Removes waypoints from a file. |
 | `workspace_state` | Gives the agent the open files, the visible lines, and the selections of the user. |
 | `review_state` | Reads the open human reviews and their comment threads. |
-| `review_reply` | Replies to a review comment, and can mark it addressed. |
+| `review_reply` | Answers a review comment, and can mark it addressed. |
 
 ![A table from run_table in the DATA tab](docs/data.png)
 
-**Waypoints.** An agent can attach a note to a line of code. The wayfinder lists the notes. A note stays on its line after the file changes. If the line is deleted, a snapshot shows the line and its old context.
+**Waypoints.** A waypoint is a note on a line of code. The agent makes a waypoint with the `waypoint` tool. The WAYFINDER tab lists each waypoint of the session. A waypoint stays on its line after the file changes. If the line is deleted, the waypoint shows the line and its old context.
 
 ![The wayfinder with a waypoint note under its line](docs/waypoints.png)
 
-**Human review.** You can add a comment to a line, the same as in a pull-request review. Click a line number, or drag along the line numbers to select a range. Agents read the comment threads and reply through the MCP. Each thread has one of three states: open, addressed, or resolved. A review belongs to one session. The reviews stay on disk as JSON files.
+**Human review.** A human review is a set of comment threads on lines of code, as in a pull-request review. To make a comment, click a line number. To comment on more than one line, drag along the line numbers. A thread has one of three states: open, addressed, or resolved. Agents read the threads with `review_state`, and answer with `review_reply`. A review belongs to one session. McFly keeps each review on disk as a JSON file.
 
-![A review thread with an agent reply](docs/review.png)
+![A review thread and a diff from the review checklist](docs/review.png)
 
-**Review checklist.** A review can also carry a punch list of the files to read. Choose **review uncommitted** for the working tree, or click the checklist icon on a commit in the git graph to diff from that commit. The list shows the changed files as a tree, and you tick each file as you finish it. If a file changes after you tick it, McFly clears the tick and reloads its diff. Comments and the checklist are independent: closing the checklist keeps the comments. Agents see the checklist and its progress through `review_state`.
+**Review checklist.** A review can also hold a list of the files to read. To make the list from the working tree, click **review uncommitted**. To make it from a commit, click the checklist icon on that commit in the git pane. The list shows the changed files as a tree, and the editor shows each file as a diff. Click the box of a file when you finish that file. If the file changes after that, McFly clears the box and loads the diff again. The comments and the list are independent, thus the comments stay when you close the list. Agents see the list and its progress in `review_state`.
 
 ## Run from source
 
