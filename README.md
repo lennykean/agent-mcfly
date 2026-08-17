@@ -1,5 +1,9 @@
 # Agent McFly
 
+[![CI](https://github.com/lennykean/agent-mcfly/actions/workflows/ci.yml/badge.svg)](https://github.com/lennykean/agent-mcfly/actions/workflows/ci.yml)
+[![Publish to npm](https://github.com/lennykean/agent-mcfly/actions/workflows/publish.yml/badge.svg)](https://github.com/lennykean/agent-mcfly/actions/workflows/publish.yml)
+[![npm](https://img.shields.io/npm/v/agent-mcfly)](https://www.npmjs.com/package/agent-mcfly)
+
 Agent McFly is a browser workbench for Codex and Claude Code sessions. It replays a completed session step by step. It also follows a live session while the agent works. You can start an agent in a McFly terminal, watch its session, and speak to the agent in one window. The chat, the tool calls, the files, and the terminal always show the same step.
 
 ![The Agent McFly workbench during a replay](docs/hero.png)
