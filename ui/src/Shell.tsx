@@ -271,6 +271,12 @@ export default function Shell() {
   const [sshOpen, setSshOpen] = useState(false);
   const onAddRoot = useCallback(() => setAddPicker({}), []);
   const onAddRemote = useCallback(() => setSshOpen(true), []);
+  // a modal <dialog> holds the focus ring while it is open: focusing the
+  // editor before it unmounts is silently ignored and the close then drops
+  // focus on <body>, killing the keyboard. Restore on the far side instead.
+  const focusEditorSoon = useCallback(() => {
+    requestAnimationFrame(() => requestAnimationFrame(() => focusEditor()));
+  }, []);
   const closeAddPicker = useCallback(() => {
     const connection = addPicker?.source?.connection;
     setAddPicker(null);
@@ -278,15 +284,15 @@ export default function Shell() {
       && !wssRef.current.some((w) => w.source?.connection === connection)) {
       void fetch('/api/ssh/disconnect', { method: 'POST', body: JSON.stringify({ id: connection }) });
     }
-    focusEditor();
-  }, [addPicker]);
+    focusEditorSoon();
+  }, [addPicker, focusEditorSoon]);
   const attachSession = useCallback((pwd: string, s: SessionMeta) => {
     const source = addPicker?.source;
     setAddPicker(null);
     const hit = findOpen(s, source);
     // already open: go there (focus revives via the workbench's activation
     // effect on a real switch; refocus here covers the already-active case)
-    if (hit >= 0) { setActiveIdx(hit); focusEditor(); return; }
+    if (hit >= 0) { setActiveIdx(hit); focusEditorSoon(); return; }
     const id = nextWsId++;
     setWss([...wssRef.current, { id, source, url: { pwd, provider: s.provider, session: shortSessionId(s.id) } }]);
     setActiveIdx(wssRef.current.length);
@@ -299,7 +305,7 @@ export default function Shell() {
       const hit = wssRef.current.findIndex((w) => w.source?.connection === source.connection
         && normPath((infosRef.current[w.id]?.pwd ?? w.url.pwd ?? '').replace(/[\\/]+$/, '')) === key
         && !infosRef.current[w.id]?.sessionFull);
-      if (hit >= 0) { setActiveIdx(hit); focusEditor(); return; }
+      if (hit >= 0) { setActiveIdx(hit); focusEditorSoon(); return; }
     }
     const id = nextWsId++;
     setWss([...wssRef.current, { id, source, url: { pwd } }]);
@@ -650,7 +656,7 @@ export default function Shell() {
             setSshOpen(false);
             setAddPicker({ source, initialPwd: home, disconnectOnCancel: true });
           }}
-          onClose={() => { setSshOpen(false); focusEditor(); }}
+          onClose={() => { setSshOpen(false); focusEditorSoon(); }}
         />
       )}
 
@@ -661,7 +667,7 @@ export default function Shell() {
           keysVersion={keysVersion}
           tools={cliTools}
           onSave={saveSettings}
-          onClose={() => { setSettingsOpen(false); focusEditor(); }}
+          onClose={() => { setSettingsOpen(false); focusEditorSoon(); }}
         />
       )}
     </>
