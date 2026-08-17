@@ -152,8 +152,10 @@ function Checklist({ cl, width, onEscapeTop, onExitDown, boxRef }: {
   };
   void barRef;
   if (!cl.base) {
+    // no width here: the drag width belongs to the file list, and it is often
+    // too narrow for these buttons
     return (
-      <div className="rvChecklist" style={{ flex: width ? `0 0 ${width}px` : undefined }}>
+      <div className="rvChecklist">
         <div className="clSetup">
           <button onClick={() => cl.onSetBase('HEAD')}>review uncommitted</button>
           <input
@@ -258,7 +260,7 @@ export function HumanReview({ active, sessionLoaded, onCreate, onClose, onOpenCo
   // The drag tracks the ABSOLUTE pointer from its start position: clamping
   // accumulated deltas would detach the handle at the bounds ("wiggle to
   // unstick").
-  const [clW, setClW] = useState(() => Number(localStorage.getItem('mcfly.clW')) || 120);
+  const [clW, setClW] = useState(() => Number(localStorage.getItem('mcfly.clW')) || 200);
   useEffect(() => { localStorage.setItem('mcfly.clW', String(clW)); }, [clW]);
   const dragBase = useRef(clW);
   const dragAcc = useRef(0);
