@@ -1,7 +1,12 @@
+// Run this from the repository root.
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
-const cwd = 'C:\\Users\\Lenny\\git\\mcfly';
-const retryPath = 'C:\\Users\\Lenny\\git\\mcfly\\docs\\demo\\retry.js';
+const cwd = process.cwd();
+const retryPath = path.join(cwd, 'docs', 'demo', 'retry.js');
+// Claude Code names a project folder after its path, with each separator as -
+const projectDir = path.join(os.homedir(), '.claude', 'projects', cwd.replace(/[\\/:]/g, '-'));
 
 const V0 = `// Fetch with retries for flaky networks.
 const DEFAULT_RETRIES = 3;
@@ -38,8 +43,8 @@ const V2 = V1.replace(
 );
 
 // the file on disk = final state, so waypoints resolve against it
-fs.mkdirSync('C:/Users/Lenny/git/mcfly/docs/demo', { recursive: true });
-fs.writeFileSync('C:/Users/Lenny/git/mcfly/docs/demo/retry.js', V2);
+fs.mkdirSync(path.dirname(retryPath), { recursive: true });
+fs.writeFileSync(retryPath, V2);
 
 const H1 = [{
   oldStart: 14, oldLines: 3, newStart: 14, newLines: 4,
@@ -116,5 +121,5 @@ const out = [
   result('s7', [{ type: 'text', text: JSON.stringify(wp2) }]),
   asst([{ type: 'text', text: 'Done. Both fixes are in, all five tests pass, and the two waypoints explain the retry policy and the backoff for whoever touches this next.' }]),
 ];
-fs.writeFileSync('C:/Users/Lenny/.claude/projects/C--Users-Lenny-git-mcfly/showcase.jsonl', out.map((l) => JSON.stringify(l)).join('\n') + '\n');
+fs.writeFileSync(path.join(projectDir, 'showcase.jsonl'), out.map((l) => JSON.stringify(l)).join('\n') + '\n');
 console.log('showcase written, retry.js on disk =', V2.length, 'chars');

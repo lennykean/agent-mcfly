@@ -3,9 +3,12 @@
 // Run gen-showcase.mjs first. Prints the new session id.
 import fs from 'node:fs';
 import crypto from 'node:crypto';
+import os from 'node:os';
+import path from 'node:path';
 
-const DIR = 'C:/Users/Lenny/.claude/projects/C--Users-Lenny-git-mcfly';
-const CWD = 'C:\\Users\\Lenny\\git\\mcfly';
+const CWD = process.cwd();
+// Claude Code names a project folder after its path, with each separator as -
+const DIR = path.join(os.homedir(), '.claude', 'projects', CWD.replace(/[\\/:]/g, '-'));
 const MODEL = 'claude-opus-5';
 
 // the CLI rejects a transcript from an older format, so take the version from a
