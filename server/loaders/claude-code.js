@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { highlightCall, highlightResult, isHighlightTool, isTableTool, isWaypointRemoveTool, isWaypointTool, tableCall, tableResult, waypointCall, waypointRemoveCall, waypointRemoveResult, waypointResult } from '../mcfly-data.js';
+import { idsFor, memoByStamp, readTail, truncate } from './transcript.js';
 
 const ROOT = path.resolve(os.homedir(), '.claude', 'projects');
 
@@ -15,13 +16,8 @@ const ROOT = path.resolve(os.homedir(), '.claude', 'projects');
 const toolNameById = new Map();
 const inferredReadById = new Map();
 
-const rel = (p) => path.relative(ROOT, p).split(path.sep).join('/');
-
-function resolveId(id) {
-  const p = path.resolve(ROOT, id);
-  if (!p.startsWith(ROOT + path.sep)) throw new Error('session id outside root');
-  return p;
-}
+const { rel, resolveId, tip } = idsFor(ROOT);
+export { tip };
 
 // Claude Code stores per-project sessions in a directory whose name is the
 // slugified cwd (C:\Users\X\proj -> C--Users-X-proj, drive case varies).
@@ -44,18 +40,6 @@ export function listForCwd(cwd) {
   return out;
 }
 
-export function list() {
-  const out = [];
-  let projects = [];
-  try { projects = fs.readdirSync(ROOT, { withFileTypes: true }); } catch { return out; }
-  for (const proj of projects) {
-    if (!proj.isDirectory()) continue;
-    out.push(...listDir(path.join(ROOT, proj.name), proj.name));
-  }
-  out.sort((a, b) => b.updated_at - a.updated_at);
-  return out;
-}
-
 function listDir(dir, projName) {
   const out = [];
   let files = [];
@@ -65,7 +49,7 @@ function listDir(dir, projName) {
     const full = path.join(dir, f.name);
     let st;
     try { st = fs.statSync(full); } catch { continue; }
-    const head = scanHead(full);
+    const head = headOf(full, `${st.mtimeMs}:${st.size}`, () => scanHead(full));
     out.push({
       id: rel(full),
       provider: 'claude-code',
@@ -78,6 +62,11 @@ function listDir(dir, projName) {
   }
   return out;
 }
+
+// A head scan reads 128KB and parses it; the session listers run over every
+// transcript in a project on a 4-second poll, so the answer is memoized until
+// the file itself changes.
+const headOf = memoByStamp();
 
 // The cwd lives near the head; current Claude versions repeat custom titles
 // near the tail after a session is renamed. Sessions without a custom title
@@ -131,29 +120,8 @@ export function scanHeadChunks(chunks) {
   return out;
 }
 
-// Complete lines only from byte offset `cursor`, so tailing a mid-write file is
-// safe. Chunked: at most ~2MB per call (grown if a single line exceeds that);
-// the client keeps calling while cursor < size.
-const MAX_CHUNK = 2 * 1024 * 1024;
-
 export function tail(id, cursor = 0) {
-  const file = resolveId(id);
-  const st = fs.statSync(file);
-  let buf = Buffer.alloc(0);
-  if (st.size > cursor) {
-    const fd = fs.openSync(file, 'r');
-    try {
-      let want = Math.min(st.size - cursor, MAX_CHUNK);
-      for (;;) {
-        buf = Buffer.alloc(want);
-        fs.readSync(fd, buf, 0, want, cursor);
-        if (buf.lastIndexOf(10) >= 0 || want >= st.size - cursor) break;
-        want = Math.min(want * 2, st.size - cursor); // single line bigger than chunk
-      }
-    } finally {
-      fs.closeSync(fd);
-    }
-  }
+  const { st, buf } = readTail(resolveId(id), cursor);
   return parseTailChunk(id, cursor, st, buf);
 }
 
@@ -370,15 +338,25 @@ export function bashReadResult(read, result, block) {
 // ---- render verbs: the provider-neutral contract the UI consumes ----
 
 // tool_use id -> the subagent it started, from the agent-<id>.meta.json
-// sidecars written when a subagent boots. Cached per session dir, and
-// re-scanned only while a call has no child yet (spawns are rare).
+// sidecars written when a subagent boots.
 const childByToolUse = new Map();
+// A call with no child re-reads the whole sidecar dir looking for one, and a
+// session predating sidecars misses forever — so the scan is keyed on the
+// dir's own mtime. A new sidecar bumps it; nothing else can add a child.
+const scannedDir = memoByStamp();
 function childOfToolUse(sessionDirId, toolUseId) {
   const hit = childByToolUse.get(toolUseId);
   if (hit) return hit;
   const dir = path.join(ROOT, sessionDirId, 'subagents');
+  let stamp;
+  try { stamp = fs.statSync(dir).mtimeMs; } catch { return {}; }
+  scannedDir(dir, stamp, () => scanSidecars(dir, sessionDirId));
+  return childByToolUse.get(toolUseId) ?? {};
+}
+
+function scanSidecars(dir, sessionDirId) {
   let names = [];
-  try { names = fs.readdirSync(dir).filter((n) => n.endsWith('.meta.json')); } catch { return {}; }
+  try { names = fs.readdirSync(dir).filter((n) => n.endsWith('.meta.json')); } catch { return; }
   for (const name of names) {
     let meta;
     try { meta = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')); } catch { continue; }
@@ -390,7 +368,6 @@ function childOfToolUse(sessionDirId, toolUseId) {
       child_session_id: `${sessionDirId}/subagents/agent-${agentId}.jsonl`,
     });
   }
-  return childByToolUse.get(toolUseId) ?? {};
 }
 
 function callRender(tool, input, ctx, id) {
@@ -552,12 +529,3 @@ function summarizeParams(tool, input) {
 }
 
 const shortPath = (p) => (p ? String(p).split(/[\\/]/).slice(-2).join('/') : '');
-const truncate = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + '…' : (s ?? ''));
-
-// last-activity probe for the agent tree: a stat, no parsing. Transcripts are
-// append-only, so once a tip falls behind the playhead the client can freeze
-// it and never ask again.
-export function tip(id) {
-  const st = fs.statSync(resolveId(id));
-  return { updated_at: st.mtimeMs, size: st.size };
-}

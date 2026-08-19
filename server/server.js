@@ -12,6 +12,7 @@ import * as codex from './loaders/codex.js';
 import { alive, attachPty, detectTools, hasEditor, openInEditor, killAllPtys, killPty, listPtys, reapOrphans, setPtySession, TOKEN } from './pty.js';
 import { connectSsh, disconnectAllSsh, disconnectSsh, getSshConnection, listSshConnections } from './ssh.js';
 import * as review from './review.js';
+import * as matchers from './matchers.js';
 import * as git from './git.js';
 import * as remoteData from './remote-data.js';
 
@@ -91,6 +92,18 @@ function pickScope(project) {
   return keys.sort((a, b) => (wsSnapshots.get(b).updated ?? 0) - (wsSnapshots.get(a).updated ?? 0))[0];
 }
 
+// Mapping a terminal to its transcript means listing every session in its cwd,
+// which is far more work than a 4-second poll should repeat. Both the hunt and
+// the (cosmetic) session label are therefore answered from memory until the
+// title changes or the window lapses.
+const HUNT_RETRY_MS = 15_000;
+const hunted = new Map(); // ptyId -> { title, at, found }
+const labels = new Map(); // session id -> { label, at }
+const shouldHunt = (p) => {
+  const last = hunted.get(p.id);
+  return !last || last.title !== p.title || (!last.found && Date.now() - last.at >= HUNT_RETRY_MS);
+};
+
 // registry so the (separate) MCP process can find running servers
 const SERVERS_FILE = path.join(os.homedir(), '.mcfly', 'servers.json');
 function updateServersFile(mutate) {
@@ -148,18 +161,13 @@ const server = http.createServer(async (req, res) => {
     // open a LOCAL folder in VS Code. Launching `code` here (rather than a
     // vscode:// link) keeps the browser from asking permission every time.
     if (url.pathname === '/api/open-editor' && req.method === 'POST') {
-      let body = '';
-      req.on('data', (c) => { body += c; });
-      req.on('end', () => {
-        try {
-          const { path: target } = JSON.parse(body);
-          if (!target || !git.okRoot(target)) return json(res, 404, { error: 'no such folder' });
-          if (!hasEditor()) return json(res, 404, { error: 'VS Code (code) is not on PATH' });
-          openInEditor(target);
-          json(res, 200, { ok: true });
-        } catch (e) { json(res, 400, { error: String(e.message ?? e) }); }
-      });
-      return;
+      try {
+        const { path: target } = await requestJson(req);
+        if (!target || !git.okRoot(target)) return json(res, 404, { error: 'no such folder' });
+        if (!hasEditor()) return json(res, 404, { error: 'VS Code (code) is not on PATH' });
+        openInEditor(target);
+        return json(res, 200, { ok: true });
+      } catch (e) { return json(res, 400, { error: String(e.message ?? e) }); }
     }
     if (url.pathname === '/api/workspace/validate') {
       const pwd = url.searchParams.get('pwd');
@@ -179,14 +187,19 @@ const server = http.createServer(async (req, res) => {
       // local mappings. Avoid rescanning every remote transcript over SFTP
       // on this frequent terminal-registry poll.
       if (remote) return json(res, 200, ptys);
-      // ponytail: re-scans session heads every poll; cache if dirs grow large
       for (const p of ptys) {
         // the terminal title is the agent's own announcement of its session:
         // exactly one transcript whose name the title contains -> map to it.
         // Titles can duplicate, so several matches (none of them the current
         // mapping) drop the mapping instead of guessing — the follow button
         // then asks the human. Zero matches leaves things alone.
-        if (p.title && p.cwd) {
+        //
+        // The hunt lists every transcript in the cwd, which is far too much
+        // work for a 4-second poll to repeat: a title that has already been
+        // hunted is only re-hunted after HUNT_RETRY_MS, and a title that
+        // resolved is never re-hunted at all. A CHANGED title always is —
+        // that is the event the mapping actually depends on.
+        if (p.title && p.cwd && shouldHunt(p)) {
           try {
             const matches = [];
             for (const [prov, loader] of Object.entries(PROVIDERS)) {
@@ -201,13 +214,22 @@ const server = http.createServer(async (req, res) => {
               p.session = null;
               setPtySession(p.id, null);
             }
+            hunted.set(p.id, { title: p.title, at: Date.now(), found: !!p.session });
           } catch { /* title mapping is best effort */ }
         }
         if (!p.session?.pwd) continue;
+        const cached = labels.get(p.session.id);
+        if (cached && Date.now() - cached.at < HUNT_RETRY_MS) {
+          p.session = { ...p.session, label: cached.label };
+          continue;
+        }
         try {
           const meta = PROVIDERS[p.session.provider]?.listForCwd(p.session.pwd)
             ?.find((s) => s.id === p.session.id);
-          if (meta) p.session = { ...p.session, label: meta.label };
+          if (meta) {
+            labels.set(p.session.id, { label: meta.label, at: Date.now() });
+            p.session = { ...p.session, label: meta.label };
+          }
         } catch { /* label is cosmetic */ }
       }
       return json(res, 200, ptys);
@@ -246,30 +268,38 @@ const server = http.createServer(async (req, res) => {
         }
         return json(res, 200, { error: String(e.message ?? e).split('\n')[0] });
       }
+      return json(res, 404, { error: 'unknown git route' });
     }
     // user settings: one JSON file beside servers.json in ~/.mcfly
     if (url.pathname === '/api/settings') {
       const settingsPath = path.join(os.homedir(), '.mcfly', 'settings.json');
       if (req.method === 'POST') {
-        let body = '';
-        req.on('data', (c) => { body += c; });
-        req.on('end', () => {
-          try {
-            const s = JSON.parse(body);
-            fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
-            fs.writeFileSync(settingsPath, JSON.stringify(s, null, 2));
-            json(res, 200, { ok: true });
-          } catch (e) {
-            json(res, 400, { error: String(e.message ?? e) });
-          }
-        });
-        return;
+        try {
+          const s = await requestJson(req);
+          fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
+          fs.writeFileSync(settingsPath, JSON.stringify(s, null, 2));
+          return json(res, 200, { ok: true });
+        } catch (e) {
+          return json(res, 400, { error: String(e.message ?? e) });
+        }
       }
       try {
         return json(res, 200, JSON.parse(fs.readFileSync(settingsPath, 'utf8')));
       } catch {
         return json(res, 200, {});
       }
+    }
+    // data-tool matchers: which OTHER tools' results belong in the DATA tab.
+    // The UI does the matching; this is just where the rules live.
+    if (url.pathname === '/api/data-matchers') {
+      if (req.method === 'POST') {
+        try {
+          return json(res, 200, matchers.replaceMatchers(await requestJson(req)));
+        } catch (e) {
+          return json(res, e.status ?? 400, { error: String(e.message ?? e) });
+        }
+      }
+      return json(res, 200, matchers.listMatchers());
     }
     // quick pickers: grep the repo, find a file by name (tracked files).
     // Failures surface as {error} — a silent [] reads as "no matches"
@@ -299,48 +329,38 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname.startsWith('/api/review-') && req.method === 'POST') {
       const connection = remoteConnection(url);
-      let body = '';
-      req.on('data', (c) => { body += c; });
-      req.on('end', () => {
-        try {
-          const b = JSON.parse(body);
-          const pwd = b.pwd ?? process.cwd();
-          const origin = reviewOrigin(connection, pwd);
-          const out =
-            url.pathname === '/api/review-create' ? review.createReview(pwd, b.session, origin)
-            : url.pathname === '/api/review-close' ? review.closeReview(pwd, b.id, origin)
-            : url.pathname === '/api/review-comment' ? review.addComment(pwd, b.id, b.comment, origin)
-            : url.pathname === '/api/review-reply' ? review.addReply(pwd, b.commentId, b.body, b.author ?? 'human', b.addressed, origin)
-            : url.pathname === '/api/review-thread-state' ? review.setThreadState(pwd, b.id, b.commentId, b.state, origin)
-            : url.pathname === '/api/review-checklist' ? review.setChecklist(pwd, b.id, b.patch ?? {}, origin)
-            : undefined;
-          if (out === undefined) return json(res, 404, { error: 'unknown review action' });
-          if (out === null) return json(res, 404, { error: 'not found' });
-          json(res, 200, out);
-        } catch { json(res, 400, { error: 'bad body' }); }
-      });
-      return;
+      try {
+        const b = await requestJson(req);
+        const pwd = b.pwd ?? process.cwd();
+        const origin = reviewOrigin(connection, pwd);
+        const out =
+          url.pathname === '/api/review-create' ? review.createReview(pwd, b.session, origin)
+          : url.pathname === '/api/review-close' ? review.closeReview(pwd, b.id, origin)
+          : url.pathname === '/api/review-comment' ? review.addComment(pwd, b.id, b.comment, origin)
+          : url.pathname === '/api/review-reply' ? review.addReply(pwd, b.commentId, b.body, b.author ?? 'human', b.addressed, origin)
+          : url.pathname === '/api/review-thread-state' ? review.setThreadState(pwd, b.id, b.commentId, b.state, origin)
+          : url.pathname === '/api/review-checklist' ? review.setChecklist(pwd, b.id, b.patch ?? {}, origin)
+          : undefined;
+        if (out === undefined) return json(res, 404, { error: 'unknown review action' });
+        if (out === null) return json(res, 404, { error: 'not found' });
+        return json(res, 200, out);
+      } catch { return json(res, 400, { error: 'bad body' }); }
     }
     // workspace state: the UI reports what the user has open/focused/selected;
     // the mcfly MCP queries it so agents can see what the user is pointing at
     if (url.pathname === '/api/workspace-events' && req.method === 'POST') {
-      let body = '';
-      req.on('data', (c) => { body += c; });
-      req.on('end', () => {
-        try {
-          const { scope = '', snapshot, events } = JSON.parse(body);
-          if (snapshot && typeof snapshot === 'object') {
-            const cur = wsSnapshots.get(scope) ?? {};
-            wsSnapshots.set(scope, Object.assign(cur, snapshot, { updated: Date.now() }));
-          }
-          if (Array.isArray(events)) {
-            for (const e of events) wsRing.push({ ...e, scope });
-            while (wsRing.length > WS_RING_CAP) wsRing.shift();
-          }
-          json(res, 200, { ok: true });
-        } catch { json(res, 400, { error: 'bad body' }); }
-      });
-      return;
+      try {
+        const { scope = '', snapshot, events } = await requestJson(req);
+        if (snapshot && typeof snapshot === 'object') {
+          const cur = wsSnapshots.get(scope) ?? {};
+          wsSnapshots.set(scope, Object.assign(cur, snapshot, { updated: Date.now() }));
+        }
+        if (Array.isArray(events)) {
+          for (const e of events) wsRing.push({ ...e, scope });
+          if (wsRing.length > WS_RING_CAP) wsRing.splice(0, wsRing.length - WS_RING_CAP);
+        }
+        return json(res, 200, { ok: true });
+      } catch { return json(res, 400, { error: 'bad body' }); }
     }
     if (url.pathname === '/api/workspace-state') {
       const history = Math.min(Number(url.searchParams.get('history')) || 0, WS_RING_CAP);
@@ -359,12 +379,18 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/paste-image' && req.method === 'POST') {
       const chunks = [];
       let size = 0;
+      let refused = false;
       req.on('data', (c) => {
         size += c.length;
-        if (size > 10 * 1024 * 1024) req.destroy();
-        else chunks.push(c);
+        // say WHY, then hang up: a bare socket reset reads as a network fault
+        if (size > 10 * 1024 * 1024) {
+          refused = true;
+          json(res, 413, { error: 'image too large' });
+          req.destroy();
+        } else chunks.push(c);
       });
       req.on('end', async () => {
+        if (refused) return;
         try {
           const ext = ({
             'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp',
@@ -463,10 +489,10 @@ const server = http.createServer(async (req, res) => {
       }
       const st = fs.statSync(target);
       const ext = path.extname(target).toLowerCase();
-      const IMG = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
-      if (IMG[ext]) {
+      const image = remoteData.IMG[ext]; // one table, shared with the remote reader
+      if (image) {
         if (st.size > 8 * 1024 * 1024) return json(res, 200, { error: 'image too large' });
-        return json(res, 200, { image_src: `data:${IMG[ext]};base64,${fs.readFileSync(target).toString('base64')}` });
+        return json(res, 200, { image_src: `data:${image};base64,${fs.readFileSync(target).toString('base64')}` });
       }
       if (st.size > 2 * 1024 * 1024) return json(res, 200, { error: `file too large (${Math.round(st.size / 1024)} KB)` });
       return json(res, 200, { content: fs.readFileSync(target, 'utf8') });
@@ -512,15 +538,22 @@ const server = http.createServer(async (req, res) => {
     // static (production build)
     const relPath = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
     const file = path.resolve(DIST, relPath);
-    if (file.startsWith(DIST + path.sep) && fs.existsSync(file) && fs.statSync(file).isFile()) {
-      const body = fs.readFileSync(file); // read before writeHead: a throw here must reach the catch
+    let stat;
+    try { stat = fs.statSync(file); } catch { /* not built, or not a file */ }
+    if (file.startsWith(DIST + path.sep) && stat?.isFile()) {
       const ext = path.extname(file);
       // index.html must revalidate every load or browsers heuristically cache
       // it and keep pointing at dead hashed bundles; the hashed assets
       // themselves are immutable by name
       const cache = ext === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable';
-      res.writeHead(200, { 'Content-Type': MIME[ext] ?? 'application/octet-stream', 'Cache-Control': cache });
-      return res.end(body);
+      res.writeHead(200, {
+        'Content-Type': MIME[ext] ?? 'application/octet-stream',
+        'Content-Length': stat.size,
+        'Cache-Control': cache,
+      });
+      // streamed, not read whole: the bundle is megabytes and this is the
+      // event loop every websocket frame also waits on
+      return fs.createReadStream(file).on('error', () => res.destroy()).pipe(res);
     }
     res.writeHead(404);
     res.end('not found — in dev, use the vite server');
@@ -543,6 +576,10 @@ server.listen(PORT, '127.0.0.1', () => {
 });
 
 reapOrphans(); // children of servers that died without cleanup
+// probing PATH for the agent CLIs costs about a second of blocking spawns.
+// Spend it here, at boot, rather than inside the first /api/config the page
+// waits on.
+setImmediate(() => { detectTools(); hasEditor(); });
 
 const shutdown = () => {
   killAllPtys();

@@ -12,12 +12,14 @@
     "server/mcp.js",
     "server/mcfly-data.js",
     "server/review.js",
+    "server/matchers.js",
     "server/git.js",
     "server/ssh.js",
     "server/remote-data.js",
     "server/pty.js",
     "server/loaders/claude-code.js",
     "server/loaders/codex.js",
+    "server/loaders/transcript.js",
     "ui/dist"
   ],
   "scripts": {

@@ -19,7 +19,8 @@ import { withConnection } from './lib/api';
 import { normPath, pathWithin, resolveWaypoint, type WaypointEntry } from './lib/timeline';
 import { APP_CHORDS, actionOf, focusEditor, justArmed, notify, setDeferredSink, termReleasedChord, type Action } from './lib/keys';
 import { QuickPick } from './components/QuickPick';
-import type { McflySettings } from './components/Settings';
+import type { McflySettings, SettingsPage } from './components/Settings';
+import type { DataMatcher } from './lib/matchers';
 import { emit, onEditorSelection, updateSnapshot, watchSelections } from './lib/workspace';
 import { applySelect, clickMode } from './lib/select';
 import { Terminal } from './components/Terminal';
@@ -89,7 +90,8 @@ export interface WorkbenchProps {
   onTreeToggle: (key: string) => void;
   onPickColor: (colorIndex: number) => void;
   settings: McflySettings | null;
-  onOpenSettings: (page: 'settings' | 'keys') => void;
+  matchers: DataMatcher[]; // rules that route other tools' results to the DATA tab
+  onOpenSettings: (page: SettingsPage) => void;
   termCtl: React.MutableRefObject<TermCtl | null>;
   termSlot: (wsId: number, el: HTMLDivElement | null) => void;
   registerHandle: (wsId: number, h: WorkbenchHandle | null) => void;
@@ -126,9 +128,9 @@ export default function Workbench({
   wsId, active, source, url, roots, onState, onAddRoot, onAddRemote, onCloseRoot, onSelectAgent, onSessionFound,
   onPickSession, onFollowedPick,
   sync, onToggleSync, treeCollapsed, onTreeToggle, onPickColor,
-  settings, onOpenSettings, termCtl, termSlot, registerHandle,
+  settings, matchers, onOpenSettings, termCtl, termSlot, registerHandle,
 }: WorkbenchProps) {
-  const r = useReplay(active, source?.connection);
+  const r = useReplay(active, source?.connection, matchers);
   // hidden workbenches stay mounted (state retention) but must not act on
   // global surfaces: window keys, the snapshot, the document title
   const activeRef = useRef(active);

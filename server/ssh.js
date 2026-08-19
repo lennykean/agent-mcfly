@@ -3,11 +3,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import ssh2 from 'ssh2';
+import { AGENT_TOOLS } from './pty.js';
 
 const { Client } = ssh2;
 
 const connections = new Map();
-const TOOL_NAMES = ['claude', 'codex', 'agy', 'pi', 'opencode', 'aider', 'gemini', 'goose'];
 const knownHostsFile = () => process.env.MCFLY_SSH_KNOWN_HOSTS
   || path.join(os.homedir(), '.mcfly', 'ssh-known-hosts.json');
 const hostKey = (host, port) => JSON.stringify([host.toLowerCase(), port]);
@@ -124,13 +124,13 @@ async function probe(record) {
   await requireSftp(record);
   const posix = await execSsh(record,
     `printf '__MCFLY_HOME__%s\\n__MCFLY_PLATFORM__%s\\n' "$HOME" "$(uname -s 2>/dev/null)"; `
-    + TOOL_NAMES.map((tool) => `command -v ${tool} >/dev/null 2>&1 && printf '__MCFLY_TOOL__${tool}\\n';`).join(' ')
+    + AGENT_TOOLS.map((tool) => `command -v ${tool} >/dev/null 2>&1 && printf '__MCFLY_TOOL__${tool}\\n';`).join(' ')
     + ' true',
     { timeout: 5_000, maxBytes: 64 * 1024 }).catch(() => ({ stdout: '' }));
   let output = posix.stdout;
   if (!output.includes('__MCFLY_PLATFORM__')) {
     output = (await execSsh(record,
-      `cmd /d /s /c "echo __MCFLY_HOME__%USERPROFILE%&echo __MCFLY_PLATFORM__win32&${TOOL_NAMES.map((tool) => `where ${tool} >nul 2>nul && echo __MCFLY_TOOL__${tool}`).join('&')}"`,
+      `cmd /d /s /c "echo __MCFLY_HOME__%USERPROFILE%&echo __MCFLY_PLATFORM__win32&${AGENT_TOOLS.map((tool) => `where ${tool} >nul 2>nul && echo __MCFLY_TOOL__${tool}`).join('&')}"`,
       { timeout: 5_000, maxBytes: 64 * 1024 }).catch(() => ({ stdout: '' }))).stdout;
   }
   record.home = output.match(/^__MCFLY_HOME__(.*)$/m)?.[1]?.trim() || null;

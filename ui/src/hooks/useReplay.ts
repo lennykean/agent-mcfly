@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { appendMessages, createTimeline, durationFor, foldState, indexAtTime } from '../lib/timeline';
+import { runTransform } from '../lib/sandbox';
+import { matchTool, type DataMatcher } from '../lib/matchers';
 import type { SessionMeta, Step, TailResponse, Timeline } from '../types';
 import { withConnection } from '../lib/api';
 
@@ -20,7 +22,7 @@ export interface AgentNode {
   spawnedAt?: number; // ms; the moment its parent started it
 }
 
-export function useReplay(active = true, connection?: string) {
+export function useReplay(active = true, connection?: string, matchers: DataMatcher[] = []) {
   const [session, setSession] = useState<SessionMeta | null>(null);
   const timelines = useRef(new Map<string, Timeline>());
   const [viewKey, setViewKey] = useState('main');
@@ -344,7 +346,38 @@ export function useReplay(active = true, connection?: string) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, agentKeys, active]);
 
-  const view = useMemo(() => foldState(steps, pointer), [steps, pointer, tick]); // eslint-disable-line react-hooks/exhaustive-deps
+  const match = useMemo(
+    () => (matchers.length ? (tool: string, params: unknown) => matchTool(matchers, tool, params) : undefined),
+    [matchers],
+  );
+  const folded = useMemo(() => foldState(steps, pointer, match), [steps, pointer, tick, match]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // A matcher's transform runs in a Worker, so it cannot happen during the
+  // (synchronous) fold. Results are cached per claimed step and thrown away
+  // whenever the rules change — that is the only way a transform's TEXT can
+  // differ for the same step.
+  const [transformed, setTransformed] = useState<Record<string, { value?: unknown; error?: string }>>({});
+  useEffect(() => setTransformed({}), [matchers]);
+  const claimed = folded.data?.transform ? `${folded.data.matcherId}:${folded.data.touchedAt}` : undefined;
+  useEffect(() => {
+    const d = folded.data;
+    if (!claimed || !d?.transform || transformed[claimed]) return;
+    let live = true;
+    void runTransform(d.transform, d.json).then((out) => {
+      if (live) setTransformed((cur) => ({ ...cur, [claimed]: out }));
+    });
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [claimed]);
+
+  const view = useMemo(() => {
+    const d = folded.data;
+    if (!d?.transform) return folded;
+    const out = claimed ? transformed[claimed] : undefined;
+    if (!out) return folded; // still running: the untransformed value shows meanwhile
+    // a failed transform shows the raw value plus the reason, never nothing
+    return { ...folded, data: { ...d, json: out.error ? d.json : out.value, transformError: out.error } };
+  }, [folded, transformed, claimed]);
 
   const animateIndex = animate?.key === viewKey ? animate.index : -1;
 

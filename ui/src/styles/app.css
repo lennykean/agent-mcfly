@@ -758,6 +758,33 @@ pre.code.hljs { padding: 0; background: transparent; }
 .setSection { margin: 10px 0 2px; font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--fg-faint); }
 .setFlags { flex: 1 1 260px; min-width: 180px; font-family: var(--font-mono); font-size: 12px; }
 
+/* data tool matchers: a collapsed row per rule, expanding to its fields */
+.setBlurb { display: block; padding: 0 0 6px; line-height: 1.5; }
+.matcher { border: 1px solid var(--border); border-radius: 4px; margin-bottom: 6px; }
+.matcherHead { display: flex; align-items: center; gap: 8px; padding: 5px 8px; font-size: 12px; }
+.matcherTool { font-family: var(--font-mono); cursor: pointer; flex: 0 1 auto; }
+.matcherTool:hover { text-decoration: underline; }
+.matcherTag {
+  font-size: 10px; letter-spacing: 0.5px; text-transform: uppercase; color: var(--fg-faint);
+  border: 1px solid var(--border-light); border-radius: 3px; padding: 0 4px;
+}
+.matcherX { margin-left: auto; background: none; border: 0; color: var(--fg-faint); cursor: pointer; font-size: 15px; line-height: 1; padding: 0 2px; }
+.matcherX:hover { color: var(--red); }
+.matcherBody { display: flex; flex-direction: column; gap: 6px; padding: 6px 8px 10px; border-top: 1px solid var(--border); }
+.matcherBody .setSub { padding-left: 0; }
+.matcherBody .setLabel { flex: 0 0 78px; }
+.matcherCode { align-items: flex-start; flex-wrap: wrap; }
+.matcherScript {
+  flex: 1 1 260px; min-width: 180px; min-height: 54px; resize: vertical;
+  font-family: var(--font-mono); font-size: 12px; line-height: 1.4;
+}
+.matcherAdd {
+  align-self: flex-start; margin-top: 4px; font-size: 12px; cursor: pointer;
+  background: none; border: 1px dashed var(--border-light); border-radius: 4px;
+  color: var(--fg-faint); padding: 3px 10px;
+}
+.matcherAdd:hover { color: var(--fg); border-color: var(--fg-faint); }
+
 /* folder-level actions on a workspace row: editor, then terminal, with a
    little air between them so they don't read as one control */
 .wsEditBtn { flex: 0 0 auto; margin-left: auto; font-size: 12px !important; color: var(--fg-faint); visibility: hidden; padding: 1px; cursor: pointer; }

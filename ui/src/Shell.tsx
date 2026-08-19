@@ -4,7 +4,8 @@ import { LiveTerm, type LinkedRoot, type TermCtl } from './components/LivePane';
 import { SessionPicker } from './components/SessionPicker';
 import { SshConnect } from './components/SshConnect';
 import { PALETTE } from './lib/palette';
-import { Settings, type McflySettings } from './components/Settings';
+import { Settings, type McflySettings, type SettingsPage } from './components/Settings';
+import type { DataMatcher } from './lib/matchers';
 import { applyKeymap, focusEditor, setLeaders, setTmuxMode, setVimMode } from './lib/keys';
 import { normPath } from './lib/timeline';
 import { sameTerminalProject, terminalProjectKey, type TerminalProject } from './lib/terminal-project';
@@ -134,7 +135,7 @@ export default function Shell() {
 
   // ---- settings: one popover, one persisted file, one keymap module sync ----
   const [settings, setSettings] = useState<McflySettings | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState<false | 'settings' | 'keys'>(false);
+  const [settingsOpen, setSettingsOpen] = useState<false | SettingsPage>(false);
   // agent CLIs on PATH, for the default-terminal picker
   const [cliTools, setCliTools] = useState<string[]>();
   useEffect(() => {
@@ -159,6 +160,30 @@ export default function Shell() {
       void fetch('/api/settings', { method: 'POST', body: JSON.stringify(seed) });
     }).catch(() => setSettings({ autoTour: true }));
   }, []);
+  // data-tool matchers: which other tools' results belong in the DATA tab.
+  // Agents write them through the MCP, so a poll picks up rules that appeared
+  // while the page was open — a matcher is useless if it needs a reload.
+  const [matchers, setMatchers] = useState<DataMatcher[]>([]);
+  useEffect(() => {
+    const load = () => fetch('/api/data-matchers').then((r) => r.json())
+      .then((all: DataMatcher[]) => setMatchers((cur) => {
+        const next = Array.isArray(all) ? all : [];
+        // identity matters: a fresh array refolds every timeline
+        return JSON.stringify(next) === JSON.stringify(cur) ? cur : next;
+      }))
+      .catch(() => { /* keep what we have */ });
+    void load();
+    const id = setInterval(load, 10_000);
+    return () => clearInterval(id);
+  }, []);
+  const saveMatchers = useCallback((next: DataMatcher[]) => {
+    setMatchers(next);
+    void fetch('/api/data-matchers', { method: 'POST', body: JSON.stringify(next) })
+      .then((r) => r.json())
+      .then((saved: DataMatcher[]) => { if (Array.isArray(saved)) setMatchers(saved); })
+      .catch(() => { /* runtime state stands */ });
+  }, []);
+
   // saves go through state, persistence follows in an effect: an updater
   // must stay pure (React may re-invoke it), and the debounce keeps posts
   // ordered — last state wins
@@ -186,7 +211,7 @@ export default function Shell() {
     applyKeymap(settings.keymap ?? {});
     setKeysVersion((v) => v + 1);
   }, [settings]);
-  const onOpenSettings = useCallback((page: 'settings' | 'keys') => setSettingsOpen(page), []);
+  const onOpenSettings = useCallback((page: SettingsPage) => setSettingsOpen(page), []);
 
   // ---- root colors: ephemeral, random from the 16-grid, never two alike ----
   const [colors, setColors] = useState<Record<number, number>>({});
@@ -592,6 +617,7 @@ export default function Shell() {
             onTreeToggle={onTreeToggle}
             onPickColor={onPickColor}
             settings={settings}
+            matchers={matchers}
             onOpenSettings={onOpenSettings}
             termCtl={termCtl}
             termSlot={termSlot}
@@ -666,6 +692,9 @@ export default function Shell() {
           initialPage={settingsOpen}
           keysVersion={keysVersion}
           tools={cliTools}
+          pwd={activeInfo?.pwd}
+          matchers={matchers}
+          onSaveMatchers={saveMatchers}
           onSave={saveSettings}
           onClose={() => { setSettingsOpen(false); focusEditorSoon(); }}
         />

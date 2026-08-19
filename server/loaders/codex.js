@@ -7,18 +7,13 @@ import path from 'node:path';
 import os from 'node:os';
 import { StringDecoder } from 'node:string_decoder';
 import { highlightCall, highlightResult, isHighlightTool, isTableTool, isWaypointRemoveTool, isWaypointTool, tableCall, tableResult, waypointCall, waypointRemoveCall, waypointRemoveResult, waypointResult } from '../mcfly-data.js';
+import { idsFor, MAX_CHUNK, memoByStamp, readTail, truncate } from './transcript.js';
 
 const ROOT = path.join(os.homedir(), '.codex', 'sessions');
 const INDEX = path.join(os.homedir(), '.codex', 'session_index.jsonl');
-const MAX_CHUNK = 2 * 1024 * 1024;
 
-const rel = (p) => path.relative(ROOT, p).split(path.sep).join('/');
-
-function resolveId(id) {
-  const p = path.resolve(ROOT, id);
-  if (!p.startsWith(ROOT + path.sep)) throw new Error('session id outside root');
-  return p;
-}
+const { rel, resolveId, tip } = idsFor(ROOT);
+export { tip };
 
 export const projectPathKey = (p) => {
   const source = p ?? '';
@@ -28,8 +23,9 @@ export const projectPathKey = (p) => {
 };
 const norm = projectPathKey;
 
-// file -> { mtime, meta } head-scan cache (cwd lives in the first line)
-const headCache = new Map();
+// file -> meta head-scan cache (cwd lives in the first line), valid until the
+// file changes
+const headOf = memoByStamp();
 
 // ---- codex teams: matching a spawn_agent call to the sub-agent's thread ----
 const jsonField = (raw, key) => {
@@ -42,8 +38,13 @@ const jsonField = (raw, key) => {
 const agentLabel = (task) => (task ? String(task).split('/').filter(Boolean).pop() : 'agent');
 
 // agent_path -> thread, resolved by scanning rollout heads for the same team
-// root. Spawns are rare and the head scan is cached, but a child's file lands
-// a beat AFTER its call, so misses are re-tried rather than remembered.
+// root. A child's file lands a beat AFTER its call, so a miss must be re-tried
+// — but the scan walks every rollout on disk, so a session full of spawns whose
+// children are gone would redo that walk per call. Misses are remembered for
+// MISS_TTL_MS: long enough to stop the storm, short enough that a child landing
+// a beat later still gets linked.
+const MISS_TTL_MS = 10_000;
+const missedAt = new Map();
 const childByPath = new Map(); // `${rootId}\u0000${agentPath}` -> { id, nickname }
 function childThread(file, agentPath) {
   if (!file) return null;
@@ -53,6 +54,7 @@ function childThread(file, agentPath) {
   const key = `${rootId}\u0000${agentPath}`;
   const hit = childByPath.get(key);
   if (hit) return hit;
+  if (Date.now() - (missedAt.get(key) ?? -Infinity) < MISS_TTL_MS) return null;
   for (const candidate of rolloutFiles()) {
     let meta;
     try { meta = headMeta(candidate, fs.statSync(candidate)); } catch { continue; }
@@ -60,25 +62,25 @@ function childThread(file, agentPath) {
     const found = { id: rel(candidate), nickname: meta.nickname };
     childByPath.set(`${rootId}\u0000${meta.agentPath}`, found);
   }
-  return childByPath.get(key) ?? null;
+  const found = childByPath.get(key) ?? null;
+  if (!found) missedAt.set(key, Date.now());
+  return found;
 }
 
 function headMeta(file, st) {
-  const hit = headCache.get(file);
-  if (hit && hit.mtime === st.mtimeMs) return hit.meta;
-  let fd;
-  let text = '';
-  try {
-    fd = fs.openSync(file, 'r');
-    const buf = Buffer.alloc(64 * 1024);
-    const n = fs.readSync(fd, buf, 0, buf.length, 0);
-    text = buf.toString('utf8', 0, n);
-  } catch { /* unreadable */ } finally {
-    if (fd !== undefined) fs.closeSync(fd);
-  }
-  const meta = parseHead(text);
-  headCache.set(file, { mtime: st.mtimeMs, meta });
-  return meta;
+  return headOf(file, st.mtimeMs, () => {
+    let fd;
+    let text = '';
+    try {
+      fd = fs.openSync(file, 'r');
+      const buf = Buffer.alloc(64 * 1024);
+      const n = fs.readSync(fd, buf, 0, buf.length, 0);
+      text = buf.toString('utf8', 0, n);
+    } catch { /* unreadable */ } finally {
+      if (fd !== undefined) fs.closeSync(fd);
+    }
+    return parseHead(text);
+  });
 }
 
 // Shared by local files and remote SFTP reads; transcript semantics stay here.
@@ -173,22 +175,7 @@ export function tail(id, cursor = 0) {
 }
 
 export function tailFile(file, cursor = 0) {
-  const st = fs.statSync(file);
-  let buf = Buffer.alloc(0);
-  if (st.size > cursor) {
-    const fd = fs.openSync(file, 'r');
-    try {
-      let want = Math.min(st.size - cursor, MAX_CHUNK);
-      for (;;) {
-        buf = Buffer.alloc(want);
-        fs.readSync(fd, buf, 0, want, cursor);
-        if (buf.lastIndexOf(10) >= 0 || want >= st.size - cursor) break;
-        want = Math.min(want * 2, st.size - cursor);
-      }
-    } finally {
-      fs.closeSync(fd);
-    }
-  }
+  const { st, buf } = readTail(file, cursor);
   return parseTailChunk(file, cursor, st, buf);
 }
 
@@ -220,8 +207,24 @@ function metasForCall(p) {
   }));
 }
 
+// A result whose call was converted by an earlier process (or an earlier
+// request) has no meta in memory. Recovering it means re-reading the transcript
+// prefix — so the pass harvests EVERY call it passes, not just the one asked
+// for, and the file's scanned-through mark stops the next miss from repeating
+// it. One prefix read per file instead of one per orphaned result.
+const recoveredThrough = new Map();
 function recoverCallMeta(file, callId, before) {
-  if (!before) return [];
+  if (!before || (recoveredThrough.get(file) ?? 0) >= before) return [];
+  const harvest = (line) => {
+    try {
+      const o = JSON.parse(line);
+      const p = o.type === 'response_item' ? o.payload : undefined;
+      if (p?.type !== 'custom_tool_call' && p?.type !== 'function_call') return;
+      const metas = metasForCall(p);
+      for (const meta of metas) meta.file = file;
+      callMeta.set(callKey(file, p.call_id), metas);
+    } catch { /* unrelated or incomplete line */ }
+  };
   let fd;
   try {
     fd = fs.openSync(file, 'r');
@@ -234,30 +237,15 @@ function recoverCallMeta(file, callId, before) {
       offset += read;
       const lines = (carry + decoder.write(buf.subarray(0, read))).split('\n');
       carry = lines.pop() ?? '';
-      for (const candidate of lines) {
-        try {
-          const o = JSON.parse(candidate);
-          const p = o.type === 'response_item' ? o.payload : undefined;
-          if ((p?.type === 'custom_tool_call' || p?.type === 'function_call') && p.call_id === callId) {
-            return metasForCall(p);
-          }
-        } catch { /* unrelated or incomplete line */ }
-      }
+      for (const candidate of lines) harvest(candidate);
     }
     carry += decoder.end();
-    if (carry) {
-      try {
-        const o = JSON.parse(carry);
-        const p = o.type === 'response_item' ? o.payload : undefined;
-        if ((p?.type === 'custom_tool_call' || p?.type === 'function_call') && p.call_id === callId) {
-          return metasForCall(p);
-        }
-      } catch { /* incomplete line */ }
-    }
+    if (carry) harvest(carry);
+    recoveredThrough.set(file, before);
   } catch { /* recovery is best-effort; the result remains visible below */ } finally {
     if (fd !== undefined) fs.closeSync(fd);
   }
-  return [];
+  return callMeta.get(callKey(file, callId)) ?? [];
 }
 
 function convertLine(line, messages, file, recoveryEnd) {
@@ -344,8 +332,6 @@ function convertLine(line, messages, file, recoveryEnd) {
   }
 }
 
-const truncate = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + '…' : (s ?? ''));
-
 const JS_LITERALS = /"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`(?:\\[\s\S]|[^`\\])*`|\/\/[^\r\n]*|\/\*[\s\S]*?\*\//g;
 const executableCode = (input) => String(input).replace(JS_LITERALS, (s) => ' '.repeat(s.length));
 
@@ -417,6 +403,9 @@ function nestedToolCalls(input) {
 }
 
 const nestedToolNames = (input) => nestedToolCalls(input).map((call) => call.name);
+// Masking literals and brace-scanning the whole input is not cheap, and every
+// result asks about the same meta three or four times. Answer once per meta.
+const nestedNamesOf = (meta) => (meta.names ??= nestedToolNames(meta.input));
 
 export function toolLabel(name, input, render) {
   if (render?.verb === 'read_file' && DIRECT_SHELL_NAMES.has(name)) return 'read_file';
@@ -519,7 +508,7 @@ function execPayload(text) {
 }
 
 function isPatchCall(meta) {
-  return meta.name === 'apply_patch' || nestedToolNames(meta.input).includes('apply_patch');
+  return meta.name === 'apply_patch' || nestedNamesOf(meta).includes('apply_patch');
 }
 
 function structuredFailure(value) {
@@ -577,7 +566,7 @@ export function resultRender(meta, text, output) {
       : meta.render;
   }
   if (meta.render?.verb === 'read_file') {
-    const image = (meta.name === 'view_image' || nestedToolNames(meta.input).includes('view_image')) && Array.isArray(output)
+    const image = (meta.name === 'view_image' || nestedNamesOf(meta).includes('view_image')) && Array.isArray(output)
       && output.find((item) => item.type === 'input_image' && item.image_url);
     if (image) return { ...meta.render, image_src: image.image_url };
     const content = execPayload(text);
@@ -656,10 +645,3 @@ export function patchRenders(input) {
   });
 }
 
-// last-activity probe for the agent tree: a stat, no parsing. Transcripts are
-// append-only, so once a tip falls behind the playhead the client can freeze
-// it and never ask again.
-export function tip(id) {
-  const st = fs.statSync(resolveId(id));
-  return { updated_at: st.mtimeMs, size: st.size };
-}

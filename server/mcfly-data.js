@@ -21,13 +21,77 @@ export function parseLineSpec(spec) {
   return ranges.sort((a, b) => a.start - b.start);
 }
 
-export function parseTsv(stdout) {
-  const lines = String(stdout).replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n');
-  const columns = lines.shift()?.split('\t') ?? [];
-  const rows = lines.map((line) => line.split('\t'));
-  if (columns.length < 2 || !rows.length || columns.some((cell) => !cell)
+export const TABLE_FORMATS = ['tsv', 'csv', 'json'];
+
+// What every format must land on to be a table: a unique, non-empty header
+// row, at least two columns, at least one data row, and no ragged rows.
+function tableFrom(grid) {
+  const [columns, ...rows] = grid;
+  if (!columns || columns.length < 2 || !rows.length || columns.some((cell) => !cell)
     || new Set(columns).size !== columns.length || rows.some((row) => row.length !== columns.length)) return null;
   return { columns, rows };
+}
+
+export function parseTsv(stdout) {
+  const lines = String(stdout).replace(/\r\n/g, '\n').replace(/\n$/, '').split('\n');
+  return tableFrom(lines.map((line) => line.split('\t')));
+}
+
+// RFC4180: a quoted field may hold the delimiter, newlines, and "" escapes.
+export function parseCsv(stdout) {
+  const source = String(stdout).replace(/\r\n/g, '\n').replace(/\n$/, '');
+  const grid = [];
+  let row = [];
+  let field = '';
+  let quoted = false;
+  let wasQuoted = false; // an empty field that was written as "" is still a field
+  for (let i = 0; i < source.length; i++) {
+    const c = source[i];
+    if (quoted) {
+      if (c !== '"') field += c;
+      else if (source[i + 1] === '"') { field += '"'; i++; }
+      else quoted = false;
+      continue;
+    }
+    if (c === '"' && !field && !wasQuoted) { quoted = true; wasQuoted = true; continue; }
+    if (c === ',') { row.push(field); field = ''; wasQuoted = false; continue; }
+    if (c === '\n') { row.push(field); grid.push(row); row = []; field = ''; wasQuoted = false; continue; }
+    field += c;
+  }
+  if (quoted) return null; // unterminated quote: the output is not CSV
+  if (field || wasQuoted || row.length) { row.push(field); grid.push(row); }
+  return tableFrom(grid);
+}
+
+const cellText = (value) => (value == null ? '' : typeof value === 'object' ? JSON.stringify(value) : String(value));
+
+// Either a list of row objects (columns are the union of their keys, in
+// first-seen order) or an explicit { columns, rows }.
+export function parseJsonTable(stdout) {
+  let value = stdout;
+  if (typeof value === 'string') {
+    try { value = JSON.parse(value); } catch { return null; }
+  }
+  if (value && typeof value === 'object' && !Array.isArray(value)
+    && Array.isArray(value.columns) && Array.isArray(value.rows)) {
+    return tableFrom([
+      value.columns.map(cellText),
+      ...value.rows.map((row) => (Array.isArray(row) ? row.map(cellText) : [])),
+    ]);
+  }
+  if (!Array.isArray(value) || !value.length) return null;
+  const columns = [];
+  for (const item of value) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+    for (const key of Object.keys(item)) if (!columns.includes(key)) columns.push(key);
+  }
+  return tableFrom([columns, ...value.map((item) => columns.map((key) => cellText(item[key])))]);
+}
+
+export function parseTable(stdout, format = 'tsv') {
+  if (format === 'csv') return parseCsv(stdout);
+  if (format === 'json') return parseJsonTable(stdout);
+  return parseTsv(stdout);
 }
 
 export function tableCall(input) {
@@ -71,11 +135,13 @@ export function dataEnvelope(value) {
 
 export function tableResult(value) {
   const result = dataEnvelope(value);
-  const table = result?.kind === 'table' && parseTsv(result.stdout);
+  // envelopes written before formats were selectable carry no `format` and are
+  // always TSV
+  const table = result?.kind === 'table' && parseTable(result.stdout, result.format);
   if (!result || !table) return null;
   return {
     verb: 'data', command: result.command, cwd: result.cwd, stdout: result.stdout,
-    stderr: result.stderr, exit_code: result.exitCode, table,
+    stderr: result.stderr, exit_code: result.exitCode, format: result.format ?? 'tsv', table,
   };
 }
 

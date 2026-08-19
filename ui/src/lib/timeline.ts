@@ -1,4 +1,9 @@
 import type { Message, RenderVerb, ResultRender, Step, Timeline, Waypoint } from '../types';
+import type { DataMatcher } from './matchers';
+
+// Folding asks whether a step is claimed; it does not care how the rules are
+// written or scoped. The caller supplies the answer.
+export type MatchTool = (tool: string, params: unknown) => DataMatcher | undefined;
 
 export function createTimeline(key: string, sessionId: string, provider: string): Timeline {
   return { key, sessionId, provider, steps: [], cursor: 0, mtime: 0, pending: new Map() };
@@ -82,6 +87,13 @@ export interface DataView {
   raw?: string; // stdout+stderr when the result did not parse as a table
   error?: boolean; // result arrived but is not tabular
   touchedAt: number;
+  // a matched tool renders its result as JSON rather than a table. `json` is
+  // the value AS FOUND; a transform, if the matcher has one, is applied later
+  // and off-thread (see runTransform) — folding stays synchronous.
+  json?: unknown;
+  matcherId?: string;
+  transform?: string;
+  transformError?: string; // filled in after the sandbox runs, never by folding
 }
 
 export interface WaypointEntry extends Waypoint { touchedAt: number; ts?: number }
@@ -388,7 +400,7 @@ export function fileChain(steps: Step[], path: string): { touches: FileTouch[]; 
 // old shell's history
 const SHELL_RESET = /Shell cwd was reset to /;
 
-export function foldState(steps: Step[], pointer: number): ViewState {
+export function foldState(steps: Step[], pointer: number, matchTool?: MatchTool): ViewState {
   const byPath = new Map<string, FileView>();
   const takeView = (path: string, remove = false): FileView | undefined => {
     const want = normPath(path);
@@ -512,6 +524,21 @@ export function foldState(steps: Step[], pointer: number): ViewState {
         };
         break;
       }
+    }
+    // ...then a matcher, which outranks the verb: the rule is an explicit
+    // instruction from the user or their agent, and it claims the step
+    // whatever the step itself was. Everything else the step did — terminal
+    // output, opened tabs — still stands.
+    const claim = matchTool && r ? matchTool(s.tool, s.params) : undefined;
+    if (claim) {
+      data = {
+        title: claim.name || s.tool,
+        query: s.call.command ?? s.call.title ?? s.tool,
+        json: s.resultData ?? r,
+        matcherId: claim.id,
+        transform: claim.transform,
+        touchedAt: i,
+      };
     }
   }
   // diff-only tabs: try reconstructing the full file backward from the future

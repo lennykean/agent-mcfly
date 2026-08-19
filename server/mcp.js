@@ -4,19 +4,23 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
-import { DATA_MARKER, parseLineSpec, parseTsv } from './mcfly-data.js';
+import { DATA_MARKER, parseLineSpec, parseTable, TABLE_FORMATS } from './mcfly-data.js';
 
 const exec = promisify(execFile);
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url))).version;
-const INSTRUCTIONS = 'Use run_table for shell commands whose stdout is tabular data. The script must emit strict TSV: one unique, non-empty header row, at least two columns, at least one data row, and the same number of tab-separated cells on every row. Do not emit decoration or commentary to stdout; send diagnostics to stderr. Use highlight instead of a plain file read whenever you want to point the user at specific lines: it renders the file in the McFly viewer with those lines highlighted. Use waypoint to leave a durable note anchored to a specific line (a finding, explanation, or TODO): waypoints collect in the McFly Wayfinder tab and stay findable even after the file changes. Use waypoint_remove when a waypoint is resolved or obsolete. Use workspace_state whenever the user references something you cannot see — "this", "here", "that file", "what I highlighted", "where I am" — or to orient yourself in what they are looking at: it returns their open files, visible lines, playhead, panels, terminals, and recent selections and time-travel jumps. When the user mentions a review or their comments, call review_state to read the threads and review_reply to answer them; set addressed: true on replies that complete the ask.';
+const INSTRUCTIONS = 'Use run_table for shell commands whose stdout is tabular data. The script must emit strict TSV: one unique, non-empty header row, at least two columns, at least one data row, and the same number of tab-separated cells on every row. Do not emit decoration or commentary to stdout; send diagnostics to stderr. Use highlight instead of a plain file read whenever you want to point the user at specific lines: it renders the file in the McFly viewer with those lines highlighted. Use waypoint to leave a durable note anchored to a specific line (a finding, explanation, or TODO): waypoints collect in the McFly Wayfinder tab and stay findable even after the file changes. Use waypoint_remove when a waypoint is resolved or obsolete. Use workspace_state whenever the user references something you cannot see — "this", "here", "that file", "what I highlighted", "where I am" — or to orient yourself in what they are looking at: it returns their open files, visible lines, playhead, panels, terminals, and recent selections and time-travel jumps. When the user mentions a review or their comments, call review_state to read the threads and review_reply to answer them; set addressed: true on replies that complete the ask. Use data_matcher when another tool you are calling returns structured output the user will want to read as data: register the tool once and its results render in the data pane from then on, with no change to how you call it.';
 const TOOL = {
   name: 'run_table',
   title: 'Run tabular shell command',
-  description: 'Run a Bash script and return strict TSV output as a semantic table for McFly. Stdout must follow the server instructions.',
+  description: 'Run a Bash script and return its tabular stdout as a semantic table for McFly. Say which format the script emits with `format`: tsv (default), csv, or json. Stdout must be that format and nothing else.',
   inputSchema: {
     type: 'object', additionalProperties: false, required: ['script'],
     properties: {
-      script: { type: 'string', description: 'Bash script whose stdout is strict TSV.' },
+      script: { type: 'string', description: 'Bash script whose stdout is a table in the declared format.' },
+      format: {
+        enum: TABLE_FORMATS,
+        description: 'Format of the script stdout. tsv (default): tab-separated, header row first. csv: RFC4180, quoted fields may contain commas and newlines. json: either a list of row objects, or {"columns":[...],"rows":[[...]]}.',
+      },
       cwd: { type: 'string', description: 'Absolute working directory. Defaults to the MCP process working directory.' },
       title: { type: 'string', description: 'Short table title.' },
     },
@@ -26,6 +30,7 @@ const TOOL = {
     required: ['schema', 'kind', 'command', 'cwd', 'exitCode', 'stdout', 'stderr', 'data'],
     properties: {
       schema: { const: 'mcfly.data.v1' }, kind: { const: 'table' }, command: { type: 'string' },
+      format: { enum: TABLE_FORMATS },
       cwd: { type: 'string' }, exitCode: { type: 'integer' }, stdout: { type: 'string' }, stderr: { type: 'string' },
       data: {
         type: 'object', additionalProperties: false, required: ['columns', 'rows'],
@@ -211,9 +216,17 @@ function pickServer(args) {
   // among cwd matches, prefer the newest server — it runs the newest code.
   // The server's pwd only picks WHICH server; reviews belong to the
   // project, so the query pwd is always the agent's own cwd.
-  const byNewest = [...servers].sort((a, b) => b.started - a.started);
-  return { cwd, pick: byNewest.find((s) => scopeOwns(s.pwd, cwd)) ?? byNewest[0] };
+  // A server that does NOT own this cwd is not a fallback: reviews would be
+  // read from, and written to, an unrelated project.
+  const pick = [...servers].sort((a, b) => b.started - a.started)
+    .find((s) => scopeOwns(s.pwd, cwd));
+  return pick ? { cwd, pick } : null;
 }
+
+const noWorkspace = (args) => ({
+  content: [{ type: 'text', text: `no McFly workspace found for ${path.resolve(args.cwd ?? process.cwd())}` }],
+  isError: true,
+});
 
 async function reviewFetch(args, route, payload) {
   const found = pickServer(args);
@@ -259,7 +272,7 @@ export function checklistFiles(files = [], checked = {}) {
 async function runReviewState(args = {}) {
   try {
     const reviews = await reviewFetch(args, '/api/reviews');
-    if (reviews === null) return { content: [{ type: 'text', text: 'no running mcfly server found' }], isError: true };
+    if (reviews === null) return noWorkspace(args);
     const filtered = args.all ? reviews : reviews.filter((r) => r.status === 'open');
     const enriched = await Promise.all(filtered.map((r) => enrichChecklist(r, args)));
     const result = { schema: 'mcfly.data.v1', kind: 'review_state', reviews: enriched };
@@ -277,13 +290,85 @@ async function runReviewReply(args = {}) {
     const out = await reviewFetch(args, '/api/review-reply', {
       commentId: args.comment_id, body: args.body, author: 'agent', addressed: !!args.addressed,
     });
-    if (out === null) return { content: [{ type: 'text', text: 'no running mcfly server found' }], isError: true };
+    if (out === null) return noWorkspace(args);
     if (out.error) return { content: [{ type: 'text', text: out.error }], isError: true };
     const result = { schema: 'mcfly.data.v1', kind: 'review_reply', review_id: out.id, comment_id: args.comment_id };
     return { content: [{ type: 'text', text: `${DATA_MARKER}\n${JSON.stringify(result)}` }], structuredContent: result };
   } catch (error) {
     return { content: [{ type: 'text', text: `reply failed: ${error.message}` }], isError: true };
   }
+}
+
+const DATA_MATCHER_TOOL = {
+  name: 'data_matcher',
+  title: 'Route a tool\'s results to the data pane',
+  description: "Teach McFly that another tool's results are DATA: matching calls render in the user's data pane as JSON, with no extra work from you — you keep calling the tool normally. Use it when a tool you are about to call repeatedly returns structured output the user will want to read as data (an API client, a query tool, a Bash command emitting JSON). Scope with workspace and/or session; omit both for every project. Optional transform is a JavaScript function BODY receiving `data` (the parsed result) and returning what to display — use it to reshape noisy output into something readable. It runs sandboxed in the user's browser, so no I/O, no require, no await. action: 'list' shows the current rules, 'remove' deletes one by id.",
+  inputSchema: {
+    type: 'object', additionalProperties: false,
+    properties: {
+      action: { enum: ['set', 'list', 'remove'], description: "Default 'set'." },
+      id: { type: 'string', description: 'Existing matcher id: to update it, or to remove it.' },
+      name: { type: 'string', description: 'Short label shown in settings.' },
+      tool: { type: 'string', description: 'Glob matched against the tool name, e.g. "mcp__github__*", "Bash", "*_query".' },
+      params: {
+        type: 'object', additionalProperties: { type: 'string' },
+        description: 'Optional. Param name -> glob that the call\'s params must match, e.g. {"command": "kubectl get* -o json"}. All listed params must match.',
+      },
+      workspace: { type: 'string', description: 'Optional project directory. The matcher applies there and below it.' },
+      session: { type: 'string', description: 'Optional session id. The matcher applies to that transcript only.' },
+      transform: { type: 'string', description: 'Optional JavaScript function body: receives `data`, returns the value to render. Sandboxed, synchronous, no I/O.' },
+      enabled: { type: 'boolean', description: 'Default true.' },
+      cwd: { type: 'string', description: 'Project directory, to pick the right McFly server. Defaults to the process cwd.' },
+    },
+  },
+  outputSchema: {
+    type: 'object', required: ['schema', 'kind'],
+    properties: { schema: { const: 'mcfly.data.v1' }, kind: { const: 'data_matcher' } },
+  },
+};
+
+async function runDataMatcher(args = {}) {
+  const action = args.action ?? 'set';
+  const body = { ...args };
+  delete body.action;
+  delete body.cwd;
+  try {
+    let out;
+    if (action === 'list') out = await matcherFetch(args, 'GET');
+    else if (action === 'remove') {
+      if (!args.id) return { content: [{ type: 'text', text: 'id is required to remove a matcher' }], isError: true };
+      const all = await matcherFetch(args, 'GET');
+      if (all === null) return noWorkspace(args);
+      if (!all.some((m) => m.id === args.id)) {
+        return { content: [{ type: 'text', text: `no matcher with id ${args.id}` }], isError: true };
+      }
+      out = await matcherFetch(args, 'POST', all.filter((m) => m.id !== args.id));
+    } else {
+      if (!args.tool) return { content: [{ type: 'text', text: 'tool pattern is required' }], isError: true };
+      const all = await matcherFetch(args, 'GET');
+      if (all === null) return noWorkspace(args);
+      const at = args.id ? all.findIndex((m) => m.id === args.id) : -1;
+      out = await matcherFetch(args, 'POST', at >= 0
+        ? all.map((m, i) => (i === at ? { ...m, ...body } : m))
+        : [...all, body]);
+    }
+    if (out === null) return noWorkspace(args);
+    if (out.error) return { content: [{ type: 'text', text: out.error }], isError: true };
+    const result = { schema: 'mcfly.data.v1', kind: 'data_matcher', action, matchers: out };
+    return { content: [{ type: 'text', text: `${DATA_MARKER}\n${JSON.stringify(result)}` }], structuredContent: result };
+  } catch (error) {
+    return { content: [{ type: 'text', text: `data_matcher failed: ${error.message}` }], isError: true };
+  }
+}
+
+async function matcherFetch(args, method, payload) {
+  const found = pickServer(args);
+  if (!found) return null;
+  const url = `http://127.0.0.1:${found.pick.port}/api/data-matchers`;
+  const res = method === 'POST'
+    ? await fetch(url, { method: 'POST', body: JSON.stringify(payload) })
+    : await fetch(url);
+  return res.json();
 }
 
 const WAYPOINT_REMOVE_TOOL = {
@@ -389,6 +474,10 @@ async function runTable(args = {}) {
   if (typeof args.script !== 'string' || !args.script.trim()) {
     return { content: [{ type: 'text', text: 'script is required' }], isError: true };
   }
+  const format = args.format ?? 'tsv';
+  if (!TABLE_FORMATS.includes(format)) {
+    return { content: [{ type: 'text', text: `format must be one of: ${TABLE_FORMATS.join(', ')}` }], isError: true };
+  }
   const cwd = args.cwd ? path.resolve(args.cwd) : process.cwd();
   try {
     if (!fs.statSync(cwd).isDirectory()) throw new Error();
@@ -403,12 +492,12 @@ async function runTable(args = {}) {
     stderr = error.stderr ?? error.message;
     exitCode = Number.isInteger(error.code) ? error.code : 1;
   }
-  const data = exitCode === 0 ? parseTsv(stdout) : null;
+  const data = exitCode === 0 ? parseTable(stdout, format) : null;
   if (!data) {
-    const reason = exitCode ? `command exited ${exitCode}` : 'stdout is not strict TSV';
+    const reason = exitCode ? `command exited ${exitCode}` : `stdout is not valid ${format}`;
     return { content: [{ type: 'text', text: [reason, stdout, stderr].filter(Boolean).join('\n') }], isError: true };
   }
-  const result = { schema: 'mcfly.data.v1', kind: 'table', command: args.script, cwd, exitCode, stdout, stderr, data };
+  const result = { schema: 'mcfly.data.v1', kind: 'table', command: args.script, format, cwd, exitCode, stdout, stderr, data };
   return { content: [{ type: 'text', text: `${DATA_MARKER}\n${JSON.stringify(result)}` }], structuredContent: result };
 }
 
@@ -423,6 +512,19 @@ function bash() {
   } catch { return 'bash'; }
 }
 
+// the tool table: one row per tool, in the order they are advertised. Adding a
+// tool is one entry, not three edits.
+const TOOLS = [
+  [TOOL, runTable],
+  [HIGHLIGHT_TOOL, runHighlight],
+  [WAYPOINT_TOOL, runWaypoint],
+  [WAYPOINT_REMOVE_TOOL, runWaypointRemove],
+  [WORKSPACE_STATE_TOOL, runWorkspaceState],
+  [REVIEW_STATE_TOOL, runReviewState],
+  [REVIEW_REPLY_TOOL, runReviewReply],
+  [DATA_MATCHER_TOOL, runDataMatcher],
+];
+
 async function handle(request) {
   switch (request.method) {
     case 'initialize':
@@ -431,35 +533,38 @@ async function handle(request) {
         capabilities: { tools: {} }, serverInfo: { name: 'mcfly', version: VERSION }, instructions: INSTRUCTIONS,
       };
     case 'ping': return {};
-    case 'tools/list': return { tools: [TOOL, HIGHLIGHT_TOOL, WAYPOINT_TOOL, WAYPOINT_REMOVE_TOOL, WORKSPACE_STATE_TOOL, REVIEW_STATE_TOOL, REVIEW_REPLY_TOOL] };
-    case 'tools/call':
-      if (request.params?.name === TOOL.name) return runTable(request.params.arguments);
-      if (request.params?.name === HIGHLIGHT_TOOL.name) return runHighlight(request.params.arguments);
-      if (request.params?.name === WAYPOINT_TOOL.name) return runWaypoint(request.params.arguments);
-      if (request.params?.name === WAYPOINT_REMOVE_TOOL.name) return runWaypointRemove(request.params.arguments);
-      if (request.params?.name === WORKSPACE_STATE_TOOL.name) return runWorkspaceState(request.params.arguments);
-      if (request.params?.name === REVIEW_STATE_TOOL.name) return runReviewState(request.params.arguments);
-      if (request.params?.name === REVIEW_REPLY_TOOL.name) return runReviewReply(request.params.arguments);
-      throw new Error(`unknown tool: ${request.params?.name}`);
+    case 'tools/list': return { tools: TOOLS.map(([tool]) => tool) };
+    case 'tools/call': {
+      const run = TOOLS.find(([tool]) => tool.name === request.params?.name)?.[1];
+      if (!run) throw new Error(`unknown tool: ${request.params?.name}`);
+      return run(request.params.arguments);
+    }
     default: throw Object.assign(new Error(`method not found: ${request.method}`), { code: -32601 });
   }
 }
 
+// Requests are dispatched as they arrive rather than awaited in turn: run_table
+// can hold the process for two minutes, and nothing else the agent asks for
+// should queue behind it. Responses carry their id, so replying out of order is
+// exactly what JSON-RPC expects.
 export async function startMcp() {
   const lines = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+  const inFlight = new Set();
   for await (const line of lines) {
     let request;
     try { request = JSON.parse(line); } catch { continue; }
     if (request.id === undefined) continue;
-    try {
-      process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: request.id, result: await handle(request) })}\n`);
-    } catch (error) {
-      process.stdout.write(`${JSON.stringify({
+    const done = handle(request).then(
+      (result) => ({ jsonrpc: '2.0', id: request.id, result }),
+      (error) => ({
         jsonrpc: '2.0', id: request.id,
         error: { code: error.code ?? -32603, message: error.message ?? String(error) },
-      })}\n`);
-    }
+      }),
+    ).then((message) => process.stdout.write(`${JSON.stringify(message)}\n`));
+    inFlight.add(done);
+    done.finally(() => inFlight.delete(done));
   }
+  await Promise.allSettled(inFlight); // stdin closed: let the last replies out
 }
 
 const START = process.platform === 'win32'

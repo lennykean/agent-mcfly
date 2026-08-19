@@ -6,7 +6,8 @@ import path from 'node:path';
 test('workspace state: ingests snapshots and events, serves filtered queries', async () => {
   const port = 17700 + Math.floor(Math.random() * 200);
   const server = spawn(process.execPath, ['server/server.js'], {
-    cwd: process.cwd(), env: { ...process.env, PORT: String(port) }, stdio: 'pipe',
+    // MCFLY_OPEN off: a test run must never launch a browser tab
+    cwd: process.cwd(), env: { ...process.env, PORT: String(port), MCFLY_OPEN: '0' }, stdio: 'pipe',
   });
   await new Promise((resolve, reject) => {
     server.stdout.on('data', (d) => { if (String(d).includes('Agent McFly API')) resolve(); });
@@ -48,6 +49,26 @@ test('workspace state: ingests snapshots and events, serves filtered queries', a
     const merged = await (await fetch(`${base}/api/workspace-state`)).json();
     assert.equal(merged.snapshot.playhead.pointer, 43);
     assert.equal(merged.snapshot.editor.active, 'pinned');
+
+    // A multi-byte character split across two body chunks must survive: the
+    // reader concatenates bytes and decodes once, rather than stringifying
+    // each chunk as it lands.
+    const note = `${'x'.repeat(400)}héllo — 🎉 日本語`;
+    const bytes = Buffer.from(JSON.stringify({ scope: 'utf8', snapshot: { note } }), 'utf8');
+    const split = bytes.length - 5; // lands INSIDE the last multi-byte character
+    await fetch(`${base}/api/workspace-events`, {
+      method: 'POST',
+      duplex: 'half',
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(bytes.subarray(0, split));
+          controller.enqueue(bytes.subarray(split));
+          controller.close();
+        },
+      }),
+    });
+    const utf8 = await (await fetch(`${base}/api/workspace-state?project=utf8`)).json();
+    assert.equal(utf8.snapshot.note, note);
 
     // Explicit project queries must not fall through to the newest unrelated
     // scope, and prefix lookalikes are not ancestors.

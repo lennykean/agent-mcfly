@@ -42,11 +42,13 @@ const localIo = {
 export async function grep(root, q, io = localIo) {
   const smart = /[A-Z]/.test(q) ? [] : ['-i'];
   const out = await io.runLenient(root, ['grep', '-n', '-I', '--no-color', '-E', ...smart, '--', q]);
-  return out.split('\n').filter(Boolean).slice(0, 500).map((l) => {
+  const hits = [];
+  for (const l of out.split('\n')) {
     // CRLF work trees: the \r would block the $ anchor (JS "." skips \r)
-    const m = l.replace(/\r$/, '').match(/^(.+?):(\d+):(.*)$/);
-    return m && { path: m[1], line: Number(m[2]), text: m[3].slice(0, 400) };
-  }).filter(Boolean);
+    const m = l && l.replace(/\r$/, '').match(/^(.+?):(\d+):(.*)$/);
+    if (m && hits.push({ path: m[1], line: Number(m[2]), text: m[3].slice(0, 400) }) >= 500) break;
+  }
+  return hits;
 }
 
 // ---- review checklist: what differs between a base ref and the work tree ----
@@ -83,9 +85,13 @@ export async function diffAgainstRef(root, ref, file, io = localIo) {
 export async function listFiles(root, q, io = localIo) {
   const out = await io.runLenient(root, ['ls-files', '--cached', '--others', '--exclude-standard']);
   const needle = q.toLowerCase();
-  return out.split('\n').filter(Boolean)
-    .filter((p) => p.toLowerCase().includes(needle))
-    .slice(0, 200);
+  // typed per keystroke over every tracked path, so stop at the cap instead of
+  // lower-casing the whole repo first
+  const hits = [];
+  for (const p of out.split('\n')) {
+    if (p && p.toLowerCase().includes(needle) && hits.push(p) >= 200) break;
+  }
+  return hits;
 }
 
 // porcelain v1 -z: "XY path\0" — renames add the original as a second record.

@@ -1,5 +1,87 @@
 import { useEffect, useMemo, useState } from 'react';
 import { type Action, bindingsFor, overlayActions, parseKeys } from '../lib/keys';
+import type { DataMatcher } from '../lib/matchers';
+
+export type SettingsPage = 'settings' | 'keys' | 'data';
+
+// One matcher, edited in place. Targets are both optional — neither set means
+// the rule applies everywhere, which is why the scope line says so out loud
+// rather than leaving two empty boxes to interpret.
+function MatcherRow({ matcher, pwd, onChange, onRemove }: {
+  matcher: DataMatcher; pwd?: string;
+  onChange: (next: DataMatcher) => void;
+  onRemove: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const set = (patch: Partial<DataMatcher>) => onChange({ ...matcher, ...patch });
+  const paramPairs = Object.entries(matcher.params ?? {});
+  const scope = matcher.session ? 'this session' : matcher.workspace ? matcher.workspace : 'everywhere';
+  return (
+    <div className="matcher">
+      <div className="matcherHead">
+        <input
+          type="checkbox"
+          checked={matcher.enabled !== false}
+          onChange={(e) => set({ enabled: e.target.checked })}
+          title="enabled"
+        />
+        <span className="matcherTool" onClick={() => setOpen(!open)}>{matcher.tool}</span>
+        <span className="setHint">{scope}</span>
+        {matcher.transform && <span className="matcherTag">transform</span>}
+        <button className="matcherX" onClick={onRemove} title="remove">×</button>
+      </div>
+      {open && (
+        <div className="matcherBody">
+          <TextRow
+            label="name" hint="shown as the data pane title"
+            value={matcher.name} placeholder={matcher.tool}
+            onSave={(v) => set({ name: v || matcher.tool })}
+          />
+          <TextRow
+            label="tool" hint="glob against the tool name, e.g. mcp__github__*"
+            value={matcher.tool} placeholder="Bash"
+            onSave={(v) => v && set({ tool: v })}
+          />
+          <TextRow
+            label="param" hint="optional: param name = glob the call must match"
+            value={paramPairs.map(([k, v]) => `${k}=${v}`).join(', ')}
+            placeholder="command=kubectl get* -o json"
+            onSave={(v) => {
+              const params: Record<string, string> = {};
+              for (const pair of v.split(',')) {
+                const at = pair.indexOf('=');
+                if (at > 0) params[pair.slice(0, at).trim()] = pair.slice(at + 1).trim();
+              }
+              set({ params: Object.keys(params).length ? params : undefined });
+            }}
+          />
+          <TextRow
+            label="workspace" hint="optional: this project and below it. blank = any"
+            value={matcher.workspace ?? ''} placeholder={pwd ?? '/path/to/project'}
+            onSave={(v) => set({ workspace: v || undefined })}
+          />
+          <TextRow
+            label="session" hint="optional: one transcript id. blank = any"
+            value={matcher.session ?? ''} placeholder="any session"
+            onSave={(v) => set({ session: v || undefined })}
+          />
+          <div className="setSub matcherCode">
+            <span className="setLabel">transform</span>
+            <textarea
+              className="pickerInput matcherScript"
+              defaultValue={matcher.transform ?? ''}
+              placeholder="return data.items;"
+              spellCheck={false}
+              onKeyDown={(e) => e.stopPropagation()}
+              onBlur={(e) => set({ transform: e.target.value.trim() || undefined })}
+            />
+            <span className="setHint">optional JS body: gets `data`, returns what to show. Sandboxed, no I/O.</span>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 // Everything the app remembers about the user, stored server-side in
 // ~/.mcfly/settings.json. autoLive/autoTour are START states for a session,
@@ -78,15 +160,21 @@ function LeaderInput({ label, hint, value, placeholder, onSave }: {
 // click a row to override in vim notation). Enabling vim/tmux over custom
 // bindings asks before overwriting them; disabling a mode removes only what
 // the mode itself brought.
-export function Settings({ settings, initialPage = 'settings', keysVersion = 0, tools, onSave, onClose }: {
+export function Settings({
+  settings, initialPage = 'settings', keysVersion = 0, tools, pwd,
+  matchers = [], onSaveMatchers, onSave, onClose,
+}: {
   settings: McflySettings;
-  initialPage?: 'settings' | 'keys';
+  initialPage?: SettingsPage;
   keysVersion?: number; // bumped AFTER the keys module absorbed the settings
   tools?: string[]; // agent CLIs found on PATH, for the default-terminal picker
+  pwd?: string; // the open project, offered as the workspace target for a new rule
+  matchers?: DataMatcher[];
+  onSaveMatchers?: (next: DataMatcher[]) => void;
   onSave: (patch: Partial<McflySettings>) => void;
   onClose: () => void;
 }) {
-  const [page, setPage] = useState<'settings' | 'keys'>(initialPage);
+  const [page, setPage] = useState<SettingsPage>(initialPage);
   const keymap = settings.keymap ?? {};
   const [ask, setAsk] = useState<null | { mode: 'vim' | 'tmux'; conflicts: string[] }>(null);
 
@@ -154,6 +242,7 @@ export function Settings({ settings, initialPage = 'settings', keysVersion = 0, 
         <div className="paneTabs setTabs">
           <div className={`paneTab ${page === 'settings' ? 'active' : ''}`} onClick={() => setPage('settings')}>SETTINGS</div>
           <div className={`paneTab ${page === 'keys' ? 'active' : ''}`} onClick={() => setPage('keys')}>KEYBINDINGS</div>
+          <div className={`paneTab ${page === 'data' ? 'active' : ''}`} onClick={() => setPage('data')}>DATA TOOLS</div>
         </div>
 
         {page === 'settings' && (
@@ -225,6 +314,32 @@ export function Settings({ settings, initialPage = 'settings', keysVersion = 0, 
                 </div>
               </div>
             )}
+          </div>
+        )}
+
+        {page === 'data' && (
+          <div className="setBody">
+            <div className="setSection">data tool matchers</div>
+            <div className="setHint setBlurb">
+              Results from a matching tool call render in the DATA tab as JSON. Agents add these
+              themselves with the <b>data_matcher</b> tool; you can edit or remove them here.
+            </div>
+            {matchers.length === 0 && <div className="emptyHint">no matchers yet</div>}
+            {matchers.map((m, i) => (
+              <MatcherRow
+                key={m.id}
+                matcher={m}
+                pwd={pwd}
+                onChange={(next) => onSaveMatchers?.(matchers.map((x, j) => (j === i ? next : x)))}
+                onRemove={() => onSaveMatchers?.(matchers.filter((_, j) => j !== i))}
+              />
+            ))}
+            <button
+              className="matcherAdd"
+              onClick={() => onSaveMatchers?.([...matchers, {
+                id: `m${Date.now().toString(36)}`, name: 'new matcher', tool: '', enabled: true,
+              }])}
+            >+ add matcher</button>
           </div>
         )}
 

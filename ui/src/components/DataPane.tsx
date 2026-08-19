@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Splitter } from './Splitter';
+import { JsonView } from './JsonView';
 import type { DataView } from '../lib/timeline';
 
 // The DATA tab: title, the query that produced it (resizable via the same
@@ -23,7 +24,12 @@ export function DataPane({ data, animate, selection = [], onRowClick }: {
           <Splitter dir="row" onDrag={(dy) => setQueryH((h) => Math.max(25, Math.min(400, h + dy)))} />
         </>
       )}
-      {data.table ? (
+      {data.json !== undefined ? (
+        <div className="dataScroll">
+          {data.transformError && <div className="dataError">transform failed: {data.transformError}</div>}
+          <JsonView value={data.json} />
+        </div>
+      ) : data.table ? (
         <div className="dataScroll">
           <table>
             <thead><tr>{data.table.columns.map((column) => <th key={column}>{column}</th>)}</tr></thead>

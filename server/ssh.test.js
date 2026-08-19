@@ -95,7 +95,8 @@ test('SSH routes require explicit host-key confirmation and retain no credential
   const knownFile = path.join(dir, 'known.json');
   const app = spawn(process.execPath, ['server/server.js'], {
     cwd: process.cwd(),
-    env: { ...process.env, PORT: String(port), MCFLY_SSH_KNOWN_HOSTS: knownFile },
+    // MCFLY_OPEN off: a test run must never launch a browser tab
+    env: { ...process.env, PORT: String(port), MCFLY_OPEN: '0', MCFLY_SSH_KNOWN_HOSTS: knownFile },
     stdio: 'pipe',
   });
 

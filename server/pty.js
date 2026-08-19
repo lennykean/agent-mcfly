@@ -2,9 +2,9 @@
 // per-boot token and an optional tool to launch inside the shell.
 //
 // PTYs survive their websocket: on disconnect (page reload, HMR full reload)
-// the shell stays alive for a grace window buffering output, and the page
-// re-attaches with ?attach=<ptyId>. Control frames to the client are a \x00
-// prefix + JSON; everything else is raw terminal data.
+// the shell stays alive buffering output, and the page re-attaches with
+// ?attach=<ptyId>. Control frames to the client are a \x00 prefix + JSON;
+// everything else is raw terminal data.
 import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -21,7 +21,9 @@ const ShadowTerminal = headless.Terminal ?? headless.default?.Terminal;
 export const TOKEN = crypto.randomBytes(16).toString('hex');
 
 const WIN = process.platform === 'win32';
-const CANDIDATE_TOOLS = ['claude', 'codex', 'agy', 'pi', 'opencode', 'aider', 'gemini', 'goose'];
+// the agent CLIs McFly knows how to launch; ssh.js probes remote hosts for the
+// same list, so it lives in one place
+export const AGENT_TOOLS = ['claude', 'codex', 'agy', 'pi', 'opencode', 'aider', 'gemini', 'goose'];
 const BUFFER_CAP = 256 * 1024;
 
 function which(name) {
@@ -51,7 +53,7 @@ export function toolFlags(tool) {
 }
 
 export function detectTools() {
-  tools ??= CANDIDATE_TOOLS.filter(which);
+  tools ??= AGENT_TOOLS.filter(which);
   return tools;
 }
 
@@ -83,7 +85,7 @@ function sanitizedEnv() {
   return { ...env, TERM: 'xterm-256color', COLORTERM: 'truecolor', FORCE_COLOR: '3' };
 }
 
-// ptyId -> { p, buffer: string[], size, ws, tool, cwd, created, session }
+// ptyId -> { p, buffer, ws, tool, cwd, created, session }
 const sessions = new Map();
 // SSH PTYs are channels owned by this local McFly process. They need the
 // connection in their identity because two hosts can produce the same id.
@@ -95,6 +97,24 @@ const sessionOf = (id, connection) => connection
   : sessions.get(id);
 
 const ctl = (obj) => '\x00' + JSON.stringify(obj);
+
+// Terminal output is appended to one string and trimmed from the front, not
+// kept as a list of chunks: a fast-scrolling TUI produces thousands of small
+// writes, and shifting an array of them is quadratic. It also makes reattach
+// a single websocket frame instead of one per chunk.
+// Terminal output is appended to one string and trimmed from the front, not
+// kept as a list of chunks: a fast-scrolling TUI produces thousands of small
+// writes, and shifting an array of them is quadratic. It also makes reattach
+// a single websocket frame instead of one per chunk.
+// ponytail: the shadow is fed unconditionally because it is also what parses
+// the OSC title, and the title is how a pty maps to its session. Gating it on
+// "someone is watching" needs the title read off the raw stream first.
+function record(s, d) {
+  s.buffer += d;
+  if (s.buffer.length > BUFFER_CAP) s.buffer = s.buffer.slice(-BUFFER_CAP);
+  try { s.shadow.write(d); } catch { /* preview only */ }
+  if (s.ws?.readyState === 1) s.ws.send(d);
+}
 
 // "screenshot": the shadow's full viewport — actual rendered terminal state,
 // with dimensions so the client can scale it into a thumbnail.
@@ -152,7 +172,6 @@ export function setPtySession(ptyId, mapping, connection) {
 // explicit kill — no grace reaper
 function detach(s) {
   s.ws = null;
-  s.detachedAt = Date.now();
 }
 
 // ---- orphan prevention: PTYs die with the server, even when the server
@@ -236,7 +255,6 @@ export function killAllPtys() {
 }
 
 function wire(s, ws) {
-  s.detachedAt = null;
   s.ws = ws;
   ws.on('message', (m) => {
     try {
@@ -255,10 +273,12 @@ function wire(s, ws) {
 }
 
 const shQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
-const powershellQuote = (s) => String(s).replace(/'/g, "''");
+// the ESCAPED BODY of a PowerShell single-quoted string, without the quotes —
+// remote-data.js has a same-named helper that returns the quotes too
+const powershellBody = (s) => String(s).replace(/'/g, "''");
 
 function remoteShell(record, cwd, cb) {
-  const ps = `try { Set-Location -LiteralPath '${powershellQuote(cwd)}' -ErrorAction Stop } catch { Write-Error $_; exit 1 }`;
+  const ps = `try { Set-Location -LiteralPath '${powershellBody(cwd)}' -ErrorAction Stop } catch { Write-Error $_; exit 1 }`;
   const command = record.platform === 'win32'
     ? `powershell.exe -NoLogo -NoExit -EncodedCommand ${Buffer.from(ps, 'utf16le').toString('base64')}`
     : `cd -- ${shQuote(cwd)} && exec "\${SHELL:-/bin/sh}" -il`;
@@ -312,7 +332,7 @@ export function attachPty(server, allowedHosts, getRemote = () => undefined) {
           try { old.send(ctl({ taken: true })); old.close(); } catch { /* already gone */ }
         }
         ws.send(ctl({ ptyId: s.id, attached: true }));
-        for (const chunk of s.buffer) ws.send(chunk);
+        if (s.buffer) ws.send(s.buffer);
         wire(s, ws);
         return;
       }
@@ -337,23 +357,14 @@ export function attachPty(server, allowedHosts, getRemote = () => undefined) {
           p.setEncoding?.('utf8');
           p.stderr?.setEncoding?.('utf8');
           const s = {
-            id: crypto.randomBytes(8).toString('hex'), p, buffer: [], size: 0, ws: null,
+            id: crypto.randomBytes(8).toString('hex'), p, buffer: '', ws: null,
             connection, tool, cwd, created: Date.now(), session: null, title: '',
             shadow: new ShadowTerminal({ cols: 100, rows: 30, scrollback: 20, allowProposedApi: true }),
           };
           try { s.shadow.onTitleChange((t) => { s.title = t; }); } catch { /* preview only */ }
           remoteSessions.set(remoteKey(connection, s.id), s);
           if (tool !== '_' && /^[\w.-]+$/.test(tool)) setTimeout(() => { try { p.write(tool + toolFlags(tool) + '\r'); } catch { /* ended */ } }, 600);
-          const onData = (d) => {
-            s.buffer.push(d);
-            s.size += typeof d === 'string' ? Buffer.byteLength(d) : d.length;
-            while (s.size > BUFFER_CAP && s.buffer.length > 1) {
-              const old = s.buffer.shift();
-              s.size -= typeof old === 'string' ? Buffer.byteLength(old) : old.length;
-            }
-            try { s.shadow.write(d); } catch { /* preview only */ }
-            if (s.ws?.readyState === 1) s.ws.send(d);
-          };
+          const onData = (d) => record(s, d);
           let ended = false;
           const end = (error) => {
             if (ended) return;
@@ -404,7 +415,7 @@ export function attachPty(server, allowedHosts, getRemote = () => undefined) {
         return;
       }
       const s = {
-        id: crypto.randomBytes(8).toString('hex'), p, buffer: [], size: 0, ws: null,
+        id: crypto.randomBytes(8).toString('hex'), p, buffer: '', ws: null,
         tool, cwd, created: Date.now(), session: null, title: '',
         shadow: new ShadowTerminal({ cols: 100, rows: 30, scrollback: 20, allowProposedApi: true }),
       };
@@ -420,13 +431,7 @@ export function attachPty(server, allowedHosts, getRemote = () => undefined) {
       if (tool !== '_' && /^[\w.-]+$/.test(tool)) {
         setTimeout(() => p.write(tool + toolFlags(tool) + '\r'), 600);
       }
-      p.onData((d) => {
-        s.buffer.push(d);
-        s.size += d.length;
-        while (s.size > BUFFER_CAP && s.buffer.length > 1) s.size -= s.buffer.shift().length;
-        try { s.shadow.write(d); } catch { /* preview only */ }
-        if (s.ws?.readyState === 1) s.ws.send(d);
-      });
+      p.onData((d) => record(s, d));
       p.onExit(() => {
         if (s.ws?.readyState === 1) {
           s.ws.send(ctl({ exit: true }));

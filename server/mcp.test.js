@@ -40,7 +40,10 @@ test('validates strict TSV and serves it through MCP stdio', () => {
     cwd: process.cwd(), input: `${requests.map(JSON.stringify).join('\n')}\n`, encoding: 'utf8', timeout: 10_000,
   });
   assert.equal(child.status, 0, child.stderr);
-  const responses = child.stdout.trim().split('\n').map(JSON.parse);
+  // the server answers concurrently, so responses arrive by id, not in order
+  const byId = new Map(child.stdout.trim().split('\n').map(JSON.parse).map((r) => [r.id, r]));
+  assert.equal(byId.size, requests.length);
+  const responses = requests.map((r) => byId.get(r.id));
   assert.equal(responses[0].result.serverInfo.name, 'mcfly');
   assert.equal(responses[1].result.tools[0].name, 'run_table');
   assert.equal(responses[2].result.isError, undefined);

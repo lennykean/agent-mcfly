@@ -475,7 +475,10 @@ export function LiveTerm({ cwd, source, projects, currentSession, linkedRoots, d
     ?? projectChoices.find((p) => sameTerminalProject(p, currentProject))
     ?? projectChoices[0];
   const scopedTerms = terms.filter((t) => t.cwd && sameTerminalProject({ cwd: t.cwd, source: t.source }, activeProject));
-  const scopedPtys = ptys.filter((p) => sameTerminalProject({ cwd: p.cwd, source: p.source }, activeProject));
+  // the gallery offers what is NOT already in front of you: a terminal open as
+  // a tab in THIS window is reachable from the tab strip, so it stays out
+  const scopedPtys = ptys.filter((p) => sameTerminalProject({ cwd: p.cwd, source: p.source }, activeProject)
+    && !terms.some((e) => e.ptyId === p.id && sourceKey(e.source) === sourceKey(p.source)));
   const config = configs[sourceKey(activeProject?.source)];
 
   // Each project reports only its terminals; the shared terminal DOM happens
@@ -572,11 +575,6 @@ export function LiveTerm({ cwd, source, projects, currentSession, linkedRoots, d
       e.key === key ? { ...e, attachId: e.ptyId ?? e.attachId, steal: true, nonce: e.nonce + 1 } : e
     )));
   };
-
-  // every running PTY in this project shows in its gallery — ones already
-  // open as tabs in this window included; choosing those switches tabs
-  const tabOf = (ptyId: string, value?: WorkspaceSource) =>
-    terms.find((e) => e.ptyId === ptyId && sourceKey(e.source) === sourceKey(value));
 
   // the terminal chords: termNew starts a shell; termFocus focuses the
   // active terminal, and pressed again FROM a terminal it cycles the tabs
@@ -911,13 +909,11 @@ export function LiveTerm({ cwd, source, projects, currentSession, linkedRoots, d
             <>
               <div className="pickerTitle">attach a terminal</div>
               <div className="liveGallery">
-                {scopedPtys.map((p) => {
-                  const own = tabOf(p.id, p.source);
-                  return (
+                {scopedPtys.map((p) => (
                   <div
                     key={ptyKey(p.id, p.source)}
                     data-pty-id={p.id}
-                    className={`ptyTile ${p.attached && !own ? 'inUse' : ''} ${isWatched(p.session, p.source) ? 'watching' : ''}`}
+                    className={`ptyTile ${p.attached ? 'inUse' : ''} ${isWatched(p.session, p.source) ? 'watching' : ''}`}
                   >
                     <button
                       type="button"
@@ -931,8 +927,7 @@ export function LiveTerm({ cwd, source, projects, currentSession, linkedRoots, d
                         e.currentTarget.click();
                       }}
                       onClick={() => {
-                        if (own) { setActive(own.key); onActiveSession?.(p.session, p.source); }
-                        else if (p.attached) {
+                        if (p.attached) {
                           setConfirmSteal(ptyKey(p.id, p.source));
                           focusSoon(() => {
                             (pickerRef.current?.querySelector(`[data-pty-id="${p.id}"] .tileConfirm button`) as HTMLElement | null)?.focus();
@@ -947,8 +942,8 @@ export function LiveTerm({ cwd, source, projects, currentSession, linkedRoots, d
                       <span className="tileName">
                         {p.tool === '_' ? 'shell' : p.tool} · {p.cwd.replace(/[\\/]+$/, '').split(/[\\/]/).pop()}
                       </span>
-                      <span className={`tileBadge ${p.attached && !own ? 'busy' : ''}`}>
-                        {own ? 'this window' : p.attached ? 'in use' : 'detached'}
+                      <span className={`tileBadge ${p.attached ? 'busy' : ''}`}>
+                        {p.attached ? 'in use' : 'detached'}
                       </span>
                       {!p.attached && (
                         <button
@@ -990,8 +985,7 @@ export function LiveTerm({ cwd, source, projects, currentSession, linkedRoots, d
                       </div>
                     )}
                   </div>
-                  );
-                })}
+                ))}
               </div>
             </>
           )}

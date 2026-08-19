@@ -6,13 +6,27 @@ import { randomUUID } from 'node:crypto';
 import * as claudeCode from './loaders/claude-code.js';
 import * as codex from './loaders/codex.js';
 import { execSsh } from './ssh.js';
+import { MAX_CHUNK } from './loaders/transcript.js';
 
-const MAX_CHUNK = 2 * 1024 * 1024;
+// SFTP round-trips are latency, not CPU: session heads are read in parallel,
+// bounded so a big session store cannot swamp the channel.
+const HEAD_CONCURRENCY = 8;
+
+async function mapLimited(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    for (let i = next++; i < items.length; i = next++) out[i] = await fn(items[i], i);
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
 const sftpByClient = new WeakMap();
 const codexIoByClient = new WeakMap();
 // ponytail: process-lifetime cursor cache; add disconnect eviction if host churn becomes measurable.
 const codexThrough = new Map();
-const IMG = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
+// extension -> mime for inlined images; the local file reader shares it
+export const IMG = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
 
 const pathsFor = (connection) => connection.platform === 'win32' ? path.win32 : path.posix;
 const mtimeMs = (attrs) => attrs.mtimeMs ?? Number(attrs.mtime ?? 0) * 1000;
@@ -270,15 +284,19 @@ async function listCodex(connection, cwd) {
   try { names = codex.parseThreadNames((await io.readIndex(index)).toString('utf8')); }
   catch { /* optional */ }
   const want = codex.projectPathKey(cwd);
-  const out = [];
-  for (const item of await io.files(root)) {
-    let head;
+  const heads = await mapLimited(await io.files(root), HEAD_CONCURRENCY, async (item) => {
     try {
-      head = codex.parseHead((await io.readRange(item.file, 0, Math.min(64 * 1024, item.attrs.size))).toString('utf8'));
+      const head = codex.parseHead((await io.readRange(item.file, 0, Math.min(64 * 1024, item.attrs.size))).toString('utf8'));
+      return { item, head };
     } catch (error) {
-      if (missing(error)) continue;
+      if (missing(error)) return null;
       throw error;
     }
+  });
+  const out = [];
+  for (const entry of heads) {
+    if (!entry) continue;
+    const { item, head } = entry;
     if (codex.projectPathKey(head.cwd) !== want) continue;
     const base = paths.basename(item.file, '.jsonl').replace(/^rollout-/, '');
     out.push({
@@ -297,20 +315,24 @@ async function listClaude(connection, cwd) {
   for (const project of await safeReadDir(connection, root)) {
     if (!isDir(project.attrs) || !claudeCode.projectSlugMatches(cwd, project.filename)) continue;
     const dir = paths.join(root, project.filename);
-    for (const entry of await safeReadDir(connection, dir)) {
-      if (isDir(entry.attrs) || !entry.filename.endsWith('.jsonl')) continue;
+    const files = (await safeReadDir(connection, dir))
+      .filter((entry) => !isDir(entry.attrs) && entry.filename.endsWith('.jsonl'));
+    const scanned = await mapLimited(files, HEAD_CONCURRENCY, async (entry) => {
       const file = paths.join(dir, entry.filename);
       const attrs = statShape(entry.attrs);
       const starts = [...new Set([0, Math.max(0, attrs.size - 64 * 1024)])];
-      let chunks;
       try {
-        chunks = await Promise.all(starts.map(async (start) =>
+        const chunks = await Promise.all(starts.map(async (start) =>
           (await readRange(connection, file, start, Math.min(64 * 1024, attrs.size - start))).toString('utf8')));
+        return { entry, attrs, head: claudeCode.scanHeadChunks(chunks) };
       } catch (error) {
-        if (missing(error)) continue;
+        if (missing(error)) return null;
         throw error;
       }
-      const head = claudeCode.scanHeadChunks(chunks);
+    });
+    for (const found of scanned) {
+      if (!found) continue;
+      const { entry, attrs, head } = found;
       out.push({
         id: `${project.filename}/${entry.filename}`, provider: 'claude-code', project: project.filename,
         label: head.title ?? entry.filename.replace(/\.jsonl$/, '').slice(0, 8), cwd: head.cwd,

@@ -21,9 +21,10 @@ const projectId = (pwd) => {
 function readAll(pwd, origin) {
   try {
     const project = projectId(pwd);
-    return fs.readdirSync(dirFor(pwd, origin))
+    const dir = dirFor(pwd, origin); // hashing the origin once, not once per file
+    return fs.readdirSync(dir)
       .filter((f) => f.endsWith('.json'))
-      .map((f) => { try { return JSON.parse(fs.readFileSync(path.join(dirFor(pwd, origin), f), 'utf8')); } catch { return null; } })
+      .map((f) => { try { return JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8')); } catch { return null; } })
       .filter((review) => review && (origin ? review.origin === origin : !review.origin && projectId(review.project) === project))
       .sort((a, b) => b.created - a.created);
   } catch { return []; }
@@ -54,8 +55,8 @@ export function createReview(pwd, session, origin) {
   }, origin);
 }
 
-function mutate(pwd, id, fn, origin) {
-  const review = readAll(pwd, origin).find((r) => r.id === id);
+function mutate(pwd, id, fn, origin, from) {
+  const review = (from ?? readAll(pwd, origin)).find((r) => r.id === id);
   if (!review) return null;
   fn(review);
   return save(pwd, review, origin);
@@ -67,25 +68,28 @@ export function closeReview(pwd, id, origin) {
 
 export function addComment(pwd, id, comment, origin) {
   return mutate(pwd, id, (r) => {
+    // the caller supplies the anchor and body; identity, authorship and
+    // thread state are the server's to set, so they go LAST
     r.comments.push({
+      ...comment,
       id: crypto.randomBytes(6).toString('hex'),
       author: 'human',
       ts: Date.now(),
       state: 'open', // open -> addressed (agent) -> resolved (human)
       replies: [],
-      ...comment,
     });
   }, origin);
 }
 
 export function addReply(pwd, commentId, body, author, addressed, origin) {
-  const review = readAll(pwd, origin).find((r) => r.comments.some((c) => c.id === commentId));
+  const all = readAll(pwd, origin);
+  const review = all.find((r) => r.comments.some((c) => c.id === commentId));
   if (!review) return null;
   return mutate(pwd, review.id, (r) => {
     const c = r.comments.find((x) => x.id === commentId);
     c.replies.push({ author, body, ts: Date.now() });
     if (addressed && c.state === 'open') c.state = 'addressed';
-  }, origin);
+  }, origin, all);
 }
 
 // the review checklist: a base ref plus per-path check signatures. Setting

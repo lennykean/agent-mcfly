@@ -193,6 +193,7 @@ test('recovers McFly table semantics from MCP results', () => {
   };
   assert.deepEqual(resultRender({ name: 'mcp__mcfly__run_table', render: call }, `MCFLY_DATA_V1\n${JSON.stringify(envelope)}`), {
     verb: 'data', command: 'printf ...', cwd: '/repo', exit_code: 0, stdout: envelope.stdout, stderr: '',
+    format: 'tsv', // envelopes written before formats existed are TSV
     table: envelope.data,
   });
   // structuredContent results reach transcripts as bare envelope JSON with NO
@@ -200,6 +201,13 @@ test('recovers McFly table semantics from MCP results', () => {
   const bare = resultRender({ name: 'mcp__mcfly__run_table', render: call }, JSON.stringify(envelope));
   assert.equal(bare.verb, 'data');
   assert.deepEqual(bare.table, envelope.data);
+
+  // a declared format is parsed as that format, not guessed
+  const csv = resultRender({ name: 'mcp__mcfly__run_table', render: call }, JSON.stringify({
+    ...envelope, format: 'csv', stdout: 'name,count\n"alpha, jr",2\n', data: undefined,
+  }));
+  assert.equal(csv.format, 'csv');
+  assert.deepEqual(csv.table, { columns: ['name', 'count'], rows: [['alpha, jr', '2']] });
 });
 
 test('codex teams: sub-agent threads stay out of the session list and link to their spawn', () => {
