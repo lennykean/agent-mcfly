@@ -580,6 +580,30 @@ function configure(command, args) {
   return added.status === 0 ? `${command}: configured` : `${command}: unavailable or configuration failed`;
 }
 
+// Cursor Agent has no `mcp add`: it reads ~/.cursor/mcp.json. Merge into it
+// rather than writing the manifest over the user's other servers.
+//
+// A file that exists but will not parse is NOT treated as absent: rewriting it
+// would silently delete every other MCP server the user configured. Report the
+// failure and touch nothing.
+const CURSOR_FAILED = 'cursor-agent: unavailable or configuration failed';
+
+function configureCursorFile() {
+  const file = path.join(os.homedir(), '.cursor', 'mcp.json');
+  if (!fs.existsSync(path.dirname(file))) return CURSOR_FAILED;
+  let config = {};
+  if (fs.existsSync(file)) {
+    try { config = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return CURSOR_FAILED; }
+    if (!config || typeof config !== 'object' || Array.isArray(config)) return CURSOR_FAILED;
+  }
+  const servers = config.mcpServers && typeof config.mcpServers === 'object' ? config.mcpServers : {};
+  if (servers.mcfly) return 'cursor-agent: already configured';
+  try {
+    fs.writeFileSync(file, `${JSON.stringify({ ...config, mcpServers: { ...servers, mcfly: START } }, null, 2)}\n`);
+    return 'cursor-agent: configured';
+  } catch { return CURSOR_FAILED; }
+}
+
 export function configureMcp() {
   const dir = path.join(os.homedir(), '.mcfly');
   fs.mkdirSync(dir, { recursive: true });
@@ -588,6 +612,7 @@ export function configureMcp() {
   const adapters = [
     configure('codex', ['mcp', 'add', 'mcfly', '--', START.command, ...START.args]),
     configure('claude', ['mcp', 'add', '--transport', 'stdio', '--scope', 'user', 'mcfly', '--', START.command, ...START.args]),
+    configureCursorFile(),
   ];
   return { file, manifest: MANIFEST, adapters };
 }

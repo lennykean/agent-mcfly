@@ -58,6 +58,13 @@ export function useReplay(active = true, connection?: string, matchers: DataMatc
         const data: TailResponse = await res.json();
         // session switched while this fetch was in flight — discard
         if (timelines.current.get(key) !== tl) return;
+        // the transcript was rewritten under us, not appended to: the steps we
+        // hold describe a session that no longer exists, so drop them and take
+        // the rebuild the server just sent
+        if (data.reset) {
+          tl.steps.length = 0;
+          tl.pending.clear();
+        }
         tl.mtime = data.mtime;
         tl.cursor = data.cursor;
         if (data.messages.length) {

@@ -133,9 +133,14 @@ export interface Review {
 
 export interface TailResponse {
   messages: Message[];
+  // opaque resume token: a byte offset for the file-backed providers, a
+  // message index for cursor, whose store has no append-only file
   cursor: number;
   mtime: number;
   size: number;
+  // the session was rewritten behind us (cursor compacts and rewinds), so the
+  // steps already held no longer describe it — rebuild instead of appending
+  reset?: boolean;
 }
 
 // ---- timeline (client-side model) ----
@@ -162,7 +167,7 @@ export interface Timeline {
   sessionId: string;
   provider: string;
   steps: Step[];
-  cursor: number; // server byte cursor
+  cursor: number; // resume token from the last tail
   mtime: number;
   pending: Map<string, number>; // requestId -> step index awaiting result
 }

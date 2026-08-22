@@ -291,13 +291,13 @@ export function Settings({
               </select>
               <span className="setHint">what a new terminal starts as</span>
             </div>
-            {['claude', 'codex'].map((tool) => (
+            {['claude', 'codex', 'cursor-agent'].map((tool) => (
               <TextRow
                 key={tool}
                 label={`${tool} flags`}
                 hint={`appended when mcfly launches ${tool}`}
                 value={settings.flags?.[tool] ?? ''}
-                placeholder={tool === 'claude' ? '--model opus' : '--search'}
+                placeholder={tool === 'claude' ? '--model opus' : tool === 'codex' ? '--search' : '-m gpt-5.6'}
                 onSave={(v) => onSave({ flags: { ...(settings.flags ?? {}), [tool]: v } })}
               />
             ))}

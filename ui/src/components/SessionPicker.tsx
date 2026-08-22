@@ -4,7 +4,7 @@ import type { SessionMeta, WorkspaceSource } from '../types';
 
 interface ProviderInfo { provider: string; count: number }
 
-const PROVIDER_LABELS: Record<string, string> = { 'claude-code': 'claude', codex: 'codex' };
+const PROVIDER_LABELS: Record<string, string> = { 'claude-code': 'claude', codex: 'codex', cursor: 'cursor' };
 
 // Open-session flow: choose a folder -> confirm session history -> agent type
 // -> type-ahead over that project's sessions. Opening only the project is a

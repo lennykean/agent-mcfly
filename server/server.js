@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import * as claudeCode from './loaders/claude-code.js';
 import * as codex from './loaders/codex.js';
+import * as cursor from './loaders/cursor.js';
 import { alive, attachPty, detectTools, hasEditor, openInEditor, killAllPtys, killPty, listPtys, reapOrphans, setPtySession, TOKEN } from './pty.js';
 import { connectSsh, disconnectAllSsh, disconnectSsh, getSshConnection, listSshConnections } from './ssh.js';
 import * as review from './review.js';
@@ -16,7 +17,7 @@ import * as matchers from './matchers.js';
 import * as git from './git.js';
 import * as remoteData from './remote-data.js';
 
-const PROVIDERS = { 'claude-code': claudeCode, codex };
+const PROVIDERS = { 'claude-code': claudeCode, codex, cursor };
 const PORT = process.env.PORT || 7777;
 const DIST = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'ui', 'dist');
 const MIME = {

@@ -1,9 +1,41 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import { execFileSync } from 'node:child_process';
+import { createRequire } from 'node:module';
 import * as git from './git.js';
+import * as cursor from './loaders/cursor.js';
 import { fsList, fsMkdir, fsRead, gitIo, isDirectory, listProviders, listSessions, pasteImage, tailSession } from './remote-data.js';
+
+const sqlite = (() => {
+  try { return createRequire(import.meta.url)('node:sqlite'); } catch { return null; }
+})();
+
+// a cursor chat store, as raw bytes to hand to the fake SFTP server
+function cursorStoreBytes(messages) {
+  const file = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'mcfly-remote-cursor-')), 'store.db');
+  const db = new sqlite.DatabaseSync(file);
+  db.exec('create table blobs (id TEXT PRIMARY KEY, data BLOB)');
+  db.exec('create table meta (key TEXT PRIMARY KEY, value TEXT)');
+  const insert = db.prepare('insert or replace into blobs (id, data) values (?, ?)');
+  const put = (buf) => {
+    const id = crypto.createHash('sha256').update(buf).digest();
+    insert.run(id.toString('hex'), buf);
+    return id;
+  };
+  const ids = messages.map((m) => put(Buffer.from(JSON.stringify(m), 'utf8')));
+  const root = put(Buffer.concat(ids.map((id) => Buffer.concat([Buffer.from([0x0a, 0x20]), id]))));
+  db.prepare('insert into meta (key, value) values (?, ?)').run('0',
+    Buffer.from(JSON.stringify({ latestRootBlobId: root.toString('hex') }), 'utf8').toString('hex'));
+  db.close();
+  const bytes = fs.readFileSync(file);
+  fs.rmSync(path.dirname(file), { recursive: true, force: true });
+  return bytes;
+}
 
 class FakeSftp {
   constructor(files = {}) {
@@ -192,6 +224,7 @@ test('discovers and incrementally parses remote Codex and Claude sessions locall
   assert.deepEqual(await listProviders(connection, '/repo'), [
     { provider: 'claude-code', count: 1 },
     { provider: 'codex', count: 1 },
+    { provider: 'cursor', count: 0 },
   ]);
   const codexSessions = await listSessions(connection, 'codex', '/repo');
   assert.equal(codexSessions[0].label, 'Named remote');
@@ -208,11 +241,49 @@ test('discovers and incrementally parses remote Codex and Claude sessions locall
   assert.deepEqual(claude.messages.map((message) => message.role), ['user', 'assistant']);
 });
 
+// Cursor keeps a chat in SQLite, which SFTP cannot seek into: the store is
+// mirrored locally and read by the same loader the local case uses.
+test('mirrors a remote Cursor store and reads it with the local loader', { skip: !sqlite && 'needs node 22.5+' }, async () => {
+  const { connection, sftp } = fixture();
+  const hash = cursor.workspaceHash('/repo');
+  const dir = `/home/u/.cursor/chats/${hash}/chat-1`;
+  sftp.put(`${dir}/meta.json`, JSON.stringify({ schemaVersion: 1, createdAtMs: 1, updatedAtMs: 5, hasConversation: true, cwd: '/repo', title: 'Remote Cursor' }));
+  sftp.put(`${dir}/store.db`, cursorStoreBytes([
+    { role: 'user', content: [{ type: 'text', text: '<user_query>remote work</user_query>' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'on it' }] },
+  ]));
+  // a subagent chat is a sibling on disk and must not reach the picker
+  sftp.put(`/home/u/.cursor/chats/${hash}/chat-2/meta.json`, JSON.stringify({ schemaVersion: 1, createdAtMs: 1, updatedAtMs: 6, hasConversation: true, isSubagent: true }));
+  sftp.put(`/home/u/.cursor/chats/${hash}/chat-2/store.db`, cursorStoreBytes([]));
+
+  const sessions = await listSessions(connection, 'cursor', '/repo');
+  assert.deepEqual(sessions.map((s) => [s.id, s.label, s.updated_at]), [[`${hash}/chat-1`, 'Remote Cursor', 5]]);
+  assert.deepEqual(await listProviders(connection, '/repo'), [
+    { provider: 'claude-code', count: 1 },
+    { provider: 'codex', count: 1 },
+    { provider: 'cursor', count: 1 },
+  ]);
+
+  const tail = await tailSession(connection, 'cursor', sessions[0].id, 0);
+  assert.equal(tail.size, 2);
+  assert.deepEqual(tail.messages.map((m) => m.content[0].text), ['remote work', 'on it']);
+  // the mirror refreshes when the remote store changes, not on every poll
+  sftp.put(`${dir}/store.db`, cursorStoreBytes([
+    { role: 'user', content: [{ type: 'text', text: '<user_query>remote work</user_query>' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'on it' }] },
+    { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+  ]));
+  sftp.entries.get(`${dir}/store.db`).mtime = 9;
+  const more = await tailSession(connection, 'cursor', sessions[0].id, tail.cursor);
+  assert.deepEqual(more.messages.map((m) => m.content[0].text), ['done']);
+});
+
 test('discovers and tails Codex through a validated sudo wrapper', async () => {
   const { connection, commands, stateDir, id, transcript } = sudoCodexFixture(undefined, 70 * 1024);
   assert.deepEqual(await listProviders(connection, '/repo'), [
     { provider: 'claude-code', count: 0 },
     { provider: 'codex', count: 1 },
+    { provider: 'cursor', count: 0 },
   ]);
   const sessions = await listSessions(connection, 'codex', '/repo');
   assert.equal(sessions[0].label, 'Effective remote');
@@ -251,6 +322,7 @@ test('skips remote session files that disappear after directory listing', async 
   assert.deepEqual(await listProviders(connection, '/repo'), [
     { provider: 'claude-code', count: 1 },
     { provider: 'codex', count: 1 },
+    { provider: 'cursor', count: 0 },
   ]);
 });
 

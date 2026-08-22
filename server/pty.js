@@ -23,7 +23,7 @@ export const TOKEN = crypto.randomBytes(16).toString('hex');
 const WIN = process.platform === 'win32';
 // the agent CLIs McFly knows how to launch; ssh.js probes remote hosts for the
 // same list, so it lives in one place
-export const AGENT_TOOLS = ['claude', 'codex', 'agy', 'pi', 'opencode', 'aider', 'gemini', 'goose'];
+export const AGENT_TOOLS = ['claude', 'codex', 'cursor-agent', 'agy', 'pi', 'opencode', 'aider', 'gemini', 'goose'];
 const BUFFER_CAP = 256 * 1024;
 
 function which(name) {

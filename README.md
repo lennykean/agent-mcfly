@@ -4,7 +4,7 @@
 [![Publish to npm](https://github.com/lennykean/agent-mcfly/actions/workflows/publish.yml/badge.svg)](https://github.com/lennykean/agent-mcfly/actions/workflows/publish.yml)
 [![npm](https://img.shields.io/npm/v/agent-mcfly)](https://www.npmjs.com/package/agent-mcfly)
 
-Agent McFly is a browser workbench for Codex and Claude Code sessions. It replays a completed session step by step. It also follows a live session while the agent works. You can start an agent in a McFly terminal, watch its session, and speak to the agent in one window. The chat, the tool calls, the files, and the terminal always show the same step.
+Agent McFly is a browser workbench for Codex, Claude Code, and Cursor Agent sessions. It replays a completed session step by step. It also follows a live session while the agent works. You can start an agent in a McFly terminal, watch its session, and speak to the agent in one window. The chat, the tool calls, the files, and the terminal always show the same step.
 
 ![The Agent McFly workbench during a replay](docs/hero.png)
 
@@ -21,6 +21,20 @@ The server starts on port 7777 and opens the browser.
 | `-p`, `--port <port>` | Set the server port. |
 | `--no-open` | Do not open the browser. |
 | `-v`, `--version` | Show the version. |
+
+## Agents
+
+McFly reads the sessions that each agent already writes. It installs nothing in the agent, and it never writes to a session.
+
+| Agent | Command | Sessions |
+|---|---|---|
+| Claude Code | `claude` | `~/.claude/projects` |
+| Codex | `codex` | `~/.codex/sessions` |
+| Cursor Agent | `cursor-agent` | `~/.cursor/chats` |
+
+McFly finds the sessions of the folder that you open. It lists the agents that have a session for that folder, thus an agent shows only where you used it.
+
+Cursor Agent keeps a session in a SQLite database. To read one, McFly needs Node 22.5 or later. On an older Node, the other two agents still work, and Cursor Agent shows no sessions.
 
 ## The workbench
 
@@ -46,7 +60,7 @@ Each root has a color when two or more roots are open. The color marks the rows 
 
 Each project row has two buttons. The terminal button starts a terminal in that folder. The VS Code button opens that folder in VS Code. The VS Code button needs the `code` command on the PATH, and it shows only for a local folder.
 
-**Sub-agents.** A sub-agent is an agent that another agent starts. The AGENTS list shows a sub-agent below its parent. To watch the session of a sub-agent, click it. A sub-agent leaves the list when the playhead moves past its last action. It comes back when the playhead moves into its life again. Codex teams and Claude Code sub-agents work the same way.
+**Sub-agents.** A sub-agent is an agent that another agent starts. The AGENTS list shows a sub-agent below its parent. To watch the session of a sub-agent, click it. A sub-agent leaves the list when the playhead moves past its last action. It comes back when the playhead moves into its life again. Codex teams, Claude Code sub-agents, and Cursor Agent subagents work the same way.
 
 **Remote agents.** The radio-tower button in the AGENTS header connects to a host with SSH. McFly then reads the sessions of that host and runs terminals on it. A remote root works like a local root. Its address stays in the URL.
 
@@ -54,7 +68,7 @@ Each project row has two buttons. The terminal button starts a terminal in that 
 
 The LIVE TERMINAL pane keeps more than one terminal as tabs. To start a terminal, or to attach a terminal that already runs, click the **+** tab. When more than one project is open, McFly asks for the project first.
 
-**Follow.** A terminal that runs an agent can tie to the session of that agent. Click **follow** on the terminal. McFly ties the terminal to the session, and opens that session as a root. A tied terminal shows a green dot and the name of the agent.
+**Follow.** A terminal that runs an agent can tie to the session of that agent. When McFly starts the agent, it makes the tie on its own. When you start the agent yourself, click **follow** on the terminal. McFly ties the terminal to the session, and opens that session as a root. A tied terminal shows a green dot and the name of the agent.
 
 **Sync.** The link button in the title bar syncs the terminals with the agents. When sync is on, McFly shows the terminal of the agent that you select. It also changes the workbench when you select a tied terminal. The terminals keep their order at all times.
 
@@ -92,7 +106,7 @@ To open the settings, click the gear icon. The SETTINGS page holds the modes and
 | auto tour guide | Opens a session with the tour guide on. |
 | auto-sync terminals | Starts with the terminals and the agents synced. |
 | default terminal | Sets what a new terminal starts as. A blank shell is the default. |
-| claude flags, codex flags | Adds flags to the command when McFly starts that agent. |
+| claude flags, codex flags, cursor-agent flags | Adds flags to the command when McFly starts that agent. |
 
 ## Agent tools (MCP)
 
@@ -102,7 +116,7 @@ The McFly MCP gives your agent tools that write to the workbench. To configure i
 mcfly mcp config
 ```
 
-This command writes `~/.mcfly/mcp.json`. When Codex or Claude Code is installed, the command also adds the MCP to it.
+This command writes `~/.mcfly/mcp.json`. When Codex or Claude Code is installed, the command adds the MCP to it. For Cursor Agent, the command merges the entry into `~/.cursor/mcp.json`.
 
 | Tool | Function |
 |---|---|

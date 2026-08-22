@@ -257,7 +257,7 @@ export default function Workbench({
   const followResolve = useCallback(async (p: { id?: string; title?: string | null; cwd: string }) => {
     const dir = p.cwd || pwd || '';
     const cands: { provider: string; s: SessionMeta }[] = [];
-    for (const provider of ['claude-code', 'codex']) {
+    for (const provider of ['claude-code', 'codex', 'cursor']) {
       try {
         const list: SessionMeta[] = await (
           await fetch(withConnection(`/api/sessions?pwd=${encodeURIComponent(dir)}&provider=${provider}`, source?.connection))
@@ -309,7 +309,7 @@ export default function Workbench({
   // Session detection: a tool started in the live terminal announces itself by
   // writing its transcript; poll this pwd's session list and auto-load the one
   // that appears after launch.
-  const TOOL_PROVIDERS: Record<string, string> = { claude: 'claude-code', codex: 'codex' };
+  const TOOL_PROVIDERS: Record<string, string> = { claude: 'claude-code', codex: 'codex', 'cursor-agent': 'cursor' };
   // one hunt per launch, each remembering which PTY it came from — a second
   // terminal starting mid-hunt must not steal or clobber the first's identity
   const [hunts, setHunts] = useState<{ key: number; provider: string; tool: string; since: number; dir?: string; ptyId?: string; adopt?: boolean }[]>([]);

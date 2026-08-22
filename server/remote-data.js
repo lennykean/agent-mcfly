@@ -1,10 +1,13 @@
 // Remote read-only workspace/session data over one existing SSH connection.
 // Nothing is installed or run persistently on the remote host: SFTP supplies
 // bytes and SSH exec supplies the same git output parsed by git.js.
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import * as claudeCode from './loaders/claude-code.js';
 import * as codex from './loaders/codex.js';
+import * as cursor from './loaders/cursor.js';
 import { execSsh } from './ssh.js';
 import { MAX_CHUNK } from './loaders/transcript.js';
 
@@ -343,26 +346,119 @@ async function listClaude(connection, cwd) {
   return out.sort((a, b) => b.updated_at - a.updated_at);
 }
 
+// ---- cursor: a SQLite store per chat, so there is nothing to tail over SFTP ----
+//
+// The sidecar (meta.json) is what the picker needs — cwd, last activity, the
+// chat name — and it is a few hundred bytes, so listing never touches the
+// store itself. Only an OPEN session pays for the store, mirrored locally.
+const cursorRoot = (connection) => pathsFor(connection).join(connection.home, '.cursor', 'chats');
+
+async function listCursor(connection, cwd) {
+  const paths = pathsFor(connection);
+  const hash = cursor.workspaceHash(cwd);
+  const dir = paths.join(cursorRoot(connection), hash);
+  const chats = (await safeReadDir(connection, dir)).filter((entry) => isDir(entry.attrs));
+  const found = await mapLimited(chats, HEAD_CONCURRENCY, async (chat) => {
+    const chatDir = paths.join(dir, chat.filename);
+    let meta;
+    // No sidecar, no listing: reading the store to decide would mean
+    // downloading every chat in the workspace on a 4-second poll. Chats old
+    // enough to predate the sidecar stay local-only.
+    try { meta = JSON.parse((await readFile(connection, paths.join(chatDir, 'meta.json'))).toString('utf8')); } catch { return null; }
+    if (!meta || meta.isSubagent || meta.hasConversation === false) return null;
+    let store;
+    try { store = await stat(connection, paths.join(chatDir, 'store.db')); } catch { return null; }
+    return {
+      id: `${hash}/${chat.filename}`,
+      provider: 'cursor',
+      // remote listing stops at the sidecar, so an unnamed chat shows its id
+      // rather than costing a store download for its first user query
+      label: meta.title ?? chat.filename.slice(0, 8),
+      cwd: meta.cwd ?? cwd,
+      updated_at: meta.updatedAtMs > 0 ? meta.updatedAtMs : store.mtimeMs,
+      size: store.size,
+    };
+  });
+  return found.filter(Boolean).sort((a, b) => b.updated_at - a.updated_at);
+}
+
+// The mirror lives in a private temp directory, one subdirectory per
+// (connection, chat). Private because /tmp is world-writable: a shared,
+// name-predictable path is both a symlink target and an EACCES waiting for the
+// second user on the box.
+const mirrorRoot = (() => {
+  let dir;
+  return () => (dir ??= fs.mkdtempSync(path.join(os.tmpdir(), 'mcfly-cursor-')));
+})();
+
+// store.db and its -wal are stamped separately: during a live turn only the
+// -wal grows, so a refresh re-fetches kilobytes rather than the whole store.
+const mirrorStamps = new Map();
+
+async function mirrorFile(connection, remote, local, key) {
+  let attrs = null;
+  try { attrs = await stat(connection, remote); } catch (error) { if (!missing(error)) throw error; }
+  const stamp = attrs ? `${attrs.size}:${attrs.mtimeMs}` : 'gone';
+  // the stamp describes a local file, so it is only good while that file is
+  // there — a temp cleaner must not leave us short-circuiting on nothing
+  if (mirrorStamps.get(key) === stamp && fs.existsSync(local) === !!attrs) return;
+  if (!attrs) fs.rmSync(local, { force: true });
+  else fs.writeFileSync(local, await readFile(connection, remote));
+  mirrorStamps.set(key, stamp);
+}
+
+// Two tabs on one session, or a parent and its child timeline, otherwise both
+// download the whole store and can interleave a stale store.db over a fresh
+// one. Share the in-flight mirror the way sftpFor shares its connection.
+const mirroring = new Map();
+
+function mirrorCursorStore(connection, id) {
+  const localDir = path.join(mirrorRoot(), createHash('sha1').update(`${connection.id}\0${id}`).digest('hex'));
+  const pending = mirroring.get(localDir);
+  if (pending) return pending;
+  const run = (async () => {
+    const paths = pathsFor(connection);
+    const remoteDir = contained(connection, cursorRoot(connection), String(id).replace(/[\\/]/g, paths.sep));
+    fs.mkdirSync(localDir, { recursive: true });
+    // store.db first: a newer -wal over an older db is the combination SQLite
+    // cannot reconcile
+    for (const name of ['store.db', 'store.db-wal', 'meta.json']) {
+      await mirrorFile(connection, paths.join(remoteDir, name), path.join(localDir, name), `${localDir}\0${name}`);
+    }
+    // a stale index left over from the previous mirror would describe the old
+    // -wal; SQLite rebuilds it on open
+    fs.rmSync(path.join(localDir, 'store.db-shm'), { force: true });
+    return localDir;
+  })().finally(() => mirroring.delete(localDir));
+  mirroring.set(localDir, run);
+  return run;
+}
+
 export function listSessions(connection, provider, cwd) {
   if (!connection.home) throw new Error('remote home unavailable');
   if (provider === 'codex') return listCodex(connection, cwd);
   if (provider === 'claude-code') return listClaude(connection, cwd);
+  if (provider === 'cursor') return listCursor(connection, cwd);
   throw new Error('unknown provider');
 }
 
 export async function listProviders(connection, cwd) {
   if (!connection.home) throw new Error('remote home unavailable');
-  const [claude, codexSessions] = await Promise.all([
-    listClaude(connection, cwd), listCodex(connection, cwd),
+  const [claude, codexSessions, cursorSessions] = await Promise.all([
+    listClaude(connection, cwd), listCodex(connection, cwd), listCursor(connection, cwd),
   ]);
   return [
     { provider: 'claude-code', count: claude.length },
     { provider: 'codex', count: codexSessions.length },
+    { provider: 'cursor', count: cursorSessions.length },
   ];
 }
 
-export async function tailSession(connection, provider, id, cursor = 0) {
+export async function tailSession(connection, provider, id, cursorAt = 0) {
   const paths = pathsFor(connection);
+  if (provider === 'cursor') {
+    return cursor.tailStore(await mirrorCursorStore(connection, id), cursorAt, id);
+  }
   const codexData = provider === 'codex' ? await codexIo(connection) : null;
   const providerRoot = provider === 'codex'
     ? paths.join(codexData.stateDir, 'sessions')
@@ -372,20 +468,20 @@ export async function tailSession(connection, provider, id, cursor = 0) {
   const reader = codexData?.readRange ?? ((target, start, length) => readRange(connection, target, start, length));
   const attrs = codexData ? await codexData.stat(file) : await stat(connection, file);
   const fileKey = `ssh:${connection.id}:${id}`;
-  if (provider === 'codex' && cursor > 0) {
+  if (provider === 'codex' && cursorAt > 0) {
     let through = Math.min(codexThrough.get(fileKey) ?? 0, attrs.size);
-    if (through >= cursor) through = 0;
-    while (through < cursor) {
-      const prefix = await readTailChunk(reader, file, through, cursor);
-      const primed = codex.parseTailChunk(fileKey, through, { ...attrs, size: cursor }, prefix);
+    if (through >= cursorAt) through = 0;
+    while (through < cursorAt) {
+      const prefix = await readTailChunk(reader, file, through, cursorAt);
+      const primed = codex.parseTailChunk(fileKey, through, { ...attrs, size: cursorAt }, prefix);
       if (primed.cursor <= through) break;
       through = primed.cursor;
     }
     codexThrough.set(fileKey, through);
   }
-  const buffer = await readTailChunk(reader, file, cursor, attrs.size);
-  if (provider !== 'codex') return claudeCode.parseTailChunk(id, cursor, attrs, buffer);
-  const result = codex.parseTailChunk(fileKey, cursor, attrs, buffer);
+  const buffer = await readTailChunk(reader, file, cursorAt, attrs.size);
+  if (provider !== 'codex') return claudeCode.parseTailChunk(id, cursorAt, attrs, buffer);
+  const result = codex.parseTailChunk(fileKey, cursorAt, attrs, buffer);
   codexThrough.set(fileKey, Math.max(codexThrough.get(fileKey) ?? 0, result.cursor));
   return result;
 }

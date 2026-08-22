@@ -62,3 +62,14 @@ export function memoByStamp() {
 }
 
 export const truncate = (s, n) => (s && s.length > n ? s.slice(0, n - 1) + '…' : (s ?? ''));
+
+// "…/Releases/ReleaseService.cs" -> "Releases/ReleaseService.cs": enough of a
+// path to recognise, short enough for a tool row.
+export const shortPath = (p) => (p ? String(p).split(/[\\/]/).slice(-2).join('/') : '');
+
+// The lines a set of unified-diff hunks lands on in the POST-edit file, so the
+// editor can scroll to the change.
+export function patchRegion(hunks) {
+  const last = hunks[hunks.length - 1];
+  return { start: hunks[0].newStart, end: last.newStart + Math.max(last.newLines, 1) - 1 };
+}

@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { highlightCall, highlightResult, isHighlightTool, isTableTool, isWaypointRemoveTool, isWaypointTool, tableCall, tableResult, waypointCall, waypointRemoveCall, waypointRemoveResult, waypointResult } from '../mcfly-data.js';
-import { idsFor, memoByStamp, readTail, truncate } from './transcript.js';
+import { idsFor, memoByStamp, patchRegion, readTail, shortPath, truncate } from './transcript.js';
 
 const ROOT = path.resolve(os.homedir(), '.claude', 'projects');
 
@@ -516,11 +516,6 @@ function applyPatch(original, hunks) {
   return out.join('\n');
 }
 
-function patchRegion(hunks) {
-  const last = hunks[hunks.length - 1];
-  return { start: hunks[0].newStart, end: last.newStart + Math.max(last.newLines, 1) - 1 };
-}
-
 function summarizeParams(tool, input) {
   for (const k of ['pattern', 'query', 'path', 'file_path', 'url', 'description', 'prompt']) {
     if (typeof input?.[k] === 'string') return `${truncate(input[k], 60)}`;
@@ -528,4 +523,3 @@ function summarizeParams(tool, input) {
   return tool;
 }
 
-const shortPath = (p) => (p ? String(p).split(/[\\/]/).slice(-2).join('/') : '');
