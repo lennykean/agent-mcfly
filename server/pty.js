@@ -168,6 +168,7 @@ const peerView = (s) => ({
   terminal_id: s.id,
   tool: s.tool,
   cwd: s.cwd,
+  workspace: s.session?.pwd ?? null,
   title: s.title || null,
   session_id: s.session?.id ?? null,
   provider: s.session?.provider ?? null,

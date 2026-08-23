@@ -3,7 +3,7 @@ import { actionOf } from '../lib/keys';
 import type { Step } from '../types';
 
 const ICONS: Record<string, string> = {
-  read_file: 'file', patch_file: 'edit', write_file: 'new-file', exec: 'terminal', data: 'table', spawn_agent: 'hubot', other: 'gear',
+  read_file: 'file', patch_file: 'edit', write_file: 'new-file', exec: 'terminal', data: 'table', spawn_agent: 'hubot', peer_message: 'comment-discussion', other: 'gear',
 };
 
 // History rows only — params/results live in the bottom TOOL CALL tab.

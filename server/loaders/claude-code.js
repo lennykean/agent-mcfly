@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { highlightCall, highlightResult, isHighlightTool, isTableTool, isWaypointRemoveTool, isWaypointTool, tableCall, tableResult, waypointCall, waypointRemoveCall, waypointRemoveResult, waypointResult } from '../mcfly-data.js';
+import { highlightCall, highlightResult, isHighlightTool, isPeerMessageTool, isTableTool, isWaypointRemoveTool, isWaypointTool, peerMessageCall, peerMessageResult, tableCall, tableResult, waypointCall, waypointRemoveCall, waypointRemoveResult, waypointResult } from '../mcfly-data.js';
 import { idsFor, memoByStamp, patchRegion, readTail, shortPath, truncate } from './transcript.js';
 
 const ROOT = path.resolve(os.homedir(), '.claude', 'projects');
@@ -371,6 +371,7 @@ function scanSidecars(dir, sessionDirId) {
 }
 
 function callRender(tool, input, ctx, id) {
+  if (isPeerMessageTool(tool)) return peerMessageCall(input);
   if (isTableTool(tool)) return tableCall(input);
   if (isHighlightTool(tool)) return highlightCall(input);
   if (isWaypointRemoveTool(tool)) return waypointRemoveCall(input);
@@ -413,6 +414,13 @@ function callRender(tool, input, ctx, id) {
 }
 
 function resultRender(tool, r, block, ctx) {
+  if (isPeerMessageTool(tool)) {
+    const peer = peerMessageResult(r) ?? peerMessageResult(flatten(block.content));
+    if (peer) return peer;
+    return block.is_error
+      ? { verb: 'exec', stdout: '', stderr: flatten(block.content) }
+      : { verb: 'exec', stdout: flatten(block.content), stderr: '' };
+  }
   if (isTableTool(tool)) {
     const data = tableResult(r) ?? tableResult(flatten(block.content));
     if (data) return data;

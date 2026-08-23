@@ -14,7 +14,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
-import { highlightCall, highlightResult, isHighlightTool, isTableTool, isWaypointRemoveTool, isWaypointTool, tableCall, tableResult, waypointCall, waypointRemoveCall, waypointRemoveResult, waypointResult } from '../mcfly-data.js';
+import { highlightCall, highlightResult, isHighlightTool, isPeerMessageTool, isTableTool, isWaypointRemoveTool, isWaypointTool, peerMessageCall, peerMessageResult, tableCall, tableResult, waypointCall, waypointRemoveCall, waypointRemoveResult, waypointResult } from '../mcfly-data.js';
 import { parseUnified } from '../git.js';
 import { idsFor, MAX_CHUNK, memoByStamp, patchRegion, shortPath, truncate } from './transcript.js';
 
@@ -458,6 +458,7 @@ function toolOf(block) {
 // ---- render verbs: the provider-neutral contract the UI consumes ----
 
 function callRender(tool, input, ctx, toolCallId) {
+  if (isPeerMessageTool(tool)) return peerMessageCall(input);
   if (isTableTool(tool)) return tableCall(input);
   if (isHighlightTool(tool)) return highlightCall(input);
   if (isWaypointRemoveTool(tool)) return waypointRemoveCall(input);
@@ -520,6 +521,7 @@ function resultRender(tool, input, block, envelope, ctx) {
   // in the result or tuck it under the tool-call output
   const mine = (read) => read(block.result) ?? read(text) ?? read(ok)
     ?? (failed ? { verb: 'exec', stdout: '', stderr: text } : { verb: 'exec', stdout: text, stderr: '' });
+  if (isPeerMessageTool(tool)) return mine(peerMessageResult);
   if (isTableTool(tool)) return mine(tableResult);
   if (isHighlightTool(tool)) return mine(highlightResult);
   if (isWaypointRemoveTool(tool)) return mine(waypointRemoveResult);

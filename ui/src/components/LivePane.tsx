@@ -20,6 +20,7 @@ export interface LivePty {
   attached: boolean;
   session: { provider: string; id: string; pwd: string; label?: string } | null;
   screen?: { text: string; cols: number; rows: number } | null;
+  relayEnabled: boolean;
   source?: WorkspaceSource;
 }
 
@@ -83,6 +84,22 @@ function PtySession({ tool, token, cwd, source, reportScope, platform, attachId,
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Xterm | null>(null);
   const [status, setStatus] = useState<'connecting' | 'up' | 'closed' | 'taken'>('connecting');
+  const [relayEnabled, setRelayEnabled] = useState<boolean | undefined>(undefined);
+  const [relayBusy, setRelayBusy] = useState(false);
+  const [relayError, setRelayError] = useState<string>();
+  const [inputBlocked, setInputBlocked] = useState(false);
+  const relayRef = useRef<boolean | undefined>(undefined);
+  const blockedTimer = useRef<number | undefined>(undefined);
+  const setRelayState = (enabled: boolean | undefined) => {
+    relayRef.current = enabled;
+    setRelayEnabled(enabled);
+    if (!enabled) setInputBlocked(false);
+  };
+  const showInputBlocked = () => {
+    setInputBlocked(true);
+    clearTimeout(blockedTimer.current);
+    blockedTimer.current = window.setTimeout(() => setInputBlocked(false), 2200);
+  };
   // the PTY this session OWNS, learned from the server's control frame: a
   // reconnect (any effect re-run) must re-attach to it, never spawn fresh
   const myPty = useRef<string | undefined>(attachId);
@@ -98,6 +115,7 @@ function PtySession({ tool, token, cwd, source, reportScope, platform, attachId,
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
+    setRelayState(undefined);
     const term = new Xterm({
       fontSize: 14,
       fontFamily: '"Cascadia Mono", Consolas, monospace',
@@ -140,6 +158,7 @@ function PtySession({ tool, token, cwd, source, reportScope, platform, attachId,
       if (!file.type.startsWith('image/')) return;
       e.preventDefault();
       e.stopPropagation();
+      if (relayRef.current !== false) { showInputBlocked(); return; }
       if (tool === 'claude' && !source) {
         const chord = (platform ?? 'win32') === 'win32' ? '\x1bv' : '\x16'; // Alt+V / Ctrl+V
         if (ws?.readyState === 1) ws.send(JSON.stringify({ t: 'i', d: chord }));
@@ -208,6 +227,8 @@ function PtySession({ tool, token, cwd, source, reportScope, platform, attachId,
           try {
             const c = JSON.parse(e.data.slice(1));
             if (c.ptyId) { myPty.current = c.ptyId; onPtyIdRef.current(c.ptyId); }
+            if (typeof c.relayEnabled === 'boolean') setRelayState(c.relayEnabled);
+            if (c.inputBlocked) showInputBlocked();
             if (c.exit) setStatus('closed');
             if (c.gone) onExitRef.current();
             if (c.busy || c.taken) setStatus('taken'); // take-back stays possible
@@ -218,7 +239,8 @@ function PtySession({ tool, token, cwd, source, reportScope, platform, attachId,
       };
       sock.onclose = () => setStatus((s) => (s === 'taken' ? s : 'closed'));
       dataSub = term.onData((d) => {
-        if (sock.readyState === 1) sock.send(JSON.stringify({ t: 'i', d }));
+        if (relayRef.current !== false) showInputBlocked();
+        else if (sock.readyState === 1) sock.send(JSON.stringify({ t: 'i', d }));
       });
     }, 150);
 
@@ -244,6 +266,8 @@ function PtySession({ tool, token, cwd, source, reportScope, platform, attachId,
       linkProvider.dispose();
       host.removeEventListener('paste', onPaste, true);
       clearTimeout(selTimer);
+      clearTimeout(blockedTimer.current);
+      relayRef.current = undefined;
       selSub.dispose();
       term.dispose();
       termRef.current = null;
@@ -261,8 +285,43 @@ function PtySession({ tool, token, cwd, source, reportScope, platform, attachId,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible]);
 
+  const toggleRelay = async (enabled: boolean) => {
+    const id = myPty.current;
+    if (!id || relayBusy || relayRef.current === undefined) return;
+    setRelayBusy(true);
+    setRelayError(undefined);
+    try {
+      const response = await fetch(withConnection('/api/pty-relay', source?.connection), {
+        method: 'POST', body: JSON.stringify({ id, enabled }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error ?? `Request failed (${response.status})`);
+      setRelayState(data.enabled === true);
+    } catch (error) {
+      setRelayError(error instanceof Error ? error.message : 'relay update failed');
+    } finally {
+      setRelayBusy(false);
+    }
+  };
+
   return (
     <div className="ptySession">
+      <div className="ptyRelayBar">
+        <label title="Allow other agents to message this terminal; keyboard input is locked while enabled">
+          <input
+            type="checkbox"
+            checked={relayEnabled === true}
+            disabled={relayEnabled === undefined || status !== 'up' || !myPty.current || relayBusy}
+            onChange={(e) => void toggleRelay(e.currentTarget.checked)}
+          />
+          Relay enabled
+        </label>
+        <span role="status" aria-live="polite" className={relayError ? 'ptyRelayError' : undefined}>
+          {relayError ?? (inputBlocked
+            ? relayEnabled === undefined ? 'Input locked until relay state loads' : 'Input blocked while relay is enabled'
+            : relayEnabled === undefined ? 'Checking relay state…' : relayEnabled ? 'Keyboard input locked' : '')}
+        </span>
+      </div>
       <div className="ptyHost" ref={hostRef} />
       {status === 'closed' && (
         <div className="ptyClosed">

@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import http from 'node:http';
 import test from 'node:test';
 import WebSocket from 'ws';
-import { attachPty, killAllPtys, killPty, listPeers, listPtys, sendPeerMessage, setPtyRelay, TOKEN } from './pty.js';
+import { attachPty, killAllPtys, killPty, listPeers, listPtys, sendPeerMessage, setPtyRelay, setPtySession, TOKEN } from './pty.js';
 
 test('kills hosted terminals during shutdown', async () => {
   const server = http.createServer();
@@ -98,8 +98,13 @@ test('hosts a remote terminal on an SSH PTY channel', async (t) => {
   assert.deepEqual(channel.writes, ['pwd\r']);
   assert.deepEqual(channel.windows, [[40, 120, 0, 0]]);
 
+  assert.equal(setPtySession(control.ptyId, {
+    provider: 'codex', id: 'session.jsonl', pwd: '/srv/session-worktree',
+  }, 'host-1'), true);
   const peer = listPeers()[0];
   assert.equal(peer.terminal_id, control.ptyId);
+  assert.equal(peer.cwd, "/srv/it's here");
+  assert.equal(peer.workspace, '/srv/session-worktree');
   assert.equal(peer.messageable, false);
   assert.equal(peer.interactive, true);
   await assert.rejects(sendPeerMessage(peer.id, 'not yet'), { code: 'PEER_INTERACTIVE' });

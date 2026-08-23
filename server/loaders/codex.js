@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { StringDecoder } from 'node:string_decoder';
-import { highlightCall, highlightResult, isHighlightTool, isTableTool, isWaypointRemoveTool, isWaypointTool, tableCall, tableResult, waypointCall, waypointRemoveCall, waypointRemoveResult, waypointResult } from '../mcfly-data.js';
+import { highlightCall, highlightResult, isHighlightTool, isPeerMessageTool, isTableTool, isWaypointRemoveTool, isWaypointTool, peerMessageCall, peerMessageResult, tableCall, tableResult, waypointCall, waypointRemoveCall, waypointRemoveResult, waypointResult } from '../mcfly-data.js';
 import { idsFor, MAX_CHUNK, memoByStamp, readTail, truncate } from './transcript.js';
 
 const ROOT = path.join(os.homedir(), '.codex', 'sessions');
@@ -449,6 +449,7 @@ export function callRender(name, input) {
 }
 
 function directRenders(name, input, source = input) {
+  if (isPeerMessageTool(name)) return [peerMessageCall(input)];
   if (isTableTool(name)) return [tableCall(input)];
   if (isHighlightTool(name)) return [highlightCall(input)];
   if (isWaypointRemoveTool(name)) return [waypointRemoveCall(input)];
@@ -549,6 +550,9 @@ export function resultRender(meta, text, output) {
   }
   if (meta.render?.verb === 'data') {
     return tableResult(output) ?? tableResult(text) ?? { verb: 'exec', stdout: execPayload(text), stderr: '' };
+  }
+  if (meta.render?.verb === 'peer_message') {
+    return peerMessageResult(output) ?? peerMessageResult(text) ?? { verb: 'exec', stdout: execPayload(text), stderr: '' };
   }
   if (isHighlightTool(meta.name)) {
     return highlightResult(output) ?? highlightResult(text) ?? { verb: 'exec', stdout: execPayload(text), stderr: '' };

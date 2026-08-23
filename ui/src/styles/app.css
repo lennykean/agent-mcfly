@@ -720,7 +720,12 @@ pre.code.hljs { padding: 0; background: transparent; }
 .pickerTool:hover { background: var(--accent-bg); color: #fff; }
 .pickerHint, .pickerError { color: var(--fg-faint); font-size: 11px; }
 .pickerError { color: var(--red); }
-.ptySession { flex: 1; position: relative; min-height: 0; display: flex; }
+.ptySession { flex: 1; position: relative; min-height: 0; display: flex; flex-direction: column; }
+.ptyRelayBar { min-height: 24px; padding: 2px 7px; display: flex; align-items: center; gap: 10px; border-bottom: 1px solid var(--border); color: var(--fg-dim); font-size: 11px; }
+.ptyRelayBar label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; white-space: nowrap; }
+.ptyRelayBar label:has(input:disabled) { cursor: default; opacity: 0.65; }
+.ptyRelayBar [role="status"] { color: var(--yellow); }
+.ptyRelayBar .ptyRelayError { color: var(--red); }
 .ptyHost { flex: 1; padding: 4px; min-width: 0; }
 .ptyHost .xterm { height: 100%; }
 .ptyClosed { position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; background: rgb(0 0 0 / 60%); color: var(--fg-dim); }

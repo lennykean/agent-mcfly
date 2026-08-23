@@ -210,6 +210,19 @@ test('recovers McFly table semantics from MCP results', () => {
   assert.deepEqual(csv.table, { columns: ['name', 'count'], rows: [['alpha, jr', '2']] });
 });
 
+test('recovers a delivered McFly peer message with linkable session metadata', () => {
+  const call = callRender('mcp__mcfly__send_message', JSON.stringify({ id: 'remote-1:pty-1', message: 'hello' }));
+  assert.deepEqual(call, { verb: 'peer_message', peer_id: 'remote-1:pty-1', title: 'message peer' });
+  const peer = {
+    id: 'remote-1:pty-1', terminal_id: 'pty-1', tool: 'claude', cwd: '/repo', title: 'Reviewer',
+    session_id: 'session.jsonl', provider: 'claude-code', connection: 'remote-1',
+  };
+  const envelope = { schema: 'mcfly.data.v1', kind: 'peer_message', id: peer.id, delivered: true, peer };
+  assert.deepEqual(resultRender({ name: 'mcp__mcfly__send_message', render: call }, JSON.stringify(envelope)), {
+    verb: 'peer_message', status: 'delivered', peer,
+  });
+});
+
 test('codex teams: sub-agent threads stay out of the session list and link to their spawn', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcfly-codex-team-'));
   const root = { session_id: 'root-1', id: 'root-1', cwd: dir, source: 'vscode' };

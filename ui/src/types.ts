@@ -21,7 +21,19 @@ export interface WorkspaceSource {
   port: number;
 }
 
-export type RenderVerb = 'read_file' | 'patch_file' | 'write_file' | 'exec' | 'data' | 'spawn_agent' | 'other';
+export type RenderVerb = 'read_file' | 'patch_file' | 'write_file' | 'exec' | 'data' | 'spawn_agent' | 'peer_message' | 'other';
+
+export interface PeerReference {
+  id: string;
+  terminal_id: string;
+  tool: string;
+  cwd: string;
+  workspace?: string | null;
+  title: string | null;
+  session_id: string | null;
+  provider: string | null;
+  connection?: string;
+}
 
 // A note anchored to a line by its surrounding context (a zero-change hunk):
 // re-locatable in the current file even after the code moves.
@@ -47,6 +59,7 @@ export interface CallRender {
   // meta sidecar, codex's spawn result) — the tree needs no death to show it
   agent_id?: string;
   child_session_id?: string;
+  peer_id?: string;
 }
 
 export interface PatchHunk {
@@ -83,6 +96,7 @@ export interface ResultRender {
   status?: string;
   summary?: string;
   child_session_id?: string;
+  peer?: PeerReference;
 }
 
 export type ContentBlock =

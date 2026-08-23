@@ -166,6 +166,23 @@ test('converts a cursor chat store into normalized messages and render verbs', {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+test('renders a delivered McFly peer message as a peer link', { skip: !sqlite && 'needs node 22.5+' }, () => {
+  const peer = {
+    id: 'remote-1:pty-1', terminal_id: 'pty-1', tool: 'claude', cwd: '/repo', title: 'Peer',
+    session_id: 'session.jsonl', provider: 'claude-code', connection: 'remote-1',
+  };
+  const envelope = { schema: 'mcfly.data.v1', kind: 'peer_message', id: peer.id, delivered: true, peer };
+  const args = { server: 'mcfly', toolName: 'send_message', arguments: { id: peer.id, message: 'hi' } };
+  const dir = chatDir([
+    { role: 'assistant', content: [call('peer-call', 'CallMcpTool', args)] },
+    { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'peer-call', toolName: 'CallMcpTool', args, result: JSON.stringify(envelope) }] },
+  ]);
+  const messages = tailStore(dir, 0, 'ws/chat-1').messages;
+  assert.equal(messages[0].content[0].extended.render.verb, 'peer_message');
+  assert.deepEqual(messages[1].content[0].extended.render.peer, peer);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
 test('a failed call keeps its message and is flagged, not silently dropped', { skip: !sqlite && 'needs node 22.5+' }, () => {
   const dir = chatDir([
     { role: 'assistant', content: [call('c1', 'Shell', { command: 'nope' })] },

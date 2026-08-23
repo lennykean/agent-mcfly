@@ -1,9 +1,10 @@
 import { memo, useEffect, useRef } from 'react';
 import { actionOf } from '../lib/keys';
 import { useStickyScroll } from '../lib/useStickyScroll';
-import type { Step } from '../types';
+import type { PeerReference, Step } from '../types';
 import { durationFor } from '../lib/timeline';
 import { TypeText } from './TypeText';
+import { peerLabel, peerSession } from '../lib/peer';
 
 // Minimal markdown: fenced code blocks, inline code, **bold**. Everything
 // else is plain text (React-escaped).
@@ -35,13 +36,30 @@ const JumpBtn = ({ onClick }: { onClick: () => void }) => (
   <span className="msgJump codicon codicon-history" title="Rewind to this point" onClick={onClick} />
 );
 
-const Bubble = memo(function Bubble({ step, onJump, onOpenAgent }: {
+const Bubble = memo(function Bubble({ step, onJump, onOpenAgent, onOpenPeer }: {
   step: Step; onJump: () => void; onOpenAgent: (key: string) => void;
+  onOpenPeer: (peer: PeerReference) => void;
 }) {
   if (step.kind === 'tool') {
+    const r = step.result;
+    if (r?.verb === 'peer_message' && r.peer) {
+      const peer = r.peer;
+      const label = peerLabel(peer);
+      const openable = peerSession(peer) !== null;
+      return (
+        <div className="msg agentcard peercard">
+          <JumpBtn onClick={onJump} />
+          <div><span className="codicon codicon-comment-discussion agentIcon" /> message delivered to <strong>{label}</strong></div>
+          <button
+            disabled={!openable}
+            title={openable ? 'Open peer session' : 'This peer has no linked session'}
+            onClick={() => onOpenPeer(peer)}
+          >{openable ? 'open peer' : 'peer session unavailable'}</button>
+        </div>
+      );
+    }
     // only spawn_agent tools surface in chat; the rest live in the tool log
     if (step.call.verb !== 'spawn_agent') return null;
-    const r = step.result;
     return (
       <div className="msg agentcard">
         <JumpBtn onClick={onJump} />
@@ -72,10 +90,11 @@ const Bubble = memo(function Bubble({ step, onJump, onOpenAgent }: {
 
 // memo: the chat maps every step — unrelated app renders must not pay it
 export const ChatPane = memo(function ChatPane({
-  steps, pointer, animateIndex, seekTick, onJump, onOpenAgent, visible = true, onEscapeTop,
+  steps, pointer, animateIndex, seekTick, onJump, onOpenAgent, onOpenPeer, visible = true, onEscapeTop,
 }: {
   steps: Step[]; pointer: number; animateIndex: number; seekTick: number;
   onJump: (i: number) => void; onOpenAgent: (key: string) => void; visible?: boolean;
+  onOpenPeer: (peer: PeerReference) => void;
   onEscapeTop?: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -142,7 +161,7 @@ export const ChatPane = memo(function ChatPane({
               </div>
             );
           }
-          return <Bubble key={i} step={step} onJump={() => onJump(i)} onOpenAgent={onOpenAgent} />;
+          return <Bubble key={i} step={step} onJump={() => onJump(i)} onOpenAgent={onOpenAgent} onOpenPeer={onOpenPeer} />;
         })}
       </div>
     </div>

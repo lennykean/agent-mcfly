@@ -10,7 +10,8 @@ import { applyKeymap, focusEditor, setLeaders, setTmuxMode, setVimMode } from '.
 import { normPath } from './lib/timeline';
 import { sameTerminalProject, terminalProjectKey, type TerminalProject } from './lib/terminal-project';
 import { formatSshPwd, parseSshPwd, withConnection } from './lib/api';
-import type { SessionMeta, WorkspaceSource } from './types';
+import { peerSession } from './lib/peer';
+import type { PeerReference, SessionMeta, WorkspaceSource } from './types';
 
 // ---- multi-root shell: the URL carries PARALLEL pwd/provider/session query
 // arrays (?pwd=A&pwd=B&session=x&session=y — index i is one root workspace;
@@ -468,6 +469,23 @@ export default function Shell() {
     setActiveIdx(wssRef.current.length);
   }, []);
 
+  const openPeer = useCallback(async (peer: PeerReference) => {
+    const session = peerSession(peer);
+    if (!session) return;
+    let peerSource = peer.connection
+      ? wssRef.current.find((w) => w.source?.connection === peer.connection)?.source
+      : undefined;
+    if (peer.connection && !peerSource) {
+      try {
+        const saved = await fetch('/api/ssh/connections').then((r) => r.json());
+        const found = Array.isArray(saved) ? saved.find((item) => item?.id === peer.connection) : undefined;
+        if (found) peerSource = { connection: found.id, host: found.host || found.id, port: Number(found.port) || 22 };
+      } catch { /* an unavailable remote cannot be opened */ }
+    }
+    if (peer.connection && !peerSource) return;
+    followSession(peer.workspace!, session, peerSource);
+  }, [followSession]);
+
   // a session picked to FOLLOW a specific terminal: tie the pty to it, then
   // attach (the user SPECIFIED the link — honor it even when the title
   // could not resolve automatically)
@@ -608,6 +626,7 @@ export default function Shell() {
             onAddRemote={onAddRemote}
             onCloseRoot={onCloseRoot}
             onSelectAgent={onSelectAgent}
+            onOpenPeer={(peer) => void openPeer(peer)}
             onSessionFound={autoSessionFound}
             onPickSession={onPickSession}
             onFollowedPick={onFollowedPick}

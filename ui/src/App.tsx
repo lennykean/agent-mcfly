@@ -14,7 +14,7 @@ import { Splitter } from './components/Splitter';
 import { HumanReview } from './components/HumanReview';
 import { HistoryBar } from './components/HistoryBar';
 import type { TermCtl } from './components/LivePane';
-import type { Review, ReviewComment, SessionMeta, WorkspaceSource } from './types';
+import type { PeerReference, Review, ReviewComment, SessionMeta, WorkspaceSource } from './types';
 import { withConnection } from './lib/api';
 import { normPath, pathWithin, resolveWaypoint, type WaypointEntry } from './lib/timeline';
 import { APP_CHORDS, actionOf, focusEditor, justArmed, notify, setDeferredSink, termReleasedChord, type Action } from './lib/keys';
@@ -73,6 +73,7 @@ export interface WorkbenchProps {
   onCloseRoot: (wsId: number, invalid?: boolean) => void;
   // a subagent row of ANOTHER root was picked: switch there and open it
   onSelectAgent: (wsId: number, key: string) => void;
+  onOpenPeer: (peer: PeerReference) => void;
   // a session appeared for a terminal launched here — the shell decides
   // whether it lands in this workbench, an existing one, or nowhere
   onSessionFound: (pwd: string, s: SessionMeta, source?: WorkspaceSource) => void;
@@ -125,7 +126,7 @@ function useStoredTab<T extends string>(key: string, initial: T) {
 }
 
 export default function Workbench({
-  wsId, active, source, url, roots, onState, onAddRoot, onAddRemote, onCloseRoot, onSelectAgent, onSessionFound,
+  wsId, active, source, url, roots, onState, onAddRoot, onAddRemote, onCloseRoot, onSelectAgent, onOpenPeer, onSessionFound,
   onPickSession, onFollowedPick,
   sync, onToggleSync, treeCollapsed, onTreeToggle, onPickColor,
   settings, matchers, onOpenSettings, termCtl, termSlot, registerHandle,
@@ -1800,6 +1801,7 @@ export default function Workbench({
                   seekTick={r.seekTick}
                   onJump={r.jump}
                   onOpenAgent={openAgent}
+                  onOpenPeer={onOpenPeer}
                   visible={rightTab === 'chat'}
                   onEscapeTop={escapeRight}
                 />

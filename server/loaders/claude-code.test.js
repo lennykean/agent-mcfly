@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { bashReadResult, inferBashRead, inferBashTool, projectSlugMatches, scanHead } from './claude-code.js';
+import { bashReadResult, inferBashRead, inferBashTool, parseTailChunk, projectSlugMatches, scanHead } from './claude-code.js';
 
 test('project directory matching folds Windows paths but preserves POSIX case', () => {
   assert.equal(projectSlugMatches('C:\\Repo\\App', 'C--repo-app'), true);
@@ -71,4 +71,20 @@ test('renders conservative shell reads in the editor', () => {
   assert.equal(bashReadResult(read, { stdout: '', stderr: 'sed: failed' }, {}), null);
   assert.equal(inferBashRead("cd \"$HOME\" && sed -n '1p' app.js", '/repo'), null);
   assert.equal(inferBashRead("cd /repo && sed -n '1,2p' app.js && echo done", '/repo'), null);
+});
+
+test('renders a delivered McFly peer message as a peer link', () => {
+  const peer = {
+    id: 'pty-1', terminal_id: 'pty-1', tool: 'codex', cwd: '/repo', title: 'Peer',
+    session_id: 'rollout.jsonl', provider: 'codex',
+  };
+  const envelope = { schema: 'mcfly.data.v1', kind: 'peer_message', id: peer.id, delivered: true, peer };
+  const rows = [
+    { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'peer-call', name: 'mcp__mcfly__send_message', input: { id: peer.id, message: 'hi' } }] } },
+    { type: 'user', toolUseResult: envelope, message: { content: [{ type: 'tool_result', tool_use_id: 'peer-call', content: JSON.stringify(envelope) }] } },
+  ];
+  const buf = Buffer.from(rows.map(JSON.stringify).join('\n') + '\n');
+  const result = parseTailChunk('session.jsonl', 0, { mtimeMs: 1, size: buf.length }, buf);
+  assert.equal(result.messages[0].content[0].extended.render.verb, 'peer_message');
+  assert.deepEqual(result.messages[1].content[0].extended.render.peer, peer);
 });

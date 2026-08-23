@@ -4,6 +4,7 @@ export const isTableTool = (name) => /(?:^|__)mcfly__run_table$/.test(String(nam
 export const isHighlightTool = (name) => /(?:^|__)mcfly__highlight$/.test(String(name));
 export const isWaypointTool = (name) => /(?:^|__)mcfly__waypoint$/.test(String(name));
 export const isWaypointRemoveTool = (name) => /(?:^|__)mcfly__waypoint_remove$/.test(String(name));
+export const isPeerMessageTool = (name) => /(?:^|__)mcfly__send_message$/.test(String(name));
 
 // "12,40-45" (or an array of the same pieces) -> [{start,end}], or null
 export function parseLineSpec(spec) {
@@ -143,6 +144,20 @@ export function tableResult(value) {
     verb: 'data', command: result.command, cwd: result.cwd, stdout: result.stdout,
     stderr: result.stderr, exit_code: result.exitCode, format: result.format ?? 'tsv', table,
   };
+}
+
+export function peerMessageCall(input) {
+  let args = input;
+  if (typeof input === 'string') {
+    try { args = JSON.parse(input); } catch { args = {}; }
+  }
+  return { verb: 'peer_message', peer_id: args?.id, title: 'message peer' };
+}
+
+export function peerMessageResult(value) {
+  const result = dataEnvelope(value);
+  if (result?.kind !== 'peer_message' || result.delivered !== true || !result.peer?.id) return null;
+  return { verb: 'peer_message', status: 'delivered', peer: result.peer };
 }
 
 export function waypointCall(input) {
