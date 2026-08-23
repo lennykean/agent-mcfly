@@ -85,7 +85,7 @@ function sanitizedEnv() {
   return { ...env, TERM: 'xterm-256color', COLORTERM: 'truecolor', FORCE_COLOR: '3' };
 }
 
-// ptyId -> { p, buffer, ws, tool, cwd, created, session }
+// ptyId -> { p, buffer, ws, tool, cwd, created, session, relayEnabled }
 const sessions = new Map();
 // SSH PTYs are channels owned by this local McFly process. They need the
 // connection in their identity because two hosts can produce the same id.
@@ -97,6 +97,7 @@ const sessionOf = (id, connection) => connection
   : sessions.get(id);
 
 const ctl = (obj) => '\x00' + JSON.stringify(obj);
+const peerIdOf = (s) => s.connection ? `${s.connection}:${s.id}` : s.id;
 
 // Terminal output is appended to one string and trimmed from the front, not
 // kept as a list of chunks: a fast-scrolling TUI produces thousands of small
@@ -156,9 +157,29 @@ export function listPtys(connection, { screens = false } = {}) {
     attached: !!s.ws,
     session: s.session ?? null, // { provider, id, pwd } once the hunter maps it
     title: s.title || null, // live terminal title (OSC), the agent's own words
+    relayEnabled: !!s.relayEnabled,
     screen: screens ? screenOf(s) : null,
     ...(s.connection ? { connection: s.connection } : {}),
   }));
+}
+
+const peerView = (s) => ({
+  id: peerIdOf(s),
+  terminal_id: s.id,
+  tool: s.tool,
+  cwd: s.cwd,
+  title: s.title || null,
+  session_id: s.session?.id ?? null,
+  provider: s.session?.provider ?? null,
+  messageable: !!s.relayEnabled,
+  interactive: !s.relayEnabled,
+  ...(s.connection ? { connection: s.connection } : {}),
+});
+
+// MCP-facing registry. Interactive terminals stay visible so an agent can tell
+// the user exactly which peer must be relay-enabled before it can be messaged.
+export function listPeers() {
+  return [...sessions.values(), ...remoteSessions.values()].map(peerView);
 }
 
 export function setPtySession(ptyId, mapping, connection) {
@@ -166,6 +187,51 @@ export function setPtySession(ptyId, mapping, connection) {
   if (!s) return false;
   s.session = mapping;
   return true;
+}
+
+export function setPtyRelay(ptyId, enabled, connection) {
+  const s = sessionOf(ptyId, connection);
+  if (!s || typeof enabled !== 'boolean') return false;
+  s.relayEnabled = enabled;
+  if (s.ws?.readyState === 1) s.ws.send(ctl({ relayEnabled: enabled }));
+  return true;
+}
+
+function relayError(message, status, code) {
+  return Object.assign(new Error(message), { status, code });
+}
+
+const peerOf = (id) => sessions.get(id)
+  ?? [...remoteSessions.values()].find((s) => peerIdOf(s) === id);
+
+const writeInput = (s, data, source) => {
+  if (source === 'human' && s.relayEnabled) return false;
+  s.p.write(data);
+  return true;
+};
+
+export function sendPeerMessage(id, message) {
+  const s = peerOf(id);
+  if (!s) return Promise.reject(relayError('peer not found', 404, 'PEER_NOT_FOUND'));
+  if (!s.relayEnabled) return Promise.reject(relayError('peer is interactive; ask the user to enable relay mode first', 409, 'PEER_INTERACTIVE'));
+  if (typeof message !== 'string' || !message.trim()) return Promise.reject(relayError('message is required', 400, 'INVALID_MESSAGE'));
+  if (Buffer.byteLength(message) > 128 * 1024) return Promise.reject(relayError('message is too large', 413, 'MESSAGE_TOO_LARGE'));
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(message)) {
+    return Promise.reject(relayError('message contains terminal control characters', 400, 'INVALID_MESSAGE'));
+  }
+  const deliver = () => {
+    if (peerOf(id) !== s) throw relayError('peer not found', 404, 'PEER_NOT_FOUND');
+    if (!s.relayEnabled) throw relayError('peer is interactive; ask the user to enable relay mode first', 409, 'PEER_INTERACTIVE');
+    const bracketed = !!s.shadow?.modes?.bracketedPasteMode;
+    if (!bracketed && /[\r\n\t]/.test(message)) {
+      throw relayError('peer does not support bracketed paste; multiline and tabbed messages cannot be delivered exactly', 409, 'BRACKETED_PASTE_REQUIRED');
+    }
+    writeInput(s, `${bracketed ? '\x1b[200~' : ''}${message}${bracketed ? '\x1b[201~' : ''}\r`, 'relay');
+    return { id, delivered: true, bracketed, peer: peerView(s) };
+  };
+  const delivered = (s.relayQueue ?? Promise.resolve()).then(deliver);
+  s.relayQueue = delivered.catch(() => {});
+  return delivered;
 }
 
 // tmux semantics: detached sessions persist until the process exits or an
@@ -259,7 +325,7 @@ function wire(s, ws) {
   ws.on('message', (m) => {
     try {
       const j = JSON.parse(m.toString());
-      if (j.t === 'i') s.p.write(j.d);
+      if (j.t === 'i' && !writeInput(s, j.d, 'human')) ws.send(ctl({ inputBlocked: true, relayEnabled: true }));
       else if (j.t === 'r' && j.cols > 0 && j.rows > 0) {
         if (s.connection) s.p.setWindow(j.rows, j.cols, 0, 0);
         else s.p.resize(j.cols, j.rows);
@@ -331,7 +397,7 @@ export function attachPty(server, allowedHosts, getRemote = () => undefined) {
           s.ws = null;
           try { old.send(ctl({ taken: true })); old.close(); } catch { /* already gone */ }
         }
-        ws.send(ctl({ ptyId: s.id, attached: true }));
+        ws.send(ctl({ ptyId: s.id, attached: true, relayEnabled: !!s.relayEnabled }));
         if (s.buffer) ws.send(s.buffer);
         wire(s, ws);
         return;
@@ -359,6 +425,7 @@ export function attachPty(server, allowedHosts, getRemote = () => undefined) {
           const s = {
             id: crypto.randomBytes(8).toString('hex'), p, buffer: '', ws: null,
             connection, tool, cwd, created: Date.now(), session: null, title: '',
+            relayEnabled: false, relayQueue: Promise.resolve(),
             shadow: new ShadowTerminal({ cols: 100, rows: 30, scrollback: 20, allowProposedApi: true }),
           };
           try { s.shadow.onTitleChange((t) => { s.title = t; }); } catch { /* preview only */ }
@@ -382,7 +449,7 @@ export function attachPty(server, allowedHosts, getRemote = () => undefined) {
           p.once('error', end);
           p.once('close', () => end());
           if (ws.readyState === 1) {
-            ws.send(ctl({ ptyId: s.id }));
+            ws.send(ctl({ ptyId: s.id, relayEnabled: false }));
             wire(s, ws);
           } else {
             remoteSessions.delete(remoteKey(connection, s.id));
@@ -417,6 +484,7 @@ export function attachPty(server, allowedHosts, getRemote = () => undefined) {
       const s = {
         id: crypto.randomBytes(8).toString('hex'), p, buffer: '', ws: null,
         tool, cwd, created: Date.now(), session: null, title: '',
+        relayEnabled: false, relayQueue: Promise.resolve(),
         shadow: new ShadowTerminal({ cols: 100, rows: 30, scrollback: 20, allowProposedApi: true }),
       };
       // agents announce themselves in the terminal title (OSC); the shadow
@@ -424,7 +492,7 @@ export function attachPty(server, allowedHosts, getRemote = () => undefined) {
       try { s.shadow.onTitleChange((t) => { s.title = t; }); } catch { /* preview only */ }
       sessions.set(s.id, s);
       saveLive();
-      ws.send(ctl({ ptyId: s.id }));
+      ws.send(ctl({ ptyId: s.id, relayEnabled: false }));
 
       // launch the picked tool inside the shell so PATH/shims resolve the
       // same way they do for the user; '_' stays a bare shell

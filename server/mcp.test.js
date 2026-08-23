@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import http from 'node:http';
 import path from 'node:path';
 import { DATA_MARKER, dataEnvelope, highlightResult, parseLineSpec, parseTsv } from './mcfly-data.js';
-import { checklistFiles, findWorkspaceState } from './mcp.js';
+import { checklistFiles, findWorkspaceState, runListPeers, runSendMessage } from './mcp.js';
 
 test('validates strict TSV and serves it through MCP stdio', () => {
   assert.deepEqual(parseTsv('name\tcount\nalpha\t2\n'), {
@@ -46,6 +46,7 @@ test('validates strict TSV and serves it through MCP stdio', () => {
   const responses = requests.map((r) => byId.get(r.id));
   assert.equal(responses[0].result.serverInfo.name, 'mcfly');
   assert.equal(responses[1].result.tools[0].name, 'run_table');
+  assert.deepEqual(responses[1].result.tools.slice(-2).map((tool) => tool.name), ['list_peers', 'send_message']);
   assert.equal(responses[2].result.isError, undefined);
   assert.deepEqual(responses[2].result.structuredContent.data, {
     columns: ['name', 'count'], rows: [['alpha', '2']],
@@ -112,6 +113,33 @@ test('workspace routing skips unrelated server scopes', async () => {
     assert.equal(rooted.data.snapshot.marker, 'root');
   } finally {
     await Promise.all([wrong, right, root].map((server) => new Promise((resolve) => server.close(resolve))));
+  }
+});
+
+test('lists live peers and sends a complete message through the workspace server', async () => {
+  let received;
+  const peer = { id: 'peer-1', terminal_id: 'term-1', messageable: true, interactive: false };
+  const server = http.createServer((req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/api/peers') return res.end(JSON.stringify([peer]));
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      received = JSON.parse(body);
+      res.end(JSON.stringify({ id: received.id, delivered: true, bracketed: true, peer }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const servers = [{ port: server.address().port, pwd: process.cwd(), started: 1 }];
+    const listed = await runListPeers({}, servers);
+    assert.deepEqual(listed.structuredContent.peers, [peer]);
+    const sent = await runSendMessage({ id: peer.id, message: 'hello\npeer' }, servers);
+    assert.deepEqual(received, { id: peer.id, message: 'hello\npeer' });
+    assert.equal(sent.structuredContent.peer.terminal_id, 'term-1');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
   }
 });
 

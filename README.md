@@ -110,6 +110,9 @@ To open the settings, click the gear icon. The SETTINGS page holds the modes and
 
 ## Agent tools (MCP)
 
+The live peer relay is inspired by Kerry Ritter's MIT-licensed
+[Parley](https://github.com/KerryRitter/parley).
+
 The McFly MCP gives your agent tools that write to the workbench. To configure it for local agents:
 
 ```bash
@@ -127,6 +130,8 @@ This command writes `~/.mcfly/mcp.json`. When Codex or Claude Code is installed,
 | `workspace_state` | Gives the agent the open files, the visible lines, and the selections of the user. |
 | `review_state` | Reads the open human reviews and their comment threads. |
 | `review_reply` | Answers a review comment, and can mark it addressed. |
+| `list_peers` | Lists live terminals and says which ones the user has enabled for relay. |
+| `send_message` | Sends one complete prompt to a relay-enabled live terminal. |
 
 ![A table from run_table in the DATA tab](docs/data.png)
 

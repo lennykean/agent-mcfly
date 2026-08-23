@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 import * as claudeCode from './loaders/claude-code.js';
 import * as codex from './loaders/codex.js';
 import * as cursor from './loaders/cursor.js';
-import { alive, attachPty, detectTools, hasEditor, openInEditor, killAllPtys, killPty, listPtys, reapOrphans, setPtySession, TOKEN } from './pty.js';
+import { alive, attachPty, detectTools, hasEditor, openInEditor, killAllPtys, killPty, listPeers, listPtys, reapOrphans, sendPeerMessage, setPtyRelay, setPtySession, TOKEN } from './pty.js';
 import { connectSsh, disconnectAllSsh, disconnectSsh, getSshConnection, listSshConnections } from './ssh.js';
 import * as review from './review.js';
 import * as matchers from './matchers.js';
@@ -235,6 +235,7 @@ const server = http.createServer(async (req, res) => {
       }
       return json(res, 200, ptys);
     }
+    if (url.pathname === '/api/peers') return json(res, 200, listPeers());
     // read-only git inspection for the GIT pane; root follows the explorer
     if (url.pathname.startsWith('/api/git/')) {
       const root = url.searchParams.get('root') ?? process.cwd();
@@ -417,6 +418,25 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, { ok: killPty(id, connection) });
       } catch (error) {
         return error.status ? errorJson(res, error) : json(res, 400, { error: 'bad body' });
+      }
+    }
+    if (url.pathname === '/api/pty-relay' && req.method === 'POST') {
+      try {
+        const body = await requestJson(req);
+        const connection = remoteConnection(url)?.id ?? body.connection;
+        if (typeof body.enabled !== 'boolean') return json(res, 400, { error: 'enabled must be a boolean' });
+        const ok = setPtyRelay(body.id, body.enabled, connection);
+        return json(res, ok ? 200 : 404, ok ? { ok, enabled: body.enabled } : { error: 'terminal not found' });
+      } catch (error) {
+        return errorJson(res, error, 400);
+      }
+    }
+    if (url.pathname === '/api/peer-message' && req.method === 'POST') {
+      try {
+        const { id, message } = await requestJson(req);
+        return json(res, 200, await sendPeerMessage(id, message));
+      } catch (error) {
+        return errorJson(res, error, 400);
       }
     }
     if (url.pathname === '/api/pty-session' && req.method === 'POST') {

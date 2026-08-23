@@ -8,7 +8,7 @@ import { DATA_MARKER, parseLineSpec, parseTable, TABLE_FORMATS } from './mcfly-d
 
 const exec = promisify(execFile);
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url))).version;
-const INSTRUCTIONS = 'Use run_table for shell commands whose stdout is tabular data. The script must emit strict TSV: one unique, non-empty header row, at least two columns, at least one data row, and the same number of tab-separated cells on every row. Do not emit decoration or commentary to stdout; send diagnostics to stderr. Use highlight instead of a plain file read whenever you want to point the user at specific lines: it renders the file in the McFly viewer with those lines highlighted. Use waypoint to leave a durable note anchored to a specific line (a finding, explanation, or TODO): waypoints collect in the McFly Wayfinder tab and stay findable even after the file changes. Use waypoint_remove when a waypoint is resolved or obsolete. Use workspace_state whenever the user references something you cannot see — "this", "here", "that file", "what I highlighted", "where I am" — or to orient yourself in what they are looking at: it returns their open files, visible lines, playhead, panels, terminals, and recent selections and time-travel jumps. When the user mentions a review or their comments, call review_state to read the threads and review_reply to answer them; set addressed: true on replies that complete the ask. Use data_matcher when another tool you are calling returns structured output the user will want to read as data: register the tool once and its results render in the data pane from then on, with no change to how you call it.';
+const INSTRUCTIONS = 'Use run_table for shell commands whose stdout is tabular data. The script must emit strict TSV: one unique, non-empty header row, at least two columns, at least one data row, and the same number of tab-separated cells on every row. Do not emit decoration or commentary to stdout; send diagnostics to stderr. Use highlight instead of a plain file read whenever you want to point the user at specific lines: it renders the file in the McFly viewer with those lines highlighted. Use waypoint to leave a durable note anchored to a specific line (a finding, explanation, or TODO): waypoints collect in the McFly Wayfinder tab and stay findable even after the file changes. Use waypoint_remove when a waypoint is resolved or obsolete. Use workspace_state whenever the user references something you cannot see — "this", "here", "that file", "what I highlighted", "where I am" — or to orient yourself in what they are looking at: it returns their open files, visible lines, playhead, panels, terminals, and recent selections and time-travel jumps. When the user mentions a review or their comments, call review_state to read the threads and review_reply to answer them; set addressed: true on replies that complete the ask. Use list_peers to discover McFly-hosted terminals before send_message. Only relay-enabled peers are messageable; an interactive peer must be enabled by the user first. Use data_matcher when another tool you are calling returns structured output the user will want to read as data: register the tool once and its results render in the data pane from then on, with no change to how you call it.';
 const TOOL = {
   name: 'run_table',
   title: 'Run tabular shell command',
@@ -121,6 +121,47 @@ const WORKSPACE_STATE_TOOL = {
   annotations: { readOnlyHint: true },
 };
 
+const LIST_PEERS_TOOL = {
+  name: 'list_peers', title: 'List live McFly peers',
+  description: 'List every terminal hosted by the current McFly workspace. Relay-enabled peers are messageable; interactive peers are visible but must be enabled by the user before send_message can target them.',
+  inputSchema: {
+    type: 'object', additionalProperties: false,
+    properties: {
+      cwd: { type: 'string', description: 'Project directory, to pick the right McFly server. Defaults to the process cwd.' },
+    },
+  },
+  outputSchema: {
+    type: 'object', additionalProperties: false, required: ['schema', 'kind', 'peers'],
+    properties: {
+      schema: { const: 'mcfly.data.v1' }, kind: { const: 'peers' },
+      peers: { type: 'array', items: { type: 'object' } },
+    },
+  },
+  annotations: { readOnlyHint: true },
+};
+
+const SEND_MESSAGE_TOOL = {
+  name: 'send_message', title: 'Message a live McFly peer',
+  description: 'Send one complete message to a relay-enabled McFly terminal. Use the stable peer id returned by list_peers. Messages to interactive terminals are rejected until the user enables relay mode.',
+  inputSchema: {
+    type: 'object', additionalProperties: false, required: ['id', 'message'],
+    properties: {
+      id: { type: 'string', description: 'Stable peer id from list_peers.' },
+      message: { type: 'string', description: 'Complete message to submit to the peer.' },
+      cwd: { type: 'string', description: 'Project directory, to pick the right McFly server. Defaults to the process cwd.' },
+    },
+  },
+  outputSchema: {
+    type: 'object', additionalProperties: false, required: ['schema', 'kind', 'id', 'delivered', 'peer'],
+    properties: {
+      schema: { const: 'mcfly.data.v1' }, kind: { const: 'peer_message' },
+      id: { type: 'string' }, delivered: { type: 'boolean' }, bracketed: { type: 'boolean' },
+      peer: { type: 'object' },
+    },
+  },
+  annotations: { destructiveHint: true, openWorldHint: true },
+};
+
 function liveServers() {
   try {
     const all = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.mcfly', 'servers.json'), 'utf8'));
@@ -209,8 +250,7 @@ const REVIEW_REPLY_TOOL = {
   },
 };
 
-function pickServer(args) {
-  const servers = liveServers();
+function pickServer(args, servers = liveServers()) {
   if (!servers.length) return null;
   const cwd = path.resolve(args.cwd ?? process.cwd());
   // among cwd matches, prefer the newest server — it runs the newest code.
@@ -227,6 +267,39 @@ const noWorkspace = (args) => ({
   content: [{ type: 'text', text: `no McFly workspace found for ${path.resolve(args.cwd ?? process.cwd())}` }],
   isError: true,
 });
+
+export async function runListPeers(args = {}, servers) {
+  const found = pickServer(args, servers);
+  if (!found) return noWorkspace(args);
+  try {
+    const response = await fetch(`http://127.0.0.1:${found.pick.port}/api/peers`);
+    const peers = await response.json();
+    if (!response.ok) throw new Error(peers.error ?? `HTTP ${response.status}`);
+    const result = { schema: 'mcfly.data.v1', kind: 'peers', peers };
+    return { content: [{ type: 'text', text: `${DATA_MARKER}\n${JSON.stringify(result)}` }], structuredContent: result };
+  } catch (error) {
+    return { content: [{ type: 'text', text: `peer lookup failed: ${error.message}` }], isError: true };
+  }
+}
+
+export async function runSendMessage(args = {}, servers) {
+  if (typeof args.id !== 'string' || !args.id || typeof args.message !== 'string' || !args.message.trim()) {
+    return { content: [{ type: 'text', text: 'id and message are required' }], isError: true };
+  }
+  const found = pickServer(args, servers);
+  if (!found) return noWorkspace(args);
+  try {
+    const response = await fetch(`http://127.0.0.1:${found.pick.port}/api/peer-message`, {
+      method: 'POST', body: JSON.stringify({ id: args.id, message: args.message }),
+    });
+    const out = await response.json();
+    if (!response.ok) return { content: [{ type: 'text', text: out.error ?? `HTTP ${response.status}` }], isError: true };
+    const result = { schema: 'mcfly.data.v1', kind: 'peer_message', ...out };
+    return { content: [{ type: 'text', text: `${DATA_MARKER}\n${JSON.stringify(result)}` }], structuredContent: result };
+  } catch (error) {
+    return { content: [{ type: 'text', text: `peer message failed: ${error.message}` }], isError: true };
+  }
+}
 
 async function reviewFetch(args, route, payload) {
   const found = pickServer(args);
@@ -523,6 +596,8 @@ const TOOLS = [
   [REVIEW_STATE_TOOL, runReviewState],
   [REVIEW_REPLY_TOOL, runReviewReply],
   [DATA_MATCHER_TOOL, runDataMatcher],
+  [LIST_PEERS_TOOL, runListPeers],
+  [SEND_MESSAGE_TOOL, runSendMessage],
 ];
 
 async function handle(request) {

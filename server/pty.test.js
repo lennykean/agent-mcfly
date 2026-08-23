@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import http from 'node:http';
 import test from 'node:test';
 import WebSocket from 'ws';
-import { attachPty, killAllPtys, killPty, listPtys, TOKEN } from './pty.js';
+import { attachPty, killAllPtys, killPty, listPeers, listPtys, sendPeerMessage, setPtyRelay, TOKEN } from './pty.js';
 
 test('kills hosted terminals during shutdown', async () => {
   const server = http.createServer();
@@ -97,6 +97,55 @@ test('hosts a remote terminal on an SSH PTY channel', async (t) => {
   await activity;
   assert.deepEqual(channel.writes, ['pwd\r']);
   assert.deepEqual(channel.windows, [[40, 120, 0, 0]]);
+
+  const peer = listPeers()[0];
+  assert.equal(peer.terminal_id, control.ptyId);
+  assert.equal(peer.messageable, false);
+  assert.equal(peer.interactive, true);
+  await assert.rejects(sendPeerMessage(peer.id, 'not yet'), { code: 'PEER_INTERACTIVE' });
+
+  assert.equal(setPtyRelay(control.ptyId, true, 'host-1'), true);
+  assert.equal(listPtys('host-1')[0].relayEnabled, true);
+  const blocked = new Promise((resolve) => {
+    const onMessage = (data) => {
+      const text = data.toString();
+      if (text.charCodeAt(0) !== 0) return;
+      const value = JSON.parse(text.slice(1));
+      if (!value.inputBlocked) return;
+      ws.off('message', onMessage);
+      resolve(value);
+    };
+    ws.on('message', onMessage);
+  });
+  ws.send(JSON.stringify({ t: 'i', d: 'human input\r' }));
+  assert.equal((await blocked).relayEnabled, true);
+  assert.deepEqual(channel.writes, ['pwd\r']);
+
+  const fallback = await sendPeerMessage(peer.id, 'one line');
+  assert.equal(fallback.bracketed, false);
+  assert.equal(channel.writes.at(-1), 'one line\r');
+  await assert.rejects(sendPeerMessage(peer.id, 'one\nline'), {
+    code: 'BRACKETED_PASTE_REQUIRED',
+    message: /cannot be delivered exactly/,
+  });
+  await assert.rejects(sendPeerMessage(peer.id, 'one\tline'), { code: 'BRACKETED_PASTE_REQUIRED' });
+  assert.equal(channel.writes.at(-1), 'one line\r');
+
+  channel.emit('data', '\x1b[?2004h');
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const sent = await Promise.all([
+    sendPeerMessage(peer.id, 'first\nmessage'),
+    sendPeerMessage(peer.id, 'second\nmessage'),
+  ]);
+  assert.deepEqual(sent.map((value) => value.bracketed), [true, true]);
+  assert.equal(sent[0].peer.id, peer.id);
+  assert.equal(sent[0].peer.messageable, true);
+  assert.deepEqual(channel.writes.slice(-2), [
+    '\x1b[200~first\nmessage\x1b[201~\r',
+    '\x1b[200~second\nmessage\x1b[201~\r',
+  ]);
+  await sendPeerMessage(peer.id, 'line one\n\tline two');
+  assert.equal(channel.writes.at(-1), '\x1b[200~line one\n\tline two\x1b[201~\r');
 
   const closed = new Promise((resolve) => ws.once('close', resolve));
   assert.equal(killPty(control.ptyId, 'host-1'), true);
