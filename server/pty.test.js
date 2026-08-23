@@ -29,7 +29,7 @@ test('kills hosted terminals during shutdown', async () => {
   await new Promise((resolve) => server.close(resolve));
 });
 
-test('hosts a remote terminal on an SSH PTY channel', async (t) => {
+test('hosts a remote PTY and waits for session discovery before relay delivery', async (t) => {
   class Channel extends EventEmitter {
     stderr = new EventEmitter();
     writes = [];
@@ -98,19 +98,35 @@ test('hosts a remote terminal on an SSH PTY channel', async (t) => {
   assert.deepEqual(channel.writes, ['pwd\r']);
   assert.deepEqual(channel.windows, [[40, 120, 0, 0]]);
 
-  assert.equal(setPtySession(control.ptyId, {
-    provider: 'codex', id: 'session.jsonl', pwd: '/srv/session-worktree',
-  }, 'host-1'), true);
-  const peer = listPeers()[0];
+  let peer = listPeers()[0];
   assert.equal(peer.terminal_id, control.ptyId);
   assert.equal(peer.cwd, "/srv/it's here");
-  assert.equal(peer.workspace, '/srv/session-worktree');
+  assert.equal(peer.relay_enabled, false);
+  assert.equal(peer.session_available, false);
   assert.equal(peer.messageable, false);
   assert.equal(peer.interactive, true);
   await assert.rejects(sendPeerMessage(peer.id, 'not yet'), { code: 'PEER_INTERACTIVE' });
 
   assert.equal(setPtyRelay(control.ptyId, true, 'host-1'), true);
   assert.equal(listPtys('host-1')[0].relayEnabled, true);
+  peer = listPeers()[0];
+  assert.equal(peer.relay_enabled, true);
+  assert.equal(peer.session_available, false);
+  assert.equal(peer.messageable, false);
+  assert.equal(peer.interactive, false);
+  await assert.rejects(sendPeerMessage(peer.id, 'not linked yet'), {
+    code: 'PEER_SESSION_UNAVAILABLE',
+    message: /session is not available yet/,
+  });
+  assert.deepEqual(channel.writes, ['pwd\r']);
+
+  assert.equal(setPtySession(control.ptyId, {
+    provider: 'codex', id: 'session.jsonl', pwd: '/srv/session-worktree',
+  }, 'host-1'), true);
+  peer = listPeers()[0];
+  assert.equal(peer.workspace, '/srv/session-worktree');
+  assert.equal(peer.session_available, true);
+  assert.equal(peer.messageable, true);
   const blocked = new Promise((resolve) => {
     const onMessage = (data) => {
       const text = data.toString();
@@ -145,6 +161,9 @@ test('hosts a remote terminal on an SSH PTY channel', async (t) => {
   assert.deepEqual(sent.map((value) => value.bracketed), [true, true]);
   assert.equal(sent[0].peer.id, peer.id);
   assert.equal(sent[0].peer.messageable, true);
+  assert.equal(sent[0].peer.provider, 'codex');
+  assert.equal(sent[0].peer.session_id, 'session.jsonl');
+  assert.equal(sent[0].peer.workspace, '/srv/session-worktree');
   assert.deepEqual(channel.writes.slice(-2), [
     '\x1b[200~first\nmessage\x1b[201~\r',
     '\x1b[200~second\nmessage\x1b[201~\r',

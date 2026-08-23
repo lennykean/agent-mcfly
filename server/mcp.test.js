@@ -118,7 +118,11 @@ test('workspace routing skips unrelated server scopes', async () => {
 
 test('lists live peers and sends a complete message through the workspace server', async () => {
   let received;
-  const peer = { id: 'peer-1', terminal_id: 'term-1', messageable: true, interactive: false };
+  const peer = {
+    id: 'peer-1', terminal_id: 'term-1', messageable: true, interactive: false,
+    relay_enabled: true, session_available: true,
+    provider: 'codex', session_id: 'session.jsonl', workspace: process.cwd(),
+  };
   const server = http.createServer((req, res) => {
     res.setHeader('Content-Type', 'application/json');
     if (req.url === '/api/peers') return res.end(JSON.stringify([peer]));
@@ -138,6 +142,7 @@ test('lists live peers and sends a complete message through the workspace server
     const sent = await runSendMessage({ id: peer.id, message: 'hello\npeer' }, servers);
     assert.deepEqual(received, { id: peer.id, message: 'hello\npeer' });
     assert.equal(sent.structuredContent.peer.terminal_id, 'term-1');
+    assert.equal(sent.structuredContent.peer.session_id, 'session.jsonl');
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

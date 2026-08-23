@@ -130,8 +130,8 @@ This command writes `~/.mcfly/mcp.json`. When Codex or Claude Code is installed,
 | `workspace_state` | Gives the agent the open files, the visible lines, and the selections of the user. |
 | `review_state` | Reads the open human reviews and their comment threads. |
 | `review_reply` | Answers a review comment, and can mark it addressed. |
-| `list_peers` | Lists live terminals and says which ones the user has enabled for relay. |
-| `send_message` | Sends one complete prompt to a relay-enabled live terminal. |
+| `list_peers` | Lists live terminals, relay state, and whether McFly has linked their agent session. |
+| `send_message` | Sends one complete prompt when relay is enabled and the target session is linkable. |
 
 ![A table from run_table in the DATA tab](docs/data.png)
 

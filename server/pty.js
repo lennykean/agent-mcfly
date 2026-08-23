@@ -163,22 +163,31 @@ export function listPtys(connection, { screens = false } = {}) {
   }));
 }
 
-const peerView = (s) => ({
-  id: peerIdOf(s),
-  terminal_id: s.id,
-  tool: s.tool,
-  cwd: s.cwd,
-  workspace: s.session?.pwd ?? null,
-  title: s.title || null,
-  session_id: s.session?.id ?? null,
-  provider: s.session?.provider ?? null,
-  messageable: !!s.relayEnabled,
-  interactive: !s.relayEnabled,
-  ...(s.connection ? { connection: s.connection } : {}),
-});
+const sessionAvailable = (s) => [s.session?.provider, s.session?.id, s.session?.pwd]
+  .every((value) => typeof value === 'string' && value.trim());
 
-// MCP-facing registry. Interactive terminals stay visible so an agent can tell
-// the user exactly which peer must be relay-enabled before it can be messaged.
+const peerView = (s) => {
+  const relayEnabled = !!s.relayEnabled;
+  const available = sessionAvailable(s);
+  return {
+    id: peerIdOf(s),
+    terminal_id: s.id,
+    tool: s.tool,
+    cwd: s.cwd,
+    workspace: s.session?.pwd ?? null,
+    title: s.title || null,
+    session_id: s.session?.id ?? null,
+    provider: s.session?.provider ?? null,
+    relay_enabled: relayEnabled,
+    session_available: available,
+    messageable: relayEnabled && available,
+    interactive: !relayEnabled,
+    ...(s.connection ? { connection: s.connection } : {}),
+  };
+};
+
+// MCP-facing registry. Unmessageable terminals stay visible so an agent can
+// distinguish user-interactive peers from relays still waiting for discovery.
 export function listPeers() {
   return [...sessions.values(), ...remoteSessions.values()].map(peerView);
 }
@@ -202,6 +211,13 @@ function relayError(message, status, code) {
   return Object.assign(new Error(message), { status, code });
 }
 
+const requireMessageable = (s) => {
+  if (!s.relayEnabled) throw relayError('peer is interactive; ask the user to enable relay mode first', 409, 'PEER_INTERACTIVE');
+  if (!sessionAvailable(s)) {
+    throw relayError('peer relay is enabled, but its agent session is not available yet; wait for McFly to discover it', 409, 'PEER_SESSION_UNAVAILABLE');
+  }
+};
+
 const peerOf = (id) => sessions.get(id)
   ?? [...remoteSessions.values()].find((s) => peerIdOf(s) === id);
 
@@ -214,7 +230,7 @@ const writeInput = (s, data, source) => {
 export function sendPeerMessage(id, message) {
   const s = peerOf(id);
   if (!s) return Promise.reject(relayError('peer not found', 404, 'PEER_NOT_FOUND'));
-  if (!s.relayEnabled) return Promise.reject(relayError('peer is interactive; ask the user to enable relay mode first', 409, 'PEER_INTERACTIVE'));
+  try { requireMessageable(s); } catch (error) { return Promise.reject(error); }
   if (typeof message !== 'string' || !message.trim()) return Promise.reject(relayError('message is required', 400, 'INVALID_MESSAGE'));
   if (Buffer.byteLength(message) > 128 * 1024) return Promise.reject(relayError('message is too large', 413, 'MESSAGE_TOO_LARGE'));
   if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(message)) {
@@ -222,7 +238,7 @@ export function sendPeerMessage(id, message) {
   }
   const deliver = () => {
     if (peerOf(id) !== s) throw relayError('peer not found', 404, 'PEER_NOT_FOUND');
-    if (!s.relayEnabled) throw relayError('peer is interactive; ask the user to enable relay mode first', 409, 'PEER_INTERACTIVE');
+    requireMessageable(s);
     const bracketed = !!s.shadow?.modes?.bracketedPasteMode;
     if (!bracketed && /[\r\n\t]/.test(message)) {
       throw relayError('peer does not support bracketed paste; multiline and tabbed messages cannot be delivered exactly', 409, 'BRACKETED_PASTE_REQUIRED');
