@@ -97,7 +97,7 @@ export function parseHead(text) {
     if (!line.trim()) continue;
     let o;
     try { o = JSON.parse(line); } catch { continue; }
-    if (o.type === 'session_meta') {
+    if (o.type === 'session_meta' && !meta.id) {
       meta.id = o.payload?.id ?? o.payload?.session_id;
       meta.cwd = o.payload?.cwd;
       const spawn = o.payload?.source?.subagent?.thread_spawn;

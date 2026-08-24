@@ -293,6 +293,14 @@ test('codex teams: sub-agent threads stay out of the session list and link to th
   assert.equal(kid.subagent, true);
   assert.equal(kid.agentPath, '/root/audit');
   assert.equal(kid.rootId, 'root-1');
+  const inheritedParent = parseHead([
+    JSON.stringify({ type: 'session_meta', payload: child }),
+    JSON.stringify({ type: 'session_meta', payload: root }),
+    JSON.stringify({ type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: 'work' }] } }),
+  ].join('\n'));
+  assert.equal(inheritedParent.subagent, true);
+  assert.equal(inheritedParent.id, 'kid-1');
+  assert.equal(inheritedParent.agentPath, '/root/audit');
   assert.equal(kid.nickname, 'Euler');
 
   // the call renders as an agent spawn; the result carries the agent's identity
