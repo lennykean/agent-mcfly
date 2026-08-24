@@ -165,11 +165,13 @@ test('does not signal a retained child after its exit was observed', async () =>
   });
   let treeKills = 0;
   let childKills = 0;
+  let detached;
   child.kill = () => { childKills++; };
   await assert.rejects(launchAgent({ harness: 'codex', prompt: 'done already' }, {
     toolPath: () => '/bin/codex',
     loaders: { codex: { listForCwd: () => [] } },
-    spawn: () => {
+    spawn: (_command, _args, options) => {
+      detached = options.detached;
       queueMicrotask(() => child.emit('exit', 0));
       return child;
     },
@@ -178,6 +180,7 @@ test('does not signal a retained child after its exit was observed', async () =>
   }), { code: 'AGENT_SESSION_NOT_FOUND' });
   assert.equal(treeKills, 0);
   assert.equal(childKills, 0);
+  assert.equal(detached, process.platform !== 'win32');
 });
 
 test('cancels the retained child tree when exact transcript correlation is ambiguous or times out', async () => {

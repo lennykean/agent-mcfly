@@ -121,6 +121,18 @@ export function dataEnvelope(value) {
     }
   }
   if (typeof value !== 'string') return null;
+  try {
+    const found = dataEnvelope(JSON.parse(value));
+    if (found) return found;
+  } catch { /* surrounding text */ }
+  const start = value.indexOf('{');
+  const end = value.lastIndexOf('}');
+  if (start >= 0 && end > start) {
+    try {
+      const found = dataEnvelope(JSON.parse(value.slice(start, end + 1)));
+      if (found) return found;
+    } catch { /* marker text or unrelated output */ }
+  }
   const at = value.indexOf(DATA_MARKER);
   if (at >= 0) {
     try { return dataEnvelope(JSON.parse(value.slice(at + DATA_MARKER.length).trim())); } catch { return null; }
@@ -128,11 +140,7 @@ export function dataEnvelope(value) {
   // structuredContent-bearing MCP results reach transcripts as the bare
   // serialized envelope — the marker text is replaced, so match by shape
   if (!value.includes('"mcfly.data.v1"')) return null;
-  try { return dataEnvelope(JSON.parse(value)); } catch { /* surrounding text */ }
-  const start = value.indexOf('{');
-  const end = value.lastIndexOf('}');
-  if (start < 0 || end <= start) return null;
-  try { return dataEnvelope(JSON.parse(value.slice(start, end + 1))); } catch { return null; }
+  return null;
 }
 
 export function tableResult(value) {

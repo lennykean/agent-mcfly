@@ -245,6 +245,41 @@ test('renders McFly-launched cross-provider children and top-level peers', () =>
   assert.deepEqual(peerResult.peer, peer);
 });
 
+test('links an agent result to its nested spawn call when wrapper output is unnumbered', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcfly-codex-launch-'));
+  const file = path.join(dir, 'rollout.jsonl');
+  const input = `await tools.mcp__mcfly__list_agent_providers({});
+    const result = await tools.mcp__mcfly__spawn_agent({harness:'codex',kind:'subagent',prompt:'say hi'});
+    text(result);`;
+  const envelope = {
+    schema: 'mcfly.data.v1', kind: 'agent_spawn', launch_kind: 'subagent', harness: 'codex',
+    provider: 'codex', session_id: '2026/child.jsonl', workspace: '/repo',
+  };
+  const wrapped = {
+    content: [{ type: 'text', text: `MCFLY_DATA_V1\n${JSON.stringify(envelope)}` }],
+    structuredContent: envelope,
+  };
+  const lines = [
+    { type: 'response_item', payload: { type: 'custom_tool_call', call_id: 'launch', name: 'exec', input } },
+    {
+      type: 'response_item',
+      payload: { type: 'custom_tool_call_output', call_id: 'launch', output: `Script completed\nOutput:\n\n${JSON.stringify(wrapped)}` },
+    },
+  ];
+  try {
+    fs.writeFileSync(file, lines.map(JSON.stringify).join('\n') + '\n');
+    const blocks = tailFile(file).messages.flatMap((message) => message.content);
+    const call = blocks.find((item) => item.type === 'tool' && item.tool === 'mcp__mcfly__spawn_agent');
+    const result = blocks.find((item) => item.type === 'tool_result' && item.tool === 'mcp__mcfly__spawn_agent');
+    assert.deepEqual(call.extended.render, {
+      verb: 'spawn_agent', agent_type: 'codex', title: 'say hi', launch_kind: 'subagent',
+    });
+    assert.equal(result.extended.render.child_session_id, '2026/child.jsonl');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('codex teams: sub-agent threads stay out of the session list and link to their spawn', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcfly-codex-team-'));
   const root = { session_id: 'root-1', id: 'root-1', cwd: dir, source: 'vscode' };

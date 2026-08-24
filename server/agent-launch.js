@@ -81,7 +81,7 @@ function startHeadless(executable, args, prompt, cwd, find = toolPath, start = s
   if (!file) throw launchError(`${executable} is not available`, 409, 'AGENT_PROVIDER_UNAVAILABLE');
   const spec = commandSpec(file, args, prompt);
   const child = start(spec.command, spec.args, {
-    cwd, env: spec.env, detached: true, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+    cwd, env: spec.env, detached: process.platform !== 'win32', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
   });
   const state = { child, exited: false, code: null, error: null, sessionId: null };
   let pending = '';
@@ -118,7 +118,7 @@ async function createCursorChat(executable, cwd, find = toolPath, start = spawn,
   if (!file) throw launchError(`${executable} is not available`, 409, 'AGENT_PROVIDER_UNAVAILABLE');
   const spec = commandSpec(file, ['create-chat']);
   const child = start(spec.command, spec.args, {
-    cwd, env: spec.env, detached: true, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+    cwd, env: spec.env, detached: process.platform !== 'win32', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
   });
   let stdout = '';
   let stderr = '';

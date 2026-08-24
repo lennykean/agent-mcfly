@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { StringDecoder } from 'node:string_decoder';
-import { highlightCall, highlightResult, isHighlightTool, isPeerMessageTool, isSpawnAgentTool, isTableTool, isWaypointRemoveTool, isWaypointTool, peerMessageCall, peerMessageResult, spawnAgentCall, spawnAgentResult, tableCall, tableResult, waypointCall, waypointRemoveCall, waypointRemoveResult, waypointResult } from '../mcfly-data.js';
+import { dataEnvelope, highlightCall, highlightResult, isHighlightTool, isPeerMessageTool, isSpawnAgentTool, isTableTool, isWaypointRemoveTool, isWaypointTool, peerMessageCall, peerMessageResult, spawnAgentCall, spawnAgentResult, tableCall, tableResult, waypointCall, waypointRemoveCall, waypointRemoveResult, waypointResult } from '../mcfly-data.js';
 import { idsFor, MAX_CHUNK, memoByStamp, readTail, truncate } from './transcript.js';
 
 const ROOT = path.join(os.homedir(), '.codex', 'sessions');
@@ -315,8 +315,12 @@ function convertLine(line, messages, file, recoveryEnd) {
         return;
       }
       const count = metas.reduce((max, meta) => Math.max(max, meta.resultIndex), -1) + 1;
+      const envelope = dataEnvelope(text);
+      const fallbackIndex = envelope?.kind === 'agent_spawn'
+        ? metas.find((meta) => isSpawnAgentTool(meta.name))?.resultIndex ?? 0
+        : 0;
       const results = splitNumberedResults(text, count)
-        ?? Array.from({ length: count }, (_, index) => index === 0 ? text : '');
+        ?? Array.from({ length: count }, (_, index) => index === fallbackIndex ? text : '');
       push('user', metas.map((meta) => {
         const result = results[meta.resultIndex] ?? '';
         const failed = isPatchCall(meta) && patchResultFailed(result, p.output);
@@ -458,7 +462,16 @@ export function callRender(name, input) {
 }
 
 function directRenders(name, input, source = input) {
-  if (isSpawnAgentTool(name)) return [spawnAgentCall(input)];
+  if (isSpawnAgentTool(name)) {
+    const render = spawnAgentCall(input);
+    const prompt = stringProperty(input, 'prompt')?.trim();
+    return [{
+      ...render,
+      agent_type: stringProperty(input, 'harness') ?? render.agent_type,
+      launch_kind: stringProperty(input, 'kind') ?? render.launch_kind,
+      title: prompt ? truncate(prompt, 80) : render.title,
+    }];
+  }
   if (isPeerMessageTool(name)) return [peerMessageCall(input)];
   if (isTableTool(name)) return [tableCall(input)];
   if (isHighlightTool(name)) return [highlightCall(input)];
