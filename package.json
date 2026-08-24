@@ -1,6 +1,6 @@
 {
   "name": "agent-mcfly",
-  "version": "0.0.34",
+  "version": "0.0.35",
   "description": "Replay and inspect Codex, Claude Code, and Cursor Agent sessions in a live workbench",
   "type": "module",
   "bin": {
