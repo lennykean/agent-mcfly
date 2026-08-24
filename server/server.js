@@ -89,8 +89,8 @@ const normScope = (p) => {
 // the scope covering a project dir: the longest scope the project sits under.
 // An explicit project never falls through
 // to another workspace; bare requests keep the newest-snapshot behavior.
-function pickScope(project) {
-  const keys = [...wsSnapshots.keys()];
+function pickScope(project, localOnly = false) {
+  const keys = [...wsSnapshots.keys()].filter((scope) => !localOnly || !scope.includes('\0'));
   if (!keys.length) return null;
   const want = normScope(project);
   if (want) {
@@ -252,7 +252,9 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/agent-providers') return json(res, 200, listAgentProviders());
     if (url.pathname === '/api/spawn-agent' && req.method === 'POST') {
       try {
-        return json(res, 200, await launchAgent(await requestJson(req), { scope: process.cwd() }));
+        const input = await requestJson(req);
+        const scope = pickScope(input.cwd ?? process.cwd(), true) ?? process.cwd();
+        return json(res, 200, await launchAgent(input, { scope }));
       } catch (error) {
         return errorJson(res, error, 400);
       }
@@ -372,6 +374,9 @@ const server = http.createServer(async (req, res) => {
     // workspace state: the UI reports what the user has open/focused/selected;
     // the mcfly MCP queries it so agents can see what the user is pointing at
     if (url.pathname === '/api/workspace-events' && req.method === 'POST') {
+      if (req.headers.origin && req.headers.origin !== `http://${req.headers.host}`) {
+        return json(res, 403, { error: 'cross-origin workspace state is forbidden' });
+      }
       try {
         const { scope = '', snapshot, events } = await requestJson(req);
         if (snapshot && typeof snapshot === 'object') {

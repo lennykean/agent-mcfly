@@ -118,6 +118,26 @@ test('workspace routing skips unrelated server scopes', async () => {
   }
 });
 
+test('agent tools route through a workspace attached in the McFly UI', async () => {
+  const project = path.join(process.cwd(), '..', 'attached-project');
+  const providers = [{ harness: 'codex', available: true }];
+  const server = http.createServer((req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url.startsWith('/api/workspace-state?')) {
+      return res.end(JSON.stringify({ scope: project, snapshot: {}, events: [] }));
+    }
+    if (req.url === '/api/agent-providers') return res.end(JSON.stringify(providers));
+    res.writeHead(404).end('{}');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const servers = [{ port: server.address().port, pwd: process.cwd(), started: 1, mcpToken: 'test-token' }];
+    assert.deepEqual((await runListAgentProviders({ cwd: project }, servers)).structuredContent.providers, providers);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
 test('lists live peers, relays messages, and explicitly queues inbox messages', async () => {
   const received = [];
   const inbox = [];

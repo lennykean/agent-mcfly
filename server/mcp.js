@@ -319,7 +319,7 @@ const REVIEW_REPLY_TOOL = {
   },
 };
 
-function pickServer(args, servers = liveServers()) {
+async function pickServer(args, servers = liveServers()) {
   if (!servers.length) return null;
   const cwd = path.resolve(args.cwd ?? process.cwd());
   // among cwd matches, prefer the newest server — it runs the newest code.
@@ -329,7 +329,9 @@ function pickServer(args, servers = liveServers()) {
   // read from, and written to, an unrelated project.
   const pick = [...servers].sort((a, b) => b.started - a.started)
     .find((s) => scopeOwns(s.pwd, cwd));
-  return pick ? { cwd, pick } : null;
+  if (pick) return { cwd, pick };
+  const attached = await findWorkspaceState(servers, cwd);
+  return attached ? { cwd, pick: attached.pick } : null;
 }
 
 const noWorkspace = (args) => ({
@@ -338,7 +340,7 @@ const noWorkspace = (args) => ({
 });
 
 export async function runListPeers(args = {}, servers) {
-  const found = pickServer(args, servers);
+  const found = await pickServer(args, servers);
   if (!found) return noWorkspace(args);
   try {
     const response = await fetch(`http://127.0.0.1:${found.pick.port}/api/peers`);
@@ -352,7 +354,7 @@ export async function runListPeers(args = {}, servers) {
 }
 
 async function workspaceFetch(args, servers, route, options) {
-  const found = pickServer(args, servers);
+  const found = await pickServer(args, servers);
   if (!found) return { error: noWorkspace(args) };
   try {
     const init = typeof options === 'function' ? options(found) : options;
@@ -417,7 +419,7 @@ export async function runPullInbox(args = {}, servers) {
 }
 
 async function reviewFetch(args, route, payload) {
-  const found = pickServer(args);
+  const found = await pickServer(args);
   if (!found) return null;
   const { cwd, pick } = found;
   const res = payload
@@ -431,7 +433,7 @@ async function reviewFetch(args, route, payload) {
 async function enrichChecklist(review, args) {
   const base = review.checklist?.base;
   if (!base) return review;
-  const found = pickServer(args);
+  const found = await pickServer(args);
   if (!found) return review;
   try {
     const d = await fetch(`http://127.0.0.1:${found.pick.port}/api/git/reffiles?root=${encodeURIComponent(review.project)}&ref=${encodeURIComponent(base)}`)
@@ -550,7 +552,7 @@ async function runDataMatcher(args = {}) {
 }
 
 async function matcherFetch(args, method, payload) {
-  const found = pickServer(args);
+  const found = await pickServer(args);
   if (!found) return null;
   const url = `http://127.0.0.1:${found.pick.port}/api/data-matchers`;
   const res = method === 'POST'

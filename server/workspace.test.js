@@ -37,6 +37,12 @@ test('workspace state: ingests snapshots and events, serves filtered queries', a
       headers: { Origin: 'https://attacker.example', Authorization: `Bearer ${registered.mcpToken}` },
     });
     assert.equal(crossOrigin.status, 403);
+    const poisonedWorkspace = await fetch(`${base}/api/workspace-events`, {
+      method: 'POST',
+      headers: { Origin: 'https://attacker.example' },
+      body: JSON.stringify({ scope: path.dirname(process.cwd()), snapshot: {} }),
+    });
+    assert.equal(poisonedWorkspace.status, 403);
     const outOfScope = await fetch(`${base}/api/spawn-agent`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${registered.mcpToken}` },

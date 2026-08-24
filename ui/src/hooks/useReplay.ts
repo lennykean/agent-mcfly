@@ -6,11 +6,6 @@ import type { SessionMeta, Step, TailResponse, Timeline } from '../types';
 import { withConnection } from '../lib/api';
 
 const POLL_MS = 2500;
-// how long after an agent's last activity we still count it as "around":
-// covers a thinking pause, and keeps a scrub from flickering nodes
-const GRACE_MS = 90_000;
-// ...and how far behind before we stop tracking it entirely (frozen tip)
-const SETTLE_MS = 10 * 60_000;
 const POLL_HIDDEN_MS = 10_000; // backgrounded workbenches tail gently — a
 // heavy hidden session refolding mid-drag steals frames from the visible one
 
@@ -320,51 +315,7 @@ export function useReplay(active = true, connection?: string, matchers: DataMatc
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session, tailOnce, viewKey, pointers, agents]);
 
-  // ---- agent liveness by last activity ----
-  // Each child transcript's tip (its file mtime) says when that agent last
-  // did anything. An agent is SETTLED once its tip falls behind the head by
-  // more than the grace window: transcripts are append-only, so a settled
-  // tip can never change on its own — we freeze it and stop asking. Only a
-  // fresh reference from the parent (a new step naming it) re-arms tracking.
-  const [tips, setTips] = useState<Record<string, number>>({});
-  const settled = useRef(new Set<string>());
   const headTs = steps[head]?.ts ?? Date.now();
-  const agentKeys = agents.filter((a) => a.key !== 'main').map((a) => `${a.provider ?? session?.provider}:${a.key}`).join(',');
-  useEffect(() => {
-    if (!session) return;
-    const live = () => agents
-      .filter((a) => a.key !== 'main' && !settled.current.has(a.key))
-      .map((a) => a.key);
-    const poll = async () => {
-      const ids = live();
-      if (!ids.length) return;
-      try {
-        const groups = new Map<string, string[]>();
-        for (const id of ids) {
-          const provider = agents.find((agent) => agent.key === id)?.provider ?? session.provider;
-          groups.set(provider, [...(groups.get(provider) ?? []), id]);
-        }
-        const got: Record<string, { updated_at: number }> = Object.assign({}, ...(await Promise.all(
-          [...groups].map(async ([provider, sessionIds]) => (await fetch(
-            withConnection(`/api/session-tips?provider=${encodeURIComponent(provider)}&ids=${sessionIds.map(encodeURIComponent).join(',')}`, connection),
-          )).json()),
-        )));
-        const next: Record<string, number> = {};
-        for (const [id, t] of Object.entries(got ?? {})) {
-          if (typeof t?.updated_at !== 'number') continue;
-          next[id] = t.updated_at;
-          // fallen far behind the newest activity: it is done moving
-          if (Date.now() - t.updated_at > SETTLE_MS) settled.current.add(id);
-        }
-        if (Object.keys(next).length) setTips((cur) => ({ ...cur, ...next }));
-      } catch { /* keep the last tips; agents stay visible */ }
-    };
-    void poll();
-    const id = setInterval(poll, active ? 4000 : 20_000);
-    return () => clearInterval(id);
-    // a new agent (or a re-reference) re-arms: agentKeys changes
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session, agentKeys, active]);
 
   const match = useMemo(
     () => (matchers.length ? (tool: string, params: unknown) => matchTool(matchers, tool, params) : undefined),
@@ -401,17 +352,13 @@ export function useReplay(active = true, connection?: string, matchers: DataMatc
 
   const animateIndex = animate?.key === viewKey ? animate.index : -1;
 
-  // an agent belongs on screen while the playhead sits inside its life:
-  // from the step that started it until its own last activity (+grace).
-  // Rewind walks back into that window and it returns — no death event needed.
+  // Rewinding before a spawn hides it. Once spawned, it stays in the agent
+  // tree: completion must not make a durable session link disappear.
   const pointerTs = steps[pointer]?.ts ?? headTs;
   const agentsLive = useMemo(() => agents.map((a) => {
     if (a.key === 'main') return { ...a, present: true };
-    const tip = tips[a.key];
-    const started = a.spawnedAt === undefined || pointerTs >= a.spawnedAt;
-    const present = started && (tip === undefined || pointerTs <= tip + GRACE_MS);
-    return { ...a, present };
-  }), [agents, tips, pointerTs]);
+    return { ...a, present: a.spawnedAt === undefined || pointerTs >= a.spawnedAt };
+  }), [agents, pointerTs]);
 
   return {
     session, selectSession, clearSession,
