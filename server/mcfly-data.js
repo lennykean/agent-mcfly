@@ -5,6 +5,7 @@ export const isHighlightTool = (name) => /(?:^|__)mcfly__highlight$/.test(String
 export const isWaypointTool = (name) => /(?:^|__)mcfly__waypoint$/.test(String(name));
 export const isWaypointRemoveTool = (name) => /(?:^|__)mcfly__waypoint_remove$/.test(String(name));
 export const isPeerMessageTool = (name) => /(?:^|__)mcfly__send_message$/.test(String(name));
+export const isSpawnAgentTool = (name) => /(?:^|__)mcfly__spawn_agent$/.test(String(name));
 
 // "12,40-45" (or an array of the same pieces) -> [{start,end}], or null
 export function parseLineSpec(spec) {
@@ -158,6 +159,36 @@ export function peerMessageResult(value) {
   const result = dataEnvelope(value);
   if (result?.kind !== 'peer_message' || result.delivered !== true || !result.peer?.id) return null;
   return { verb: 'peer_message', status: 'delivered', peer: result.peer };
+}
+
+export function spawnAgentCall(input) {
+  let args = input;
+  if (typeof input === 'string') {
+    try { args = JSON.parse(input); } catch { args = {}; }
+  }
+  const prompt = typeof args?.prompt === 'string' ? args.prompt.trim() : '';
+  return {
+    verb: 'spawn_agent', agent_type: args?.harness ?? 'agent',
+    title: prompt.length > 80 ? `${prompt.slice(0, 79)}…` : prompt || 'agent',
+    launch_kind: args?.kind ?? 'subagent',
+  };
+}
+
+export function spawnAgentResult(value) {
+  const result = dataEnvelope(value);
+  if (result?.kind !== 'agent_spawn' || !result.provider || !result.session_id || !result.workspace) return null;
+  if (result.launch_kind === 'peer' && !result.peer?.id) return null;
+  return {
+    verb: 'spawn_agent', agent_type: result.harness ?? result.provider, status: 'running',
+    launch_kind: result.launch_kind ?? 'subagent',
+    ...(result.launch_kind === 'peer'
+      ? { peer: result.peer }
+      : {
+          child_session_id: result.session_id,
+          child_provider: result.provider,
+          child_workspace: result.workspace,
+        }),
+  };
 }
 
 export function waypointCall(input) {

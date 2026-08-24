@@ -223,6 +223,28 @@ test('recovers a delivered McFly peer message with linkable session metadata', (
   });
 });
 
+test('renders McFly-launched cross-provider children and top-level peers', () => {
+  const subCall = callRender('mcp__mcfly__spawn_agent', JSON.stringify({ harness: 'claude', prompt: 'audit this' }));
+  assert.equal(subCall.verb, 'spawn_agent');
+  assert.equal(subCall.title, 'audit this');
+  const sub = resultRender({ name: 'mcp__mcfly__spawn_agent', render: subCall }, JSON.stringify({
+    schema: 'mcfly.data.v1', kind: 'agent_spawn', launch_kind: 'subagent', harness: 'claude',
+    provider: 'claude-code', session_id: 'project/child.jsonl', workspace: '/repo',
+  }));
+  assert.equal(sub.child_session_id, 'project/child.jsonl');
+  assert.equal(sub.child_provider, 'claude-code');
+  assert.equal(sub.child_workspace, '/repo');
+
+  const peerCall = callRender('mcp__mcfly__spawn_agent', JSON.stringify({ harness: 'cursor', kind: 'peer', prompt: 'pair' }));
+  const peer = { id: 'pty-1', terminal_id: 'pty-1', provider: 'cursor', session_id: 'ws/chat', workspace: '/repo' };
+  const peerResult = resultRender({ name: 'mcp__mcfly__spawn_agent', render: peerCall }, JSON.stringify({
+    schema: 'mcfly.data.v1', kind: 'agent_spawn', launch_kind: 'peer', harness: 'cursor',
+    provider: 'cursor', session_id: 'ws/chat', workspace: '/repo', peer,
+  }));
+  assert.equal(peerResult.child_session_id, undefined);
+  assert.deepEqual(peerResult.peer, peer);
+});
+
 test('codex teams: sub-agent threads stay out of the session list and link to their spawn', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcfly-codex-team-'));
   const root = { session_id: 'root-1', id: 'root-1', cwd: dir, source: 'vscode' };

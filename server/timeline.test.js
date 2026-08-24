@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { appendMessages, applyPatch, createTimeline, invertHunks, fileChain, foldState, pathWithin, resolveWaypoint } from '../ui/src/lib/timeline.ts';
+import { appendMessages, applyPatch, createTimeline, invertHunks, fileChain, foldState, pathWithin, providerForChild, resolveWaypoint } from '../ui/src/lib/timeline.ts';
 
 const tool = (index, verb, path, result) => ({
   kind: 'tool', tool: 'T', requestId: String(index), params: {},
@@ -149,6 +149,11 @@ test('fileChain: windows paths fold case, posix paths do not', () => {
   assert.equal(pathWithin('C:\\repo-old\\f.ts', 'C:\\repo'), false);
   assert.equal(pathWithin('/repo/Foo/f.ts', '/repo/Foo'), true);
   assert.equal(pathWithin('/repo/foo/f.ts', '/repo/Foo'), false);
+});
+
+test('cross-provider children keep their own loader while native children inherit', () => {
+  assert.equal(providerForChild('claude-code', 'codex'), 'claude-code');
+  assert.equal(providerForChild(undefined, 'codex'), 'codex');
 });
 
 test('foldState removes deleted sources and moves renamed content', () => {

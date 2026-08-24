@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { StringDecoder } from 'node:string_decoder';
-import { highlightCall, highlightResult, isHighlightTool, isPeerMessageTool, isTableTool, isWaypointRemoveTool, isWaypointTool, peerMessageCall, peerMessageResult, tableCall, tableResult, waypointCall, waypointRemoveCall, waypointRemoveResult, waypointResult } from '../mcfly-data.js';
+import { highlightCall, highlightResult, isHighlightTool, isPeerMessageTool, isSpawnAgentTool, isTableTool, isWaypointRemoveTool, isWaypointTool, peerMessageCall, peerMessageResult, spawnAgentCall, spawnAgentResult, tableCall, tableResult, waypointCall, waypointRemoveCall, waypointRemoveResult, waypointResult } from '../mcfly-data.js';
 import { idsFor, MAX_CHUNK, memoByStamp, readTail, truncate } from './transcript.js';
 
 const ROOT = path.join(os.homedir(), '.codex', 'sessions');
@@ -163,6 +163,15 @@ export function listForCwd(cwd) {
   }
   out.sort((a, b) => b.updated_at - a.updated_at);
   return out;
+}
+
+// Interactive Codex has no caller-assigned session id. Its first prompt gets
+// an unguessable launch marker, so a concurrent manual launch cannot match.
+export function findByLaunchMarker(cwd, marker, startedAt = 0) {
+  return listForCwd(cwd).filter((session) => {
+    if (session.updated_at < startedAt - 1000) return false;
+    try { return fs.readFileSync(resolveId(session.id), 'utf8').includes(marker); } catch { return false; }
+  });
 }
 
 // transcript + call_id -> render metadata (one entry per file for multi-file patches)
@@ -449,6 +458,7 @@ export function callRender(name, input) {
 }
 
 function directRenders(name, input, source = input) {
+  if (isSpawnAgentTool(name)) return [spawnAgentCall(input)];
   if (isPeerMessageTool(name)) return [peerMessageCall(input)];
   if (isTableTool(name)) return [tableCall(input)];
   if (isHighlightTool(name)) return [highlightCall(input)];
@@ -534,6 +544,9 @@ function patchResultFailed(text, output) {
 
 export function resultRender(meta, text, output) {
   if (!meta) return { verb: 'other' };
+  if (isSpawnAgentTool(meta.name)) {
+    return spawnAgentResult(output) ?? spawnAgentResult(text) ?? { verb: 'exec', stdout: execPayload(text), stderr: '' };
+  }
   if (meta.render?.verb === 'spawn_agent') {
     // the output names the agent (/root/task_name); its thread is a rollout
     // of its own, findable by that path under the same team root

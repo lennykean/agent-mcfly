@@ -59,6 +59,9 @@ export interface CallRender {
   // meta sidecar, codex's spawn result) — the tree needs no death to show it
   agent_id?: string;
   child_session_id?: string;
+  child_provider?: string;
+  child_workspace?: string;
+  launch_kind?: 'subagent' | 'peer';
   peer_id?: string;
 }
 
@@ -96,6 +99,9 @@ export interface ResultRender {
   status?: string;
   summary?: string;
   child_session_id?: string;
+  child_provider?: string;
+  child_workspace?: string;
+  launch_kind?: 'subagent' | 'peer';
   peer?: PeerReference;
 }
 

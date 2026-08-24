@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { appendMessages, createTimeline, durationFor, foldState, indexAtTime } from '../lib/timeline';
+import { appendMessages, createTimeline, durationFor, foldState, indexAtTime, providerForChild } from '../lib/timeline';
 import { runTransform } from '../lib/sandbox';
 import { matchTool, type DataMatcher } from '../lib/matchers';
 import type { SessionMeta, Step, TailResponse, Timeline } from '../types';
@@ -19,6 +19,8 @@ export interface AgentNode {
   parentKey: string | null;
   label: string;
   agentType?: string;
+  provider?: string;
+  workspace?: string;
   spawnedAt?: number; // ms; the moment its parent started it
 }
 
@@ -256,6 +258,8 @@ export function useReplay(active = true, connection?: string, matchers: DataMatc
           parentKey: tl.key,
           label: s.call.title ?? link.agent_id ?? 'agent',
           agentType: link.agent_type ?? s.call.agent_type,
+          provider: providerForChild(link.child_provider, tl.provider),
+          workspace: link.child_workspace,
           spawnedAt: s.ts,
         });
       }
@@ -267,7 +271,8 @@ export function useReplay(active = true, connection?: string, matchers: DataMatc
   const switchView = useCallback((key: string, childSessionId?: string) => {
     if (!timelines.current.has(key)) {
       if (!childSessionId || !session) return;
-      timelines.current.set(key, createTimeline(key, childSessionId, session.provider));
+      const node = agents.find((agent) => agent.key === key);
+      timelines.current.set(key, createTimeline(key, childSessionId, node?.provider ?? session.provider));
       void tailOnce(key);
     }
     setAnimate(null);
@@ -323,7 +328,7 @@ export function useReplay(active = true, connection?: string, matchers: DataMatc
   const [tips, setTips] = useState<Record<string, number>>({});
   const settled = useRef(new Set<string>());
   const headTs = steps[head]?.ts ?? Date.now();
-  const agentKeys = agents.filter((a) => a.key !== 'main').map((a) => a.key).join(',');
+  const agentKeys = agents.filter((a) => a.key !== 'main').map((a) => `${a.provider ?? session?.provider}:${a.key}`).join(',');
   useEffect(() => {
     if (!session) return;
     const live = () => agents
@@ -333,9 +338,16 @@ export function useReplay(active = true, connection?: string, matchers: DataMatc
       const ids = live();
       if (!ids.length) return;
       try {
-        const got: Record<string, { updated_at: number }> = await (await fetch(
-          `/api/session-tips?provider=${encodeURIComponent(session.provider)}&ids=${ids.map(encodeURIComponent).join(',')}`,
-        )).json();
+        const groups = new Map<string, string[]>();
+        for (const id of ids) {
+          const provider = agents.find((agent) => agent.key === id)?.provider ?? session.provider;
+          groups.set(provider, [...(groups.get(provider) ?? []), id]);
+        }
+        const got: Record<string, { updated_at: number }> = Object.assign({}, ...(await Promise.all(
+          [...groups].map(async ([provider, sessionIds]) => (await fetch(
+            withConnection(`/api/session-tips?provider=${encodeURIComponent(provider)}&ids=${sessionIds.map(encodeURIComponent).join(',')}`, connection),
+          )).json()),
+        )));
         const next: Record<string, number> = {};
         for (const [id, t] of Object.entries(got ?? {})) {
           if (typeof t?.updated_at !== 'number') continue;

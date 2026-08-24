@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 test('workspace state: ingests snapshots and events, serves filtered queries', async () => {
@@ -16,6 +18,33 @@ test('workspace state: ingests snapshots and events, serves filtered queries', a
   });
   try {
     const base = `http://127.0.0.1:${port}`;
+    let registered;
+    const registry = path.join(os.homedir(), '.mcfly', 'servers.json');
+    for (let i = 0; i < 50 && !registered; i++) {
+      try { registered = JSON.parse(fs.readFileSync(registry, 'utf8')).find((entry) => entry.port === port); } catch { /* registry write pending */ }
+      if (!registered) await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(typeof registered?.mcpToken, 'string');
+    assert.ok(registered.mcpToken.length >= 32);
+
+    const privateBody = JSON.stringify({ harness: 'codex', prompt: 'must not launch', cwd: process.cwd() });
+    const unauthorized = await fetch(`${base}/api/spawn-agent`, { method: 'POST', body: privateBody });
+    assert.equal(unauthorized.status, 401);
+    const crossOrigin = await fetch(`${base}/api/spawn-agent`, {
+      method: 'POST', body: privateBody,
+      headers: { Origin: 'https://attacker.example', Authorization: `Bearer ${registered.mcpToken}` },
+    });
+    assert.equal(crossOrigin.status, 403);
+    const outOfScope = await fetch(`${base}/api/spawn-agent`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${registered.mcpToken}` },
+      body: JSON.stringify({ harness: 'codex', prompt: 'must not launch', cwd: path.dirname(process.cwd()) }),
+    });
+    assert.equal(outOfScope.status, 403);
+    assert.equal((await outOfScope.json()).code, 'AGENT_CWD_OUT_OF_SCOPE');
+    const config = await (await fetch(`${base}/api/config`)).json();
+    assert.equal(Object.hasOwn(config, 'mcpToken'), false);
+
     const post = await fetch(`${base}/api/workspace-events`, {
       method: 'POST',
       body: JSON.stringify({

@@ -26,14 +26,23 @@ const WIN = process.platform === 'win32';
 export const AGENT_TOOLS = ['claude', 'codex', 'cursor-agent', 'agy', 'pi', 'opencode', 'aider', 'gemini', 'goose'];
 const BUFFER_CAP = 256 * 1024;
 
-function which(name) {
+export const hasTerminalControls = (value) => /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(String(value));
+
+export function toolPath(name, { platform = process.platform, lookup = execFileSync, exists = fs.existsSync } = {}) {
+  const win = platform === 'win32';
   try {
-    execFileSync(WIN ? 'where.exe' : 'which', [name], { stdio: 'pipe' });
-    return true;
+    const found = lookup(win ? 'where.exe' : 'which', [name], { encoding: 'utf8', windowsHide: true })
+      .split(/\r?\n/).filter(Boolean);
+    if (!win) return found[0];
+    const first = found.find((file) => /\.(?:com|exe|cmd|bat|ps1)$/i.test(file)) ?? found[0];
+    const ps1 = first?.replace(/\.cmd$/i, '.ps1');
+    return ps1 !== first && exists(ps1) ? ps1 : first;
   } catch {
-    return false;
+    return null;
   }
 }
+
+const which = (name) => !!toolPath(name);
 
 const SHELL = WIN ? (which('pwsh') ? 'pwsh.exe' : 'powershell.exe') : process.env.SHELL || 'bash';
 
@@ -233,7 +242,7 @@ export function sendPeerMessage(id, message) {
   try { requireMessageable(s); } catch (error) { return Promise.reject(error); }
   if (typeof message !== 'string' || !message.trim()) return Promise.reject(relayError('message is required', 400, 'INVALID_MESSAGE'));
   if (Buffer.byteLength(message) > 128 * 1024) return Promise.reject(relayError('message is too large', 413, 'MESSAGE_TOO_LARGE'));
-  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(message)) {
+  if (hasTerminalControls(message)) {
     return Promise.reject(relayError('message contains terminal control characters', 400, 'INVALID_MESSAGE'));
   }
   const deliver = () => {
@@ -360,6 +369,50 @@ const shQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 // remote-data.js has a same-named helper that returns the quotes too
 const powershellBody = (s) => String(s).replace(/'/g, "''");
 
+function localPty(cwd, tool, line, relayEnabled = false, ws = null, env = {}) {
+  const p = pty.spawn(SHELL, [], {
+    name: 'xterm-256color', cols: 100, rows: 30, cwd, env: { ...sanitizedEnv(), ...env },
+    ...(WIN ? { useConptyDll: true } : {}),
+  });
+  const s = {
+    id: crypto.randomBytes(8).toString('hex'), p, buffer: '', ws: null,
+    tool, cwd, created: Date.now(), session: null, title: '', relayEnabled,
+    relayQueue: Promise.resolve(),
+    shadow: new ShadowTerminal({ cols: 100, rows: 30, scrollback: 20, allowProposedApi: true }),
+  };
+  try { s.shadow.onTitleChange((t) => { s.title = t; }); } catch { /* preview only */ }
+  sessions.set(s.id, s);
+  saveLive();
+  if (ws?.readyState === 1) {
+    ws.send(ctl({ ptyId: s.id, relayEnabled }));
+    wire(s, ws);
+  }
+  if (line) setTimeout(() => { try { p.write(`${line}\r`); } catch { /* ended */ } }, 600);
+  p.onData((d) => record(s, d));
+  p.onExit(() => {
+    if (s.ws?.readyState === 1) {
+      s.ws.send(ctl({ exit: true }));
+      s.ws.close();
+    }
+    try { s.shadow?.dispose(); } catch { /* already gone */ }
+    sessions.delete(s.id);
+    saveLive();
+  });
+  return s;
+}
+
+const shellQuote = WIN ? (value) => `'${powershellBody(value)}'` : shQuote;
+
+// Programmatic peers use the exact same PTY registry as UI-launched terminals.
+// The prompt is shell-quoted and relay starts enabled, so no human keystroke can
+// interleave with later MCP messages.
+export function launchAgentPty(tool, cwd, args, prompt) {
+  if (hasTerminalControls(prompt)) throw new Error('prompt contains terminal control characters');
+  const promptArg = WIN ? '$env:MCFLY_AGENT_PROMPT' : '"$MCFLY_AGENT_PROMPT"';
+  const line = [tool + toolFlags(tool), ...args.map(shellQuote), promptArg].join(' ');
+  return peerView(localPty(cwd, tool, line, true, null, { MCFLY_AGENT_PROMPT: prompt }));
+}
+
 function remoteShell(record, cwd, cb) {
   const ps = `try { Set-Location -LiteralPath '${powershellBody(cwd)}' -ErrorAction Stop } catch { Write-Error $_; exit 1 }`;
   const command = record.platform === 'win32'
@@ -480,53 +533,17 @@ export function attachPty(server, allowedHosts, getRemote = () => undefined) {
       try {
         if (cwdParam && fs.statSync(cwdParam).isDirectory()) cwd = cwdParam;
       } catch { /* stale/bad path from an old transcript; home is fine */ }
-      let p;
       try {
-        p = pty.spawn(SHELL, [], {
-          name: 'xterm-256color',
-          cols: 100,
-          rows: 30,
-          cwd,
-          env: sanitizedEnv(),
-          // modern conpty (ships in the prebuilds), not the in-box conhost:
-          // the old one eats TUI scrollback and mouse passthrough, so wheel
-          // scrolling in claude/codex sessions is dead without this
-          ...(WIN ? { useConptyDll: true } : {}),
-        });
+        // creation is shared with MCP-launched relay peers; UI terminals start
+        // with their websocket already attached.
+        const line = tool !== '_' && /^[\w.-]+$/.test(tool) ? tool + toolFlags(tool) : '';
+        localPty(cwd, tool, line, false, ws);
+        return;
       } catch (e) {
         ws.send(`\r\nfailed to start ${SHELL}: ${e.message}\r\n`);
         ws.close();
         return;
       }
-      const s = {
-        id: crypto.randomBytes(8).toString('hex'), p, buffer: '', ws: null,
-        tool, cwd, created: Date.now(), session: null, title: '',
-        relayEnabled: false, relayQueue: Promise.resolve(),
-        shadow: new ShadowTerminal({ cols: 100, rows: 30, scrollback: 20, allowProposedApi: true }),
-      };
-      // agents announce themselves in the terminal title (OSC); the shadow
-      // parses it anyway, and the title is how a pty maps to its session
-      try { s.shadow.onTitleChange((t) => { s.title = t; }); } catch { /* preview only */ }
-      sessions.set(s.id, s);
-      saveLive();
-      ws.send(ctl({ ptyId: s.id, relayEnabled: false }));
-
-      // launch the picked tool inside the shell so PATH/shims resolve the
-      // same way they do for the user; '_' stays a bare shell
-      if (tool !== '_' && /^[\w.-]+$/.test(tool)) {
-        setTimeout(() => p.write(tool + toolFlags(tool) + '\r'), 600);
-      }
-      p.onData((d) => record(s, d));
-      p.onExit(() => {
-        if (s.ws?.readyState === 1) {
-          s.ws.send(ctl({ exit: true }));
-          s.ws.close();
-        }
-        try { s.shadow?.dispose(); } catch { /* already gone */ }
-        sessions.delete(s.id);
-        saveLive();
-      });
-      wire(s, ws);
     });
   });
 }

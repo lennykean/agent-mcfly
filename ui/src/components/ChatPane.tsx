@@ -68,6 +68,9 @@ const Bubble = memo(function Bubble({ step, onJump, onOpenAgent, onOpenPeer }: {
         {r?.child_session_id && (
           <button onClick={() => onOpenAgent(r.child_session_id!)}>open timeline</button>
         )}
+        {r?.peer && (
+          <button onClick={() => onOpenPeer(r.peer!)}>open peer</button>
+        )}
       </div>
     );
   }

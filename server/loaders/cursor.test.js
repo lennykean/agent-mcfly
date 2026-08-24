@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
-import { listChats, rootMessageIds, tailStore, tip, turnTimestamp, userText, workspaceHash } from './cursor.js';
+import { cursorTranscriptsSupported, listChats, rootMessageIds, tailStore, tip, turnTimestamp, userText, workspaceHash } from './cursor.js';
 
 const require = createRequire(import.meta.url);
 let sqlite = null;
@@ -62,6 +62,12 @@ const resultMessage = (id, toolName, result, output) => ({
 
 // ---- pure helpers (no SQLite needed) ----
 
+test('probes the loadable node:sqlite capability instead of inferring it from a version', () => {
+  assert.equal(cursorTranscriptsSupported(() => ({ DatabaseSync() {} })), true);
+  assert.equal(cursorTranscriptsSupported(() => { throw Object.assign(new Error('disabled'), { code: 'ERR_UNKNOWN_BUILTIN_MODULE' }); }), false);
+  assert.equal(cursorTranscriptsSupported(() => ({})), false);
+});
+
 test('a workspace is keyed by the md5 of the cwd cursor was launched in', () => {
   assert.equal(workspaceHash('C:\\Users\\Lenny\\git\\magpie'), 'e725bd715a7787eaf72f7c52a8583fae');
   assert.notEqual(workspaceHash('/repo'), workspaceHash('/repo/'));
@@ -95,7 +101,7 @@ test('the turn timestamp honours the zone cursor writes, not the reader s', () =
 
 // ---- the store ----
 
-test('converts a cursor chat store into normalized messages and render verbs', { skip: !sqlite && 'needs node 22.5+' }, () => {
+test('converts a cursor chat store into normalized messages and render verbs', { skip: !sqlite && 'needs node:sqlite' }, () => {
   const bigRead = Buffer.from('line one\nline two\n', 'utf8');
   const dir = chatDir([
     { role: 'system', content: 'you are an agent' },
@@ -166,7 +172,7 @@ test('converts a cursor chat store into normalized messages and render verbs', {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('renders a delivered McFly peer message as a peer link', { skip: !sqlite && 'needs node 22.5+' }, () => {
+test('renders a delivered McFly peer message as a peer link', { skip: !sqlite && 'needs node:sqlite' }, () => {
   const peer = {
     id: 'remote-1:pty-1', terminal_id: 'pty-1', tool: 'claude', cwd: '/repo', title: 'Peer',
     session_id: 'session.jsonl', provider: 'claude-code', connection: 'remote-1',
@@ -183,7 +189,24 @@ test('renders a delivered McFly peer message as a peer link', { skip: !sqlite &&
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('a failed call keeps its message and is flagged, not silently dropped', { skip: !sqlite && 'needs node 22.5+' }, () => {
+test('renders a McFly-launched cross-provider child', { skip: !sqlite && 'needs node:sqlite' }, () => {
+  const envelope = {
+    schema: 'mcfly.data.v1', kind: 'agent_spawn', launch_kind: 'subagent', harness: 'claude',
+    provider: 'claude-code', session_id: 'project/child.jsonl', workspace: '/repo',
+  };
+  const args = { server: 'mcfly', toolName: 'spawn_agent', arguments: { harness: 'claude', prompt: 'audit' } };
+  const dir = chatDir([
+    { role: 'assistant', content: [call('spawn-call', 'CallMcpTool', args)] },
+    { role: 'tool', content: [{ type: 'tool-result', toolCallId: 'spawn-call', toolName: 'CallMcpTool', args, result: JSON.stringify(envelope) }] },
+  ]);
+  const messages = tailStore(dir, 0, 'ws/chat-1').messages;
+  assert.equal(messages[0].content[0].extended.render.verb, 'spawn_agent');
+  assert.equal(messages[1].content[0].extended.render.child_provider, 'claude-code');
+  assert.equal(messages[1].content[0].extended.render.child_session_id, 'project/child.jsonl');
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('a failed call keeps its message and is flagged, not silently dropped', { skip: !sqlite && 'needs node:sqlite' }, () => {
   const dir = chatDir([
     { role: 'assistant', content: [call('c1', 'Shell', { command: 'nope' })] },
     resultMessage('c1', 'Shell', 'command not found', { error: { error: 'command not found' } }),
@@ -195,7 +218,7 @@ test('a failed call keeps its message and is flagged, not silently dropped', { s
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('tailing resumes from a message index and never stalls on a pruned blob', { skip: !sqlite && 'needs node 22.5+' }, () => {
+test('tailing resumes from a message index and never stalls on a pruned blob', { skip: !sqlite && 'needs node:sqlite' }, () => {
   const dir = chatDir([
     { role: 'user', content: [{ type: 'text', text: '<user_query>one</user_query>' }] },
     { role: 'assistant', content: [{ type: 'text', text: 'two' }] },
@@ -231,7 +254,7 @@ test('a root blob McFly cannot fully walk keeps the ids it did read', () => {
   assert.deepEqual(rootMessageIds(Buffer.concat([Buffer.from([0x0a, 0x20]), Buffer.alloc(4)])), []);
 });
 
-test('a result with no cursor envelope is output, not an error', { skip: !sqlite && 'needs node 22.5+' }, () => {
+test('a result with no cursor envelope is output, not an error', { skip: !sqlite && 'needs node:sqlite' }, () => {
   const dir = chatDir([
     { role: 'assistant', content: [call('n1', 'Shell', { command: 'ls' })] },
     // no providerOptions at all — cursor omits the envelope for some tools
@@ -243,7 +266,7 @@ test('a result with no cursor envelope is output, not an error', { skip: !sqlite
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('a read whose content blob is gone is not reported as an empty file', { skip: !sqlite && 'needs node 22.5+' }, () => {
+test('a read whose content blob is gone is not reported as an empty file', { skip: !sqlite && 'needs node:sqlite' }, () => {
   const dir = chatDir([
     { role: 'assistant', content: [call('r1', 'Read', { path: '/a.txt' })] },
     resultMessage('r1', 'Read', 'annotated', {
@@ -260,7 +283,7 @@ test('a read whose content blob is gone is not reported as an empty file', { ski
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('an inlined image counts against the chunk budget', { skip: !sqlite && 'needs node 22.5+' }, () => {
+test('an inlined image counts against the chunk budget', { skip: !sqlite && 'needs node:sqlite' }, () => {
   const image = Buffer.alloc(3 * 1024 * 1024, 7);
   const read = (n) => [
     { role: 'assistant', content: [call(`i${n}`, 'Read', { path: `/shot${n}.png` })] },
@@ -276,7 +299,7 @@ test('an inlined image counts against the chunk budget', { skip: !sqlite && 'nee
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('a session rewritten behind the client asks it to rebuild', { skip: !sqlite && 'needs node 22.5+' }, () => {
+test('a session rewritten behind the client asks it to rebuild', { skip: !sqlite && 'needs node:sqlite' }, () => {
   // cursor compacts and rewinds, so the root list can SHRINK; a cursor past the
   // end must not leave the client silently stuck forever
   const dir = chatDir([{ role: 'assistant', content: [{ type: 'text', text: 'only' }] }]);
@@ -289,7 +312,7 @@ test('a session rewritten behind the client asks it to rebuild', { skip: !sqlite
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('a Task links its subagent from the call, before any result arrives', { skip: !sqlite && 'needs node 22.5+' }, () => {
+test('a Task links its subagent from the call, before any result arrives', { skip: !sqlite && 'needs node:sqlite' }, () => {
   const ws = workspace();
   const parent = chatDir([
     { role: 'assistant', content: [call('t1', 'Task', { description: 'dig', subagent_type: 'generalPurpose' })] },
@@ -312,7 +335,7 @@ test('a Task links its subagent from the call, before any result arrives', { ski
   fs.rmSync(ws, { recursive: true, force: true });
 });
 
-test('the picker lists real chats and hides subagents and empty ones', { skip: !sqlite && 'needs node 22.5+' }, () => {
+test('the picker lists real chats and hides subagents and empty ones', { skip: !sqlite && 'needs node:sqlite' }, () => {
   const ws = workspace();
   chatDir([{ role: 'user', content: [{ type: 'text', text: '<user_query>do the thing</user_query>' }] }], { ws, chat: 'plain' });
   chatDir([{ role: 'user', content: [{ type: 'text', text: '<user_query>named</user_query>' }] }], { ws, chat: 'titled', name: 'Ship It' });

@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import http from 'node:http';
 import path from 'node:path';
 import { DATA_MARKER, dataEnvelope, highlightResult, parseLineSpec, parseTsv } from './mcfly-data.js';
-import { checklistFiles, findWorkspaceState, runListPeers, runSendMessage } from './mcp.js';
+import { checklistFiles, findWorkspaceState, runListAgentProviders, runListPeers, runSendMessage, runSpawnAgent } from './mcp.js';
 
 test('validates strict TSV and serves it through MCP stdio', () => {
   assert.deepEqual(parseTsv('name\tcount\nalpha\t2\n'), {
@@ -46,7 +46,9 @@ test('validates strict TSV and serves it through MCP stdio', () => {
   const responses = requests.map((r) => byId.get(r.id));
   assert.equal(responses[0].result.serverInfo.name, 'mcfly');
   assert.equal(responses[1].result.tools[0].name, 'run_table');
-  assert.deepEqual(responses[1].result.tools.slice(-2).map((tool) => tool.name), ['list_peers', 'send_message']);
+  assert.deepEqual(responses[1].result.tools.slice(-4).map((tool) => tool.name), [
+    'list_agent_providers', 'spawn_agent', 'list_peers', 'send_message',
+  ]);
   assert.equal(responses[2].result.isError, undefined);
   assert.deepEqual(responses[2].result.structuredContent.data, {
     columns: ['name', 'count'], rows: [['alpha', '2']],
@@ -143,6 +145,40 @@ test('lists live peers and sends a complete message through the workspace server
     assert.deepEqual(received, { id: peer.id, message: 'hello\npeer' });
     assert.equal(sent.structuredContent.peer.terminal_id, 'term-1');
     assert.equal(sent.structuredContent.peer.session_id, 'session.jsonl');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('discovers launch providers and returns stable spawned session metadata', async () => {
+  const providers = [{ harness: 'codex', provider: 'codex', executable: 'codex', available: true, kinds: ['subagent', 'peer'] }];
+  const mcpToken = 'test-only-private-token';
+  let received;
+  const server = http.createServer((req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    assert.equal(req.headers.authorization, `Bearer ${mcpToken}`);
+    if (req.url === '/api/agent-providers') return res.end(JSON.stringify(providers));
+    let body = '';
+    req.setEncoding('utf8');
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      received = JSON.parse(body);
+      res.end(JSON.stringify({
+        kind: received.kind ?? 'subagent', harness: received.harness, provider: 'codex',
+        session_id: 'stable.jsonl', workspace: process.cwd(),
+      }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const servers = [{ port: server.address().port, pwd: process.cwd(), started: 1, mcpToken }];
+    assert.deepEqual((await runListAgentProviders({}, servers)).structuredContent.providers, providers);
+    const spawned = await runSpawnAgent({ harness: 'codex', prompt: 'audit', kind: 'subagent' }, servers);
+    assert.deepEqual(received, { harness: 'codex', prompt: 'audit', kind: 'subagent', cwd: process.cwd() });
+    assert.equal(spawned.structuredContent.kind, 'agent_spawn');
+    assert.equal(spawned.structuredContent.session_id, 'stable.jsonl');
+    assert.equal(spawned.structuredContent.provider, 'codex');
+    assert.equal(JSON.stringify(spawned).includes(mcpToken), false);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

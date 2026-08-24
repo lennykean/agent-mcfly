@@ -88,3 +88,19 @@ test('renders a delivered McFly peer message as a peer link', () => {
   assert.equal(result.messages[0].content[0].extended.render.verb, 'peer_message');
   assert.deepEqual(result.messages[1].content[0].extended.render.peer, peer);
 });
+
+test('renders a McFly-launched cross-provider child', () => {
+  const envelope = {
+    schema: 'mcfly.data.v1', kind: 'agent_spawn', launch_kind: 'subagent', harness: 'cursor',
+    provider: 'cursor', session_id: 'workspace/child', workspace: '/repo',
+  };
+  const rows = [
+    { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'spawn-call', name: 'mcp__mcfly__spawn_agent', input: { harness: 'cursor', prompt: 'audit' } }] } },
+    { type: 'user', toolUseResult: envelope, message: { content: [{ type: 'tool_result', tool_use_id: 'spawn-call', content: JSON.stringify(envelope) }] } },
+  ];
+  const buf = Buffer.from(rows.map(JSON.stringify).join('\n') + '\n');
+  const messages = parseTailChunk('session.jsonl', 0, { mtimeMs: 1, size: buf.length }, buf).messages;
+  assert.equal(messages[0].content[0].extended.render.verb, 'spawn_agent');
+  assert.equal(messages[1].content[0].extended.render.child_provider, 'cursor');
+  assert.equal(messages[1].content[0].extended.render.child_session_id, 'workspace/child');
+});

@@ -17,6 +17,7 @@
     "server/ssh.js",
     "server/remote-data.js",
     "server/pty.js",
+    "server/agent-launch.js",
     "server/loaders/claude-code.js",
     "server/loaders/codex.js",
     "server/loaders/cursor.js",

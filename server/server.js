@@ -5,12 +5,14 @@ import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import * as claudeCode from './loaders/claude-code.js';
 import * as codex from './loaders/codex.js';
 import * as cursor from './loaders/cursor.js';
 import { alive, attachPty, detectTools, hasEditor, openInEditor, killAllPtys, killPty, listPeers, listPtys, reapOrphans, sendPeerMessage, setPtyRelay, setPtySession, TOKEN } from './pty.js';
+import { launchAgent, listAgentProviders } from './agent-launch.js';
 import { connectSsh, disconnectAllSsh, disconnectSsh, getSshConnection, listSshConnections } from './ssh.js';
 import * as review from './review.js';
 import * as matchers from './matchers.js';
@@ -63,6 +65,14 @@ async function requestJson(req) {
 }
 
 const ALLOWED_HOSTS = new Set([`localhost:${PORT}`, `127.0.0.1:${PORT}`, `[::1]:${PORT}`]);
+const MCP_TOKEN = crypto.randomBytes(32).toString('hex');
+const isPrivateMcpRoute = (pathname) => pathname === '/api/agent-providers' || pathname === '/api/spawn-agent';
+function hasMcpCredential(req) {
+  const supplied = req.headers.authorization;
+  const expected = `Bearer ${MCP_TOKEN}`;
+  if (typeof supplied !== 'string' || supplied.length !== expected.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(supplied), Buffer.from(expected));
+}
 
 // what the user has open/focused/selected, reported by the UI; agents query
 // it through the mcfly MCP's workspace_state tool. Multi-root: one snapshot
@@ -113,7 +123,8 @@ function updateServersFile(mutate) {
     let all = [];
     try { all = JSON.parse(fs.readFileSync(SERVERS_FILE, 'utf8')); } catch { /* fresh */ }
     all = all.filter((s) => s.pid !== process.pid && alive(s.pid));
-    fs.writeFileSync(SERVERS_FILE, JSON.stringify(mutate(all)));
+    fs.writeFileSync(SERVERS_FILE, JSON.stringify(mutate(all)), { mode: 0o600 });
+    fs.chmodSync(SERVERS_FILE, 0o600);
   } catch { /* best effort */ }
 }
 
@@ -123,6 +134,8 @@ const server = http.createServer(async (req, res) => {
     // DNS-rebinding defense: a hostile site pointed at 127.0.0.1 becomes
     // same-origin; the Host header is the tell.
     if (!ALLOWED_HOSTS.has(req.headers.host ?? '')) return json(res, 403, { error: 'bad host' });
+    if (isPrivateMcpRoute(url.pathname) && req.headers.origin) return json(res, 403, { error: 'cross-origin agent launch is forbidden' });
+    if (isPrivateMcpRoute(url.pathname) && !hasMcpCredential(req)) return json(res, 401, { error: 'unauthorized' });
     if (url.pathname === '/api/ssh/connections' && req.method === 'GET') {
       return json(res, 200, listSshConnections());
     }
@@ -236,6 +249,14 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, ptys);
     }
     if (url.pathname === '/api/peers') return json(res, 200, listPeers());
+    if (url.pathname === '/api/agent-providers') return json(res, 200, listAgentProviders());
+    if (url.pathname === '/api/spawn-agent' && req.method === 'POST') {
+      try {
+        return json(res, 200, await launchAgent(await requestJson(req), { scope: process.cwd() }));
+      } catch (error) {
+        return errorJson(res, error, 400);
+      }
+    }
     // read-only git inspection for the GIT pane; root follows the explorer
     if (url.pathname.startsWith('/api/git/')) {
       const root = url.searchParams.get('root') ?? process.cwd();
@@ -586,7 +607,9 @@ const server = http.createServer(async (req, res) => {
 attachPty(server, ALLOWED_HOSTS, getSshConnection);
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`Agent McFly API: http://localhost:${PORT}`);
-  updateServersFile((all) => [...all, { pid: process.pid, port: Number(PORT), pwd: process.cwd(), started: Date.now() }]);
+  updateServersFile((all) => [...all, {
+    pid: process.pid, port: Number(PORT), pwd: process.cwd(), started: Date.now(), mcpToken: MCP_TOKEN,
+  }]);
   if (process.env.MCFLY_OPEN === '1') {
     const url = `http://localhost:${PORT}`;
     const [cmd, args] = process.platform === 'win32'

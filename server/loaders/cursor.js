@@ -14,7 +14,7 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
-import { highlightCall, highlightResult, isHighlightTool, isPeerMessageTool, isTableTool, isWaypointRemoveTool, isWaypointTool, peerMessageCall, peerMessageResult, tableCall, tableResult, waypointCall, waypointRemoveCall, waypointRemoveResult, waypointResult } from '../mcfly-data.js';
+import { highlightCall, highlightResult, isHighlightTool, isPeerMessageTool, isSpawnAgentTool, isTableTool, isWaypointRemoveTool, isWaypointTool, peerMessageCall, peerMessageResult, spawnAgentCall, spawnAgentResult, tableCall, tableResult, waypointCall, waypointRemoveCall, waypointRemoveResult, waypointResult } from '../mcfly-data.js';
 import { parseUnified } from '../git.js';
 import { idsFor, MAX_CHUNK, memoByStamp, patchRegion, shortPath, truncate } from './transcript.js';
 
@@ -43,21 +43,31 @@ function storeStamp(dir, meta = readChatMeta(dir)) {
   };
 }
 
-// node:sqlite arrived in node 22.5; mcfly still supports 20, so it is loaded
-// on demand and a missing module simply means "no cursor sessions here".
+// McFly still supports Node 20, and supported Nodes can explicitly disable
+// node:sqlite, so load the actual runtime capability instead of guessing from
+// the version.
 const require = createRequire(import.meta.url);
 let sqlite;
+function trySqlite(load) {
+  try {
+    const mod = load('node:sqlite');
+    return typeof mod?.DatabaseSync === 'function' ? mod : null;
+  } catch { return null; }
+}
+
 function sqliteModule() {
-  if (sqlite === undefined) {
-    try { sqlite = require('node:sqlite'); } catch { sqlite = null; }
-  }
+  if (sqlite === undefined) sqlite = trySqlite(require);
   return sqlite;
+}
+
+export function cursorTranscriptsSupported(load) {
+  return !!(load ? trySqlite(load) : sqliteModule());
 }
 
 // Read-only: cursor-agent may be writing this store right now.
 function open(dir) {
   const mod = sqliteModule();
-  if (!mod) throw new Error('reading Cursor sessions needs node 22.5+ (node:sqlite)');
+  if (!mod) throw new Error('reading Cursor sessions needs node:sqlite enabled in this Node runtime');
   return new mod.DatabaseSync(path.join(dir, 'store.db'), { readOnly: true });
 }
 
@@ -175,7 +185,7 @@ function storeHead(dir) {
 export function listForCwd(cwd) {
   // Offering a session that tail() would refuse to open is worse than offering
   // none: the picker row is dead and says nothing about why.
-  if (!sqliteModule()) return [];
+  if (!cursorTranscriptsSupported()) return [];
   return listChats(path.join(ROOT, workspaceHash(cwd)), cwd);
 }
 
@@ -458,6 +468,7 @@ function toolOf(block) {
 // ---- render verbs: the provider-neutral contract the UI consumes ----
 
 function callRender(tool, input, ctx, toolCallId) {
+  if (isSpawnAgentTool(tool)) return spawnAgentCall(input);
   if (isPeerMessageTool(tool)) return peerMessageCall(input);
   if (isTableTool(tool)) return tableCall(input);
   if (isHighlightTool(tool)) return highlightCall(input);
@@ -521,6 +532,7 @@ function resultRender(tool, input, block, envelope, ctx) {
   // in the result or tuck it under the tool-call output
   const mine = (read) => read(block.result) ?? read(text) ?? read(ok)
     ?? (failed ? { verb: 'exec', stdout: '', stderr: text } : { verb: 'exec', stdout: text, stderr: '' });
+  if (isSpawnAgentTool(tool)) return mine(spawnAgentResult);
   if (isPeerMessageTool(tool)) return mine(peerMessageResult);
   if (isTableTool(tool)) return mine(tableResult);
   if (isHighlightTool(tool)) return mine(highlightResult);

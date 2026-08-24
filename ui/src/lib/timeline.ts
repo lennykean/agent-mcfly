@@ -1,4 +1,6 @@
 import type { Message, RenderVerb, ResultRender, Step, Timeline, Waypoint } from '../types';
+
+export const providerForChild = (child: string | undefined, parent: string) => child ?? parent;
 import type { DataMatcher } from './matchers';
 
 // Folding asks whether a step is claimed; it does not care how the rules are

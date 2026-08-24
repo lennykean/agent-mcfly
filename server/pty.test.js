@@ -3,7 +3,38 @@ import { EventEmitter } from 'node:events';
 import http from 'node:http';
 import test from 'node:test';
 import WebSocket from 'ws';
-import { attachPty, killAllPtys, killPty, listPeers, listPtys, sendPeerMessage, setPtyRelay, setPtySession, TOKEN } from './pty.js';
+import { attachPty, killAllPtys, killPty, launchAgentPty, listPeers, listPtys, sendPeerMessage, setPtyRelay, setPtySession, TOKEN, toolPath } from './pty.js';
+
+test('Windows tool lookup keeps PATH order when a later stale executable exists', () => {
+  const current = 'C:\\current\\codex.cmd';
+  const currentPs1 = 'C:\\current\\codex.ps1';
+  const stale = 'C:\\stale\\codex.exe';
+  const lookup = () => `C:\\current\\codex\r\n${current}\r\n${stale}\r\n`;
+
+  assert.equal(toolPath('codex', {
+    platform: 'win32', lookup, exists: (file) => file === currentPs1,
+  }), currentPs1);
+});
+
+test('programmatic peer prompts reject terminal controls before spawning a PTY', () => {
+  assert.throws(() => launchAgentPty('_', process.cwd(), [], 'bad\u001b[2J'), /control characters/);
+});
+
+test('programmatic agent terminals start visible with human input locked', async () => {
+  const peer = launchAgentPty('_', process.cwd(), [], 'test');
+  try {
+    assert.equal(peer.relay_enabled, true);
+    assert.equal(peer.interactive, false);
+    assert.equal(peer.session_available, false);
+    assert.equal(peer.messageable, false);
+    assert.ok(listPeers().some((item) => item.id === peer.id));
+  } finally {
+    killPty(peer.terminal_id);
+    for (let i = 0; i < 20 && listPeers().some((item) => item.id === peer.id); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+});
 
 test('kills hosted terminals during shutdown', async () => {
   const server = http.createServer();

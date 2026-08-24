@@ -34,7 +34,7 @@ McFly reads the sessions that each agent already writes. It installs nothing in 
 
 McFly finds the sessions of the folder that you open. It lists the agents that have a session for that folder, thus an agent shows only where you used it.
 
-Cursor Agent keeps a session in a SQLite database. To read one, McFly needs Node 22.5 or later. On an older Node, the other two agents still work, and Cursor Agent shows no sessions.
+Cursor Agent keeps a session in a SQLite database. To read one, McFly's Node runtime must provide `node:sqlite` (added in Node 22.5; early supporting releases require `--experimental-sqlite`, and `--no-experimental-sqlite` disables it). Without it, the other two agents still work, while Cursor Agent shows no sessions and its MCP launcher reports unavailable.
 
 ## The workbench
 
@@ -110,7 +110,7 @@ To open the settings, click the gear icon. The SETTINGS page holds the modes and
 
 ## Agent tools (MCP)
 
-The live peer relay is inspired by Kerry Ritter's MIT-licensed
+The agent routing and live peer relay are inspired by Kerry Ritter's MIT-licensed
 [Parley](https://github.com/KerryRitter/parley).
 
 The McFly MCP gives your agent tools that write to the workbench. To configure it for local agents:
@@ -130,6 +130,8 @@ This command writes `~/.mcfly/mcp.json`. When Codex or Claude Code is installed,
 | `workspace_state` | Gives the agent the open files, the visible lines, and the selections of the user. |
 | `review_state` | Reads the open human reviews and their comment threads. |
 | `review_reply` | Answers a review comment, and can mark it addressed. |
+| `list_agent_providers` | Lists the Codex, Claude, and Cursor launch harnesses and whether each executable is available. |
+| `spawn_agent` | Starts a headless child agent, or a visible relay-enabled peer with `kind: "peer"`, using the provider's normal approval and sandbox settings, and returns its stable session metadata. |
 | `list_peers` | Lists live terminals, relay state, and whether McFly has linked their agent session. |
 | `send_message` | Sends one complete prompt when relay is enabled and the target session is linkable. |
 

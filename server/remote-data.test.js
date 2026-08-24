@@ -243,7 +243,7 @@ test('discovers and incrementally parses remote Codex and Claude sessions locall
 
 // Cursor keeps a chat in SQLite, which SFTP cannot seek into: the store is
 // mirrored locally and read by the same loader the local case uses.
-test('mirrors a remote Cursor store and reads it with the local loader', { skip: !sqlite && 'needs node 22.5+' }, async () => {
+test('mirrors a remote Cursor store and reads it with the local loader', { skip: !sqlite && 'needs node:sqlite' }, async () => {
   const { connection, sftp } = fixture();
   const hash = cursor.workspaceHash('/repo');
   const dir = `/home/u/.cursor/chats/${hash}/chat-1`;

@@ -8,7 +8,7 @@ import { DATA_MARKER, parseLineSpec, parseTable, TABLE_FORMATS } from './mcfly-d
 
 const exec = promisify(execFile);
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url))).version;
-const INSTRUCTIONS = 'Use run_table for shell commands whose stdout is tabular data. The script must emit strict TSV: one unique, non-empty header row, at least two columns, at least one data row, and the same number of tab-separated cells on every row. Do not emit decoration or commentary to stdout; send diagnostics to stderr. Use highlight instead of a plain file read whenever you want to point the user at specific lines: it renders the file in the McFly viewer with those lines highlighted. Use waypoint to leave a durable note anchored to a specific line (a finding, explanation, or TODO): waypoints collect in the McFly Wayfinder tab and stay findable even after the file changes. Use waypoint_remove when a waypoint is resolved or obsolete. Use workspace_state whenever the user references something you cannot see — "this", "here", "that file", "what I highlighted", "where I am" — or to orient yourself in what they are looking at: it returns their open files, visible lines, playhead, panels, terminals, and recent selections and time-travel jumps. When the user mentions a review or their comments, call review_state to read the threads and review_reply to answer them; set addressed: true on replies that complete the ask. Use list_peers to discover McFly-hosted terminals before send_message. A peer is messageable only when relay is enabled and McFly has linked its agent session; interactive peers need the user to enable relay, while relay-enabled peers with session_available false are still waiting for discovery. Use data_matcher when another tool you are calling returns structured output the user will want to read as data: register the tool once and its results render in the data pane from then on, with no change to how you call it.';
+const INSTRUCTIONS = 'Use run_table for shell commands whose stdout is tabular data. The script must emit strict TSV: one unique, non-empty header row, at least two columns, at least one data row, and the same number of tab-separated cells on every row. Do not emit decoration or commentary to stdout; send diagnostics to stderr. Use highlight instead of a plain file read whenever you want to point the user at specific lines: it renders the file in the McFly viewer with those lines highlighted. Use waypoint to leave a durable note anchored to a specific line (a finding, explanation, or TODO): waypoints collect in the McFly Wayfinder tab and stay findable even after the file changes. Use waypoint_remove when a waypoint is resolved or obsolete. Use workspace_state whenever the user references something you cannot see — "this", "here", "that file", "what I highlighted", "where I am" — or to orient yourself in what they are looking at: it returns their open files, visible lines, playhead, panels, terminals, and recent selections and time-travel jumps. When the user mentions a review or their comments, call review_state to read the threads and review_reply to answer them; set addressed: true on replies that complete the ask. Before spawn_agent, use list_agent_providers to choose an available harness. spawn_agent defaults to a headless child; kind peer creates a visible relay-enabled McFly terminal instead. Use list_peers to discover McFly-hosted terminals before send_message. A peer is messageable only when relay is enabled and McFly has linked its agent session; interactive peers need the user to enable relay, while relay-enabled peers with session_available false are still waiting for discovery. Use data_matcher when another tool you are calling returns structured output the user will want to read as data: register the tool once and its results render in the data pane from then on, with no change to how you call it.';
 const TOOL = {
   name: 'run_table',
   title: 'Run tabular shell command',
@@ -138,6 +138,47 @@ const LIST_PEERS_TOOL = {
     },
   },
   annotations: { readOnlyHint: true },
+};
+
+const LIST_AGENT_PROVIDERS_TOOL = {
+  name: 'list_agent_providers', title: 'List agent launch providers',
+  description: 'List the Codex, Claude, and Cursor harness ids accepted by spawn_agent and whether each executable is available.',
+  inputSchema: {
+    type: 'object', additionalProperties: false,
+    properties: { cwd: { type: 'string', description: 'Project directory, to pick the right McFly server. Defaults to the process cwd.' } },
+  },
+  outputSchema: {
+    type: 'object', additionalProperties: false, required: ['schema', 'kind', 'providers'],
+    properties: {
+      schema: { const: 'mcfly.data.v1' }, kind: { const: 'agent_providers' },
+      providers: { type: 'array', items: { type: 'object' } },
+    },
+  },
+  annotations: { readOnlyHint: true },
+};
+
+const SPAWN_AGENT_TOOL = {
+  name: 'spawn_agent', title: 'Spawn a McFly agent',
+  description: 'Start a Codex, Claude, or Cursor agent. subagent (default) runs headlessly and appears beneath the caller; peer opens a visible relay-enabled terminal as a top-level peer. Returns only after McFly discovers stable transcript metadata, not after the task finishes.',
+  inputSchema: {
+    type: 'object', additionalProperties: false, required: ['harness', 'prompt'],
+    properties: {
+      harness: { enum: ['codex', 'claude', 'cursor'], description: 'Harness id from list_agent_providers.' },
+      prompt: { type: 'string', description: 'Initial task for the new agent.' },
+      kind: { enum: ['subagent', 'peer'], description: 'subagent (default) or visible relay-enabled peer.' },
+      cwd: { type: 'string', description: 'Working directory. Defaults to the MCP process cwd.' },
+    },
+  },
+  outputSchema: {
+    type: 'object', additionalProperties: false,
+    required: ['schema', 'kind', 'launch_kind', 'harness', 'provider', 'session_id', 'workspace'],
+    properties: {
+      schema: { const: 'mcfly.data.v1' }, kind: { const: 'agent_spawn' },
+      launch_kind: { enum: ['subagent', 'peer'] }, harness: { type: 'string' }, provider: { type: 'string' },
+      session_id: { type: 'string' }, workspace: { type: 'string' }, peer: { type: 'object' },
+    },
+  },
+  annotations: { destructiveHint: true, openWorldHint: true },
 };
 
 const SEND_MESSAGE_TOOL = {
@@ -280,6 +321,42 @@ export async function runListPeers(args = {}, servers) {
   } catch (error) {
     return { content: [{ type: 'text', text: `peer lookup failed: ${error.message}` }], isError: true };
   }
+}
+
+async function workspaceFetch(args, servers, route, options) {
+  const found = pickServer(args, servers);
+  if (!found) return { error: noWorkspace(args) };
+  try {
+    const init = typeof options === 'function' ? options(found) : options;
+    const response = await fetch(`http://127.0.0.1:${found.pick.port}${route}`, {
+      ...init, headers: { ...init?.headers, Authorization: `Bearer ${found.pick.mcpToken ?? ''}` },
+    });
+    const value = await response.json();
+    if (!response.ok) return { error: { content: [{ type: 'text', text: value.error ?? `HTTP ${response.status}` }], isError: true } };
+    return { value, cwd: found.cwd };
+  } catch (error) {
+    return { error: { content: [{ type: 'text', text: error.message }], isError: true } };
+  }
+}
+
+export async function runListAgentProviders(args = {}, servers) {
+  const { value, error } = await workspaceFetch(args, servers, '/api/agent-providers');
+  if (error) return error;
+  const result = { schema: 'mcfly.data.v1', kind: 'agent_providers', providers: value };
+  return { content: [{ type: 'text', text: `${DATA_MARKER}\n${JSON.stringify(result)}` }], structuredContent: result };
+}
+
+export async function runSpawnAgent(args = {}, servers) {
+  const { value, error } = await workspaceFetch(args, servers, '/api/spawn-agent', (found) => ({
+    method: 'POST', body: JSON.stringify({ ...args, cwd: found.cwd }),
+  }));
+  if (error) return error;
+  const result = {
+    schema: 'mcfly.data.v1', kind: 'agent_spawn', launch_kind: value.kind,
+    harness: value.harness, provider: value.provider, session_id: value.session_id,
+    workspace: value.workspace, ...(value.peer ? { peer: value.peer } : {}),
+  };
+  return { content: [{ type: 'text', text: `${DATA_MARKER}\n${JSON.stringify(result)}` }], structuredContent: result };
 }
 
 export async function runSendMessage(args = {}, servers) {
@@ -596,6 +673,8 @@ const TOOLS = [
   [REVIEW_STATE_TOOL, runReviewState],
   [REVIEW_REPLY_TOOL, runReviewReply],
   [DATA_MATCHER_TOOL, runDataMatcher],
+  [LIST_AGENT_PROVIDERS_TOOL, runListAgentProviders],
+  [SPAWN_AGENT_TOOL, runSpawnAgent],
   [LIST_PEERS_TOOL, runListPeers],
   [SEND_MESSAGE_TOOL, runSendMessage],
 ];
