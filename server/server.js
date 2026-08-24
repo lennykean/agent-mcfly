@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import * as claudeCode from './loaders/claude-code.js';
 import * as codex from './loaders/codex.js';
 import * as cursor from './loaders/cursor.js';
-import { alive, attachPty, detectTools, hasEditor, openInEditor, killAllPtys, killPty, listPeers, listPtys, reapOrphans, sendPeerMessage, setPtyRelay, setPtySession, TOKEN } from './pty.js';
+import { alive, attachPty, detectTools, hasEditor, openInEditor, killAllPtys, killPty, listPeers, listPtys, pullPeerInbox, reapOrphans, sendPeerMessage, setPtyRelay, setPtySession, TOKEN } from './pty.js';
 import { launchAgent, listAgentProviders } from './agent-launch.js';
 import { connectSsh, disconnectAllSsh, disconnectSsh, getSshConnection, listSshConnections } from './ssh.js';
 import * as review from './review.js';
@@ -66,7 +66,7 @@ async function requestJson(req) {
 
 const ALLOWED_HOSTS = new Set([`localhost:${PORT}`, `127.0.0.1:${PORT}`, `[::1]:${PORT}`]);
 const MCP_TOKEN = crypto.randomBytes(32).toString('hex');
-const isPrivateMcpRoute = (pathname) => pathname === '/api/agent-providers' || pathname === '/api/spawn-agent';
+const isPrivateMcpRoute = (pathname) => ['/api/agent-providers', '/api/spawn-agent', '/api/peer-message', '/api/peer-inbox'].includes(pathname);
 function hasMcpCredential(req) {
   const supplied = req.headers.authorization;
   const expected = `Bearer ${MCP_TOKEN}`;
@@ -134,7 +134,7 @@ const server = http.createServer(async (req, res) => {
     // DNS-rebinding defense: a hostile site pointed at 127.0.0.1 becomes
     // same-origin; the Host header is the tell.
     if (!ALLOWED_HOSTS.has(req.headers.host ?? '')) return json(res, 403, { error: 'bad host' });
-    if (isPrivateMcpRoute(url.pathname) && req.headers.origin) return json(res, 403, { error: 'cross-origin agent launch is forbidden' });
+    if (isPrivateMcpRoute(url.pathname) && req.headers.origin) return json(res, 403, { error: 'cross-origin MCP action is forbidden' });
     if (isPrivateMcpRoute(url.pathname) && !hasMcpCredential(req)) return json(res, 401, { error: 'unauthorized' });
     if (url.pathname === '/api/ssh/connections' && req.method === 'GET') {
       return json(res, 200, listSshConnections());
@@ -454,8 +454,16 @@ const server = http.createServer(async (req, res) => {
     }
     if (url.pathname === '/api/peer-message' && req.method === 'POST') {
       try {
-        const { id, message } = await requestJson(req);
-        return json(res, 200, await sendPeerMessage(id, message));
+        const { id, message, inbox } = await requestJson(req);
+        return json(res, 200, await sendPeerMessage(id, message, { inbox: inbox === true }));
+      } catch (error) {
+        return errorJson(res, error, 400);
+      }
+    }
+    if (url.pathname === '/api/peer-inbox' && req.method === 'POST') {
+      try {
+        const { id } = await requestJson(req);
+        return json(res, 200, pullPeerInbox(id));
       } catch (error) {
         return errorJson(res, error, 400);
       }

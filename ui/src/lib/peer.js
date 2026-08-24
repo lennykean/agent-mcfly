@@ -17,3 +17,9 @@ export function peerSession(peer) {
     size: 0,
   };
 }
+
+/** @param {import('../types').ResultRender | undefined} result */
+export const peerFromResult = (result) => result?.peer && (
+  result.verb === 'peer_message'
+  || (result.verb === 'spawn_agent' && result.launch_kind === 'peer')
+) ? result.peer : null;

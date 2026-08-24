@@ -221,6 +221,9 @@ test('recovers a delivered McFly peer message with linkable session metadata', (
   assert.deepEqual(resultRender({ name: 'mcp__mcfly__send_message', render: call }, JSON.stringify(envelope)), {
     verb: 'peer_message', status: 'delivered', peer,
   });
+  assert.deepEqual(resultRender({ name: 'mcp__mcfly__send_message', render: call }, JSON.stringify({
+    ...envelope, delivered: false, queued: true,
+  })), { verb: 'peer_message', status: 'queued', peer });
 });
 
 test('renders McFly-launched cross-provider children and top-level peers', () => {
@@ -259,11 +262,22 @@ test('links an agent result to its nested spawn call when wrapper output is unnu
     content: [{ type: 'text', text: `MCFLY_DATA_V1\n${JSON.stringify(envelope)}` }],
     structuredContent: envelope,
   };
+  const peer = { id: 'pty-1', terminal_id: 'pty-1', provider: 'codex', session_id: 'peer.jsonl', workspace: '/repo' };
+  const peerEnvelope = { schema: 'mcfly.data.v1', kind: 'peer_message', delivered: true, peer };
+  const wrappedPeer = { content: [{ type: 'text', text: `MCFLY_DATA_V1\n${JSON.stringify(peerEnvelope)}` }], structuredContent: peerEnvelope };
   const lines = [
     { type: 'response_item', payload: { type: 'custom_tool_call', call_id: 'launch', name: 'exec', input } },
     {
       type: 'response_item',
       payload: { type: 'custom_tool_call_output', call_id: 'launch', output: `Script completed\nOutput:\n\n${JSON.stringify(wrapped)}` },
+    },
+    {
+      type: 'response_item',
+      payload: { type: 'custom_tool_call', call_id: 'message', name: 'exec', input: `await tools.mcp__mcfly__list_peers({}); const sent = await tools.mcp__mcfly__send_message({id:'pty-1',message:'hi'}); text(sent);` },
+    },
+    {
+      type: 'response_item',
+      payload: { type: 'custom_tool_call_output', call_id: 'message', output: `Script completed\nOutput:\n\n${JSON.stringify(wrappedPeer)}` },
     },
   ];
   try {
@@ -275,6 +289,8 @@ test('links an agent result to its nested spawn call when wrapper output is unnu
       verb: 'spawn_agent', agent_type: 'codex', title: 'say hi', launch_kind: 'subagent',
     });
     assert.equal(result.extended.render.child_session_id, '2026/child.jsonl');
+    const peerResult = blocks.find((item) => item.type === 'tool_result' && item.tool === 'mcp__mcfly__send_message');
+    assert.deepEqual(peerResult.extended.render.peer, peer);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

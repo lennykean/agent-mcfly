@@ -165,8 +165,8 @@ export function peerMessageCall(input) {
 
 export function peerMessageResult(value) {
   const result = dataEnvelope(value);
-  if (result?.kind !== 'peer_message' || result.delivered !== true || !result.peer?.id) return null;
-  return { verb: 'peer_message', status: 'delivered', peer: result.peer };
+  if (result?.kind !== 'peer_message' || (result.delivered !== true && result.queued !== true) || !result.peer?.id) return null;
+  return { verb: 'peer_message', status: result.queued ? 'queued' : 'delivered', peer: result.peer };
 }
 
 export function spawnAgentCall(input) {

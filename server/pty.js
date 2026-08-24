@@ -25,6 +25,8 @@ const WIN = process.platform === 'win32';
 // same list, so it lives in one place
 export const AGENT_TOOLS = ['claude', 'codex', 'cursor-agent', 'agy', 'pi', 'opencode', 'aider', 'gemini', 'goose'];
 const BUFFER_CAP = 256 * 1024;
+const INBOX_CAP = 100;
+const INBOX_BYTES_CAP = 1024 * 1024;
 
 export const hasTerminalControls = (value) => /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(String(value));
 
@@ -236,28 +238,50 @@ const writeInput = (s, data, source) => {
   return true;
 };
 
-export function sendPeerMessage(id, message) {
+export function sendPeerMessage(id, message, { inbox = false } = {}) {
   const s = peerOf(id);
   if (!s) return Promise.reject(relayError('peer not found', 404, 'PEER_NOT_FOUND'));
-  try { requireMessageable(s); } catch (error) { return Promise.reject(error); }
   if (typeof message !== 'string' || !message.trim()) return Promise.reject(relayError('message is required', 400, 'INVALID_MESSAGE'));
   if (Buffer.byteLength(message) > 128 * 1024) return Promise.reject(relayError('message is too large', 413, 'MESSAGE_TOO_LARGE'));
   if (hasTerminalControls(message)) {
     return Promise.reject(relayError('message contains terminal control characters', 400, 'INVALID_MESSAGE'));
   }
-  const deliver = () => {
+  if (inbox) {
+    const queued = s.inbox ??= [];
+    const bytes = queued.reduce((total, item) => total + Buffer.byteLength(item.message), 0);
+    if (queued.length >= INBOX_CAP || bytes + Buffer.byteLength(message) > INBOX_BYTES_CAP) {
+      return Promise.reject(relayError('peer inbox is full', 409, 'PEER_INBOX_FULL'));
+    }
+    const item = { id: crypto.randomUUID(), message, queued_at: new Date().toISOString() };
+    queued.push(item);
+    return Promise.resolve({ id, delivered: false, queued: true, message_id: item.id, peer: peerView(s) });
+  }
+  try { requireMessageable(s); } catch (error) { return Promise.reject(error); }
+  const deliver = async () => {
     if (peerOf(id) !== s) throw relayError('peer not found', 404, 'PEER_NOT_FOUND');
     requireMessageable(s);
     const bracketed = !!s.shadow?.modes?.bracketedPasteMode;
     if (!bracketed && /[\r\n\t]/.test(message)) {
       throw relayError('peer does not support bracketed paste; multiline and tabbed messages cannot be delivered exactly', 409, 'BRACKETED_PASTE_REQUIRED');
     }
-    writeInput(s, `${bracketed ? '\x1b[200~' : ''}${message}${bracketed ? '\x1b[201~' : ''}\r`, 'relay');
-    return { id, delivered: true, bracketed, peer: peerView(s) };
+    if (bracketed) {
+      writeInput(s, `\x1b[200~${message}\x1b[201~`, 'relay');
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      if (peerOf(id) !== s) throw relayError('peer not found', 404, 'PEER_NOT_FOUND');
+      requireMessageable(s);
+      writeInput(s, '\r', 'relay');
+    } else writeInput(s, `${message}\r`, 'relay');
+    return { id, delivered: true, queued: false, bracketed, peer: peerView(s) };
   };
   const delivered = (s.relayQueue ?? Promise.resolve()).then(deliver);
   s.relayQueue = delivered.catch(() => {});
   return delivered;
+}
+
+export function pullPeerInbox(id) {
+  const s = peerOf(id);
+  if (!s) throw relayError('peer not found', 404, 'PEER_NOT_FOUND');
+  return { id, messages: s.inbox?.splice(0) ?? [], peer: peerView(s) };
 }
 
 // tmux semantics: detached sessions persist until the process exits or an

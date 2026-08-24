@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import http from 'node:http';
 import test from 'node:test';
 import WebSocket from 'ws';
-import { attachPty, killAllPtys, killPty, launchAgentPty, listPeers, listPtys, sendPeerMessage, setPtyRelay, setPtySession, TOKEN, toolPath } from './pty.js';
+import { attachPty, killAllPtys, killPty, launchAgentPty, listPeers, listPtys, pullPeerInbox, sendPeerMessage, setPtyRelay, setPtySession, TOKEN, toolPath } from './pty.js';
 
 test('Windows tool lookup keeps PATH order when a later stale executable exists', () => {
   const current = 'C:\\current\\codex.cmd';
@@ -137,6 +137,11 @@ test('hosts a remote PTY and waits for session discovery before relay delivery',
   assert.equal(peer.messageable, false);
   assert.equal(peer.interactive, true);
   await assert.rejects(sendPeerMessage(peer.id, 'not yet'), { code: 'PEER_INTERACTIVE' });
+  const queued = await sendPeerMessage(peer.id, 'read this later', { inbox: true });
+  assert.equal(queued.delivered, false);
+  assert.equal(queued.queued, true);
+  assert.deepEqual(pullPeerInbox(peer.id).messages.map(({ message }) => message), ['read this later']);
+  assert.deepEqual(pullPeerInbox(peer.id).messages, []);
 
   assert.equal(setPtyRelay(control.ptyId, true, 'host-1'), true);
   assert.equal(listPtys('host-1')[0].relayEnabled, true);
@@ -195,12 +200,16 @@ test('hosts a remote PTY and waits for session discovery before relay delivery',
   assert.equal(sent[0].peer.provider, 'codex');
   assert.equal(sent[0].peer.session_id, 'session.jsonl');
   assert.equal(sent[0].peer.workspace, '/srv/session-worktree');
-  assert.deepEqual(channel.writes.slice(-2), [
-    '\x1b[200~first\nmessage\x1b[201~\r',
-    '\x1b[200~second\nmessage\x1b[201~\r',
+  assert.deepEqual(channel.writes.slice(-4), [
+    '\x1b[200~first\nmessage\x1b[201~', '\r',
+    '\x1b[200~second\nmessage\x1b[201~', '\r',
   ]);
+  const writesBeforeInbox = channel.writes.length;
+  await sendPeerMessage(peer.id, 'queue this explicitly', { inbox: true });
+  assert.equal(channel.writes.length, writesBeforeInbox);
+  assert.deepEqual(pullPeerInbox(peer.id).messages.map(({ message }) => message), ['queue this explicitly']);
   await sendPeerMessage(peer.id, 'line one\n\tline two');
-  assert.equal(channel.writes.at(-1), '\x1b[200~line one\n\tline two\x1b[201~\r');
+  assert.deepEqual(channel.writes.slice(-2), ['\x1b[200~line one\n\tline two\x1b[201~', '\r']);
 
   const closed = new Promise((resolve) => ws.once('close', resolve));
   assert.equal(killPty(control.ptyId, 'host-1'), true);

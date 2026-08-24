@@ -27,6 +27,7 @@ import { Terminal } from './components/Terminal';
 import { ToolDetail } from './components/ToolDetail';
 import { ToolLog } from './components/ToolLog';
 import { Transport } from './components/Transport';
+import { peerFromResult } from './lib/peer';
 
 const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
 
@@ -132,6 +133,15 @@ export default function Workbench({
   settings, matchers, onOpenSettings, termCtl, termSlot, registerHandle,
 }: WorkbenchProps) {
   const r = useReplay(active, source?.connection, matchers);
+  const autoOpenedPeers = useRef(new Set<string>());
+  useEffect(() => {
+    for (const step of r.steps) {
+      const peer = step.kind === 'tool' ? peerFromResult(step.result) : null;
+      if (!peer || autoOpenedPeers.current.has(peer.id)) continue;
+      autoOpenedPeers.current.add(peer.id);
+      onOpenPeer(peer);
+    }
+  }, [r.steps, onOpenPeer]);
   // hidden workbenches stay mounted (state retention) but must not act on
   // global surfaces: window keys, the snapshot, the document title
   const activeRef = useRef(active);

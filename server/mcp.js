@@ -8,7 +8,7 @@ import { DATA_MARKER, parseLineSpec, parseTable, TABLE_FORMATS } from './mcfly-d
 
 const exec = promisify(execFile);
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url))).version;
-const INSTRUCTIONS = 'Use run_table for shell commands whose stdout is tabular data. The script must emit strict TSV: one unique, non-empty header row, at least two columns, at least one data row, and the same number of tab-separated cells on every row. Do not emit decoration or commentary to stdout; send diagnostics to stderr. Use highlight instead of a plain file read whenever you want to point the user at specific lines: it renders the file in the McFly viewer with those lines highlighted. Use waypoint to leave a durable note anchored to a specific line (a finding, explanation, or TODO): waypoints collect in the McFly Wayfinder tab and stay findable even after the file changes. Use waypoint_remove when a waypoint is resolved or obsolete. Use workspace_state whenever the user references something you cannot see — "this", "here", "that file", "what I highlighted", "where I am" — or to orient yourself in what they are looking at: it returns their open files, visible lines, playhead, panels, terminals, and recent selections and time-travel jumps. When the user mentions a review or their comments, call review_state to read the threads and review_reply to answer them; set addressed: true on replies that complete the ask. Before spawn_agent, use list_agent_providers to choose an available harness. spawn_agent defaults to a headless child; kind peer creates a visible relay-enabled McFly terminal instead. Use list_peers to discover McFly-hosted terminals before send_message. A peer is messageable only when relay is enabled and McFly has linked its agent session; interactive peers need the user to enable relay, while relay-enabled peers with session_available false are still waiting for discovery. Use data_matcher when another tool you are calling returns structured output the user will want to read as data: register the tool once and its results render in the data pane from then on, with no change to how you call it.';
+const INSTRUCTIONS = 'Use run_table for shell commands whose stdout is tabular data. The script must emit strict TSV: one unique, non-empty header row, at least two columns, at least one data row, and the same number of tab-separated cells on every row. Do not emit decoration or commentary to stdout; send diagnostics to stderr. Use highlight instead of a plain file read whenever you want to point the user at specific lines: it renders the file in the McFly viewer with those lines highlighted. Use waypoint to leave a durable note anchored to a specific line (a finding, explanation, or TODO): waypoints collect in the McFly Wayfinder tab and stay findable even after the file changes. Use waypoint_remove when a waypoint is resolved or obsolete. Use workspace_state whenever the user references something you cannot see — "this", "here", "that file", "what I highlighted", "where I am" — or to orient yourself in what they are looking at: it returns their open files, visible lines, playhead, panels, terminals, and recent selections and time-travel jumps. When the user mentions a review or their comments, call review_state to read the threads and review_reply to answer them; set addressed: true on replies that complete the ask. Before spawn_agent, use list_agent_providers to choose an available harness. spawn_agent defaults to a headless child; kind peer creates a visible relay-enabled McFly terminal instead. Use list_peers to discover McFly-hosted terminals before send_message. A peer is messageable only when relay is enabled and McFly has linked its agent session; interactive peers need the user to enable relay, while relay-enabled peers with session_available false are still waiting for discovery. send_message with inbox true explicitly queues instead of typing and works for interactive peers; it never falls back automatically. Use pull_inbox with your peer id to atomically read and clear queued messages. Use data_matcher when another tool you are calling returns structured output the user will want to read as data: register the tool once and its results render in the data pane from then on, with no change to how you call it.';
 const TOOL = {
   name: 'run_table',
   title: 'Run tabular shell command',
@@ -183,24 +183,52 @@ const SPAWN_AGENT_TOOL = {
 
 const SEND_MESSAGE_TOOL = {
   name: 'send_message', title: 'Message a live McFly peer',
-  description: 'Send one complete message to a messageable McFly terminal. Use the stable peer id returned by list_peers. Relay must be enabled and McFly must have discovered the target session metadata used by the chat link.',
+  description: 'Send one complete message to a McFly peer. By default this types into a messageable relay terminal. Set inbox true to explicitly queue it instead, even when the peer is interactive; McFly never falls back to inbox automatically.',
   inputSchema: {
     type: 'object', additionalProperties: false, required: ['id', 'message'],
     properties: {
       id: { type: 'string', description: 'Stable peer id from list_peers.' },
       message: { type: 'string', description: 'Complete message to submit to the peer.' },
+      inbox: { type: 'boolean', description: 'Queue for pull_inbox instead of typing into the terminal.' },
       cwd: { type: 'string', description: 'Project directory, to pick the right McFly server. Defaults to the process cwd.' },
     },
   },
   outputSchema: {
-    type: 'object', additionalProperties: false, required: ['schema', 'kind', 'id', 'delivered', 'peer'],
+    type: 'object', additionalProperties: false, required: ['schema', 'kind', 'id', 'delivered', 'queued', 'peer'],
     properties: {
       schema: { const: 'mcfly.data.v1' }, kind: { const: 'peer_message' },
-      id: { type: 'string' }, delivered: { type: 'boolean' }, bracketed: { type: 'boolean' },
+      id: { type: 'string' }, delivered: { type: 'boolean' }, queued: { type: 'boolean' },
+      bracketed: { type: 'boolean' }, message_id: { type: 'string' },
       peer: { type: 'object' },
     },
   },
   annotations: { destructiveHint: true, openWorldHint: true },
+};
+
+const PULL_INBOX_TOOL = {
+  name: 'pull_inbox', title: 'Pull queued peer messages',
+  description: 'Atomically return and clear messages explicitly queued for a McFly peer. Use your stable peer id from list_peers.',
+  inputSchema: {
+    type: 'object', additionalProperties: false, required: ['id'],
+    properties: {
+      id: { type: 'string', description: 'Stable peer id from list_peers.' },
+      cwd: { type: 'string', description: 'Project directory, to pick the right McFly server. Defaults to the process cwd.' },
+    },
+  },
+  outputSchema: {
+    type: 'object', additionalProperties: false, required: ['schema', 'kind', 'id', 'messages', 'peer'],
+    properties: {
+      schema: { const: 'mcfly.data.v1' }, kind: { const: 'peer_inbox' }, id: { type: 'string' },
+      messages: {
+        type: 'array', items: {
+          type: 'object', additionalProperties: false, required: ['id', 'message', 'queued_at'],
+          properties: { id: { type: 'string' }, message: { type: 'string' }, queued_at: { type: 'string' } },
+        },
+      },
+      peer: { type: 'object' },
+    },
+  },
+  annotations: { destructiveHint: true },
 };
 
 function liveServers() {
@@ -363,19 +391,29 @@ export async function runSendMessage(args = {}, servers) {
   if (typeof args.id !== 'string' || !args.id || typeof args.message !== 'string' || !args.message.trim()) {
     return { content: [{ type: 'text', text: 'id and message are required' }], isError: true };
   }
-  const found = pickServer(args, servers);
-  if (!found) return noWorkspace(args);
-  try {
-    const response = await fetch(`http://127.0.0.1:${found.pick.port}/api/peer-message`, {
-      method: 'POST', body: JSON.stringify({ id: args.id, message: args.message }),
-    });
-    const out = await response.json();
-    if (!response.ok) return { content: [{ type: 'text', text: out.error ?? `HTTP ${response.status}` }], isError: true };
-    const result = { schema: 'mcfly.data.v1', kind: 'peer_message', ...out };
-    return { content: [{ type: 'text', text: `${DATA_MARKER}\n${JSON.stringify(result)}` }], structuredContent: result };
-  } catch (error) {
-    return { content: [{ type: 'text', text: `peer message failed: ${error.message}` }], isError: true };
+  const { value, error } = await workspaceFetch(args, servers, '/api/peer-message', {
+    method: 'POST', body: JSON.stringify({
+      id: args.id, message: args.message, ...(args.inbox === true ? { inbox: true } : {}),
+    }),
+  });
+  if (error) return error;
+  const result = {
+    schema: 'mcfly.data.v1', kind: 'peer_message', ...value,
+    delivered: value.delivered === true, queued: value.queued === true,
+  };
+  return { content: [{ type: 'text', text: `${DATA_MARKER}\n${JSON.stringify(result)}` }], structuredContent: result };
+}
+
+export async function runPullInbox(args = {}, servers) {
+  if (typeof args.id !== 'string' || !args.id) {
+    return { content: [{ type: 'text', text: 'id is required' }], isError: true };
   }
+  const { value, error } = await workspaceFetch(args, servers, '/api/peer-inbox', {
+    method: 'POST', body: JSON.stringify({ id: args.id }),
+  });
+  if (error) return error;
+  const result = { schema: 'mcfly.data.v1', kind: 'peer_inbox', ...value };
+  return { content: [{ type: 'text', text: `${DATA_MARKER}\n${JSON.stringify(result)}` }], structuredContent: result };
 }
 
 async function reviewFetch(args, route, payload) {
@@ -677,6 +715,7 @@ const TOOLS = [
   [SPAWN_AGENT_TOOL, runSpawnAgent],
   [LIST_PEERS_TOOL, runListPeers],
   [SEND_MESSAGE_TOOL, runSendMessage],
+  [PULL_INBOX_TOOL, runPullInbox],
 ];
 
 async function handle(request) {

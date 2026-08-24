@@ -449,7 +449,10 @@ export default function Shell() {
 
   const findOpen = (s: SessionMeta, source?: WorkspaceSource) => wssRef.current.findIndex((w) => {
     const i = infosRef.current[w.id];
-    return w.source?.connection === source?.connection && i?.sessionFull === s.id && i?.provider === s.provider;
+    return w.source?.connection === source?.connection && (
+      (i?.sessionFull === s.id && i?.provider === s.provider)
+      || (w.url.session === shortSessionId(s.id) && w.url.provider === s.provider)
+    );
   });
   const activeWs = () => wssRef.current[Math.min(activeIdxRef.current, wssRef.current.length - 1)];
 

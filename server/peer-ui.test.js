@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { peerLabel, peerSession } from '../ui/src/lib/peer.js';
+import { peerFromResult, peerLabel, peerSession } from '../ui/src/lib/peer.js';
 
 test('peer links use the target session and preserve local or remote identity', () => {
   const local = {
@@ -16,4 +16,7 @@ test('peer links use the target session and preserve local or remote identity', 
   assert.equal(peerSession({ ...local, id: 'remote-1:pty-1', connection: 'remote-1' })?.id, 'rollout.jsonl');
   assert.equal(peerSession({ ...local, session_id: null }), null);
   assert.equal(peerSession({ ...local, workspace: null }), null);
+  assert.equal(peerFromResult({ verb: 'spawn_agent', launch_kind: 'peer', peer: local }), local);
+  assert.equal(peerFromResult({ verb: 'peer_message', peer: local }), local);
+  assert.equal(peerFromResult({ verb: 'spawn_agent', launch_kind: 'subagent', peer: local }), null);
 });

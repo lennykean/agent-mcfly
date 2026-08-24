@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import http from 'node:http';
 import path from 'node:path';
 import { DATA_MARKER, dataEnvelope, highlightResult, parseLineSpec, parseTsv } from './mcfly-data.js';
-import { checklistFiles, findWorkspaceState, runListAgentProviders, runListPeers, runSendMessage, runSpawnAgent } from './mcp.js';
+import { checklistFiles, findWorkspaceState, runListAgentProviders, runListPeers, runPullInbox, runSendMessage, runSpawnAgent } from './mcp.js';
 
 test('validates strict TSV and serves it through MCP stdio', () => {
   assert.deepEqual(parseTsv('name\tcount\nalpha\t2\n'), {
@@ -46,8 +46,8 @@ test('validates strict TSV and serves it through MCP stdio', () => {
   const responses = requests.map((r) => byId.get(r.id));
   assert.equal(responses[0].result.serverInfo.name, 'mcfly');
   assert.equal(responses[1].result.tools[0].name, 'run_table');
-  assert.deepEqual(responses[1].result.tools.slice(-4).map((tool) => tool.name), [
-    'list_agent_providers', 'spawn_agent', 'list_peers', 'send_message',
+  assert.deepEqual(responses[1].result.tools.slice(-5).map((tool) => tool.name), [
+    'list_agent_providers', 'spawn_agent', 'list_peers', 'send_message', 'pull_inbox',
   ]);
   assert.equal(responses[2].result.isError, undefined);
   assert.deepEqual(responses[2].result.structuredContent.data, {
@@ -118,8 +118,10 @@ test('workspace routing skips unrelated server scopes', async () => {
   }
 });
 
-test('lists live peers and sends a complete message through the workspace server', async () => {
-  let received;
+test('lists live peers, relays messages, and explicitly queues inbox messages', async () => {
+  const received = [];
+  const inbox = [];
+  const mcpToken = 'test-only-private-token';
   const peer = {
     id: 'peer-1', terminal_id: 'term-1', messageable: true, interactive: false,
     relay_enabled: true, session_available: true,
@@ -128,23 +130,40 @@ test('lists live peers and sends a complete message through the workspace server
   const server = http.createServer((req, res) => {
     res.setHeader('Content-Type', 'application/json');
     if (req.url === '/api/peers') return res.end(JSON.stringify([peer]));
+    assert.equal(req.headers.authorization, `Bearer ${mcpToken}`);
     let body = '';
     req.setEncoding('utf8');
     req.on('data', (chunk) => { body += chunk; });
     req.on('end', () => {
-      received = JSON.parse(body);
-      res.end(JSON.stringify({ id: received.id, delivered: true, bracketed: true, peer }));
+      const value = JSON.parse(body);
+      received.push(value);
+      if (req.url === '/api/peer-inbox') {
+        const messages = inbox.splice(0);
+        return res.end(JSON.stringify({ id: value.id, messages, peer }));
+      }
+      if (value.inbox) {
+        inbox.push({ id: 'message-1', message: value.message, queued_at: '2026-08-23T00:00:00.000Z' });
+        return res.end(JSON.stringify({ id: value.id, delivered: false, queued: true, message_id: 'message-1', peer }));
+      }
+      res.end(JSON.stringify({ id: value.id, delivered: true, bracketed: true, peer }));
     });
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
-    const servers = [{ port: server.address().port, pwd: process.cwd(), started: 1 }];
+    const servers = [{ port: server.address().port, pwd: process.cwd(), started: 1, mcpToken }];
     const listed = await runListPeers({}, servers);
     assert.deepEqual(listed.structuredContent.peers, [peer]);
     const sent = await runSendMessage({ id: peer.id, message: 'hello\npeer' }, servers);
-    assert.deepEqual(received, { id: peer.id, message: 'hello\npeer' });
+    assert.deepEqual(received[0], { id: peer.id, message: 'hello\npeer' });
     assert.equal(sent.structuredContent.peer.terminal_id, 'term-1');
     assert.equal(sent.structuredContent.peer.session_id, 'session.jsonl');
+    assert.equal(sent.structuredContent.queued, false);
+    const queued = await runSendMessage({ id: peer.id, message: 'later', inbox: true }, servers);
+    assert.equal(queued.structuredContent.queued, true);
+    assert.deepEqual(received[1], { id: peer.id, message: 'later', inbox: true });
+    const pulled = await runPullInbox({ id: peer.id }, servers);
+    assert.deepEqual(pulled.structuredContent.messages.map(({ message }) => message), ['later']);
+    assert.deepEqual(received[2], { id: peer.id });
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }

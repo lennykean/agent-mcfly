@@ -316,9 +316,12 @@ function convertLine(line, messages, file, recoveryEnd) {
       }
       const count = metas.reduce((max, meta) => Math.max(max, meta.resultIndex), -1) + 1;
       const envelope = dataEnvelope(text);
-      const fallbackIndex = envelope?.kind === 'agent_spawn'
-        ? metas.find((meta) => isSpawnAgentTool(meta.name))?.resultIndex ?? 0
-        : 0;
+      const fallbackMeta = envelope?.kind === 'agent_spawn'
+        ? metas.find((meta) => isSpawnAgentTool(meta.name))
+        : envelope?.kind === 'peer_message'
+          ? metas.find((meta) => isPeerMessageTool(meta.name))
+          : undefined;
+      const fallbackIndex = fallbackMeta?.resultIndex ?? 0;
       const results = splitNumberedResults(text, count)
         ?? Array.from({ length: count }, (_, index) => index === fallbackIndex ? text : '');
       push('user', metas.map((meta) => {

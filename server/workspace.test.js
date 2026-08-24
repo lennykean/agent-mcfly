@@ -30,6 +30,8 @@ test('workspace state: ingests snapshots and events, serves filtered queries', a
     const privateBody = JSON.stringify({ harness: 'codex', prompt: 'must not launch', cwd: process.cwd() });
     const unauthorized = await fetch(`${base}/api/spawn-agent`, { method: 'POST', body: privateBody });
     assert.equal(unauthorized.status, 401);
+    assert.equal((await fetch(`${base}/api/peer-message`, { method: 'POST', body: '{}' })).status, 401);
+    assert.equal((await fetch(`${base}/api/peer-inbox`, { method: 'POST', body: '{}' })).status, 401);
     const crossOrigin = await fetch(`${base}/api/spawn-agent`, {
       method: 'POST', body: privateBody,
       headers: { Origin: 'https://attacker.example', Authorization: `Bearer ${registered.mcpToken}` },

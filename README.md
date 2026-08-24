@@ -133,7 +133,8 @@ This command writes `~/.mcfly/mcp.json`. When Codex or Claude Code is installed,
 | `list_agent_providers` | Lists the Codex, Claude, and Cursor launch harnesses and whether each executable is available. |
 | `spawn_agent` | Starts a headless child agent, or a visible relay-enabled peer with `kind: "peer"`, using the provider's normal approval and sandbox settings, and returns its stable session metadata. |
 | `list_peers` | Lists live terminals, relay state, and whether McFly has linked their agent session. |
-| `send_message` | Sends one complete prompt when relay is enabled and the target session is linkable. |
+| `send_message` | Types one complete prompt into a relay peer, or explicitly queues it with `inbox: true`. |
+| `pull_inbox` | Returns and clears messages explicitly queued for a peer. |
 
 ![A table from run_table in the DATA tab](docs/data.png)
 
