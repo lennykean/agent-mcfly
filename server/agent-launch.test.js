@@ -30,7 +30,8 @@ test('launch commands use provider defaults and never add authority-bypass flags
     harness: 'codex', provider: 'codex', executable: 'codex', headless: ['exec', '--json'], peer: [],
   });
   assert.deepEqual(AGENT_PROVIDERS.claude.headless, ['-p']);
-  assert.deepEqual(AGENT_PROVIDERS.cursor.headless, ['-p']);
+  assert.deepEqual(AGENT_PROVIDERS.cursor.headless, ['-p', '--trust']);
+  assert.deepEqual(AGENT_PROVIDERS.cursor.peer, ['--trust']);
   assert.equal(JSON.stringify(AGENT_PROVIDERS).includes('dangerously'), false);
   assert.equal(JSON.stringify(AGENT_PROVIDERS).includes('--force'), false);
 });
@@ -109,7 +110,7 @@ test('Cursor creates an exact chat id before launching a relay-enabled peer', as
     setPtySession: (terminalId, value) => { mapping = { terminalId, value }; return true; },
     timeoutMs: 1000,
   });
-  assert.deepEqual(launched.slice(0, 3), ['cursor-agent', cwd, ['--resume', id]]);
+  assert.deepEqual(launched.slice(0, 3), ['cursor-agent', cwd, ['--trust', '--resume', id]]);
   assert.deepEqual(mapping, {
     terminalId: 'pty-1', value: { provider: 'cursor', id: `workspace/${id}`, pwd: cwd },
   });

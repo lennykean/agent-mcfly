@@ -21,7 +21,10 @@ export const AGENT_PROVIDERS = Object.freeze({
   },
   cursor: {
     harness: 'cursor', provider: 'cursor', executable: 'cursor-agent',
-    headless: ['-p'], peer: [],
+    // The MCP route already realpath-confines cwd to the selected McFly
+    // workspace. Skip Cursor's duplicate workspace prompt; tool approvals keep
+    // using the caller's normal Cursor settings.
+    headless: ['-p', '--trust'], peer: ['--trust'],
   },
 });
 

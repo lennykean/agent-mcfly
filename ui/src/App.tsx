@@ -141,7 +141,7 @@ export default function Workbench({
       autoOpenedPeers.current.add(peer.id);
       onOpenPeer(peer);
     }
-  }, [r.steps, onOpenPeer]);
+  }, [r.steps, r.steps.length, onOpenPeer]);
   // hidden workbenches stay mounted (state retention) but must not act on
   // global surfaces: window keys, the snapshot, the document title
   const activeRef = useRef(active);

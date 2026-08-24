@@ -53,6 +53,7 @@ export function useReplay(active = true, connection?: string, matchers: DataMatc
       const initial = tl.cursor === 0;
       // large sessions arrive in server-capped chunks; drain them back to back
       for (;;) {
+        const firstChunk = initial && tl.cursor === 0;
         const res = await fetch(
           withConnection(`/api/session?provider=${encodeURIComponent(tl.provider)}&id=${encodeURIComponent(tl.sessionId)}&cursor=${tl.cursor}`, connection),
         );
@@ -71,9 +72,9 @@ export function useReplay(active = true, connection?: string, matchers: DataMatc
         tl.cursor = data.cursor;
         if (data.messages.length) {
           appendMessages(tl, data.messages);
-          // the initial drain paints ONCE at the true head, after the loop:
-          // per-chunk paints read as a visible fast-forward through history
-          if (!initial) setTick((t) => t + 1);
+          // Paint the first chunk immediately so a large initial transcript
+          // never looks stuck, then paint once more at the true head below.
+          if (!initial || firstChunk) setTick((t) => t + 1);
         }
         if (data.cursor >= data.size || !data.messages.length) break;
       }
