@@ -167,11 +167,23 @@ export function listForCwd(cwd) {
 
 // Interactive Codex has no caller-assigned session id. Its first prompt gets
 // an unguessable launch marker, so a concurrent manual launch cannot match.
-export function findByLaunchMarker(cwd, marker, startedAt = 0) {
-  return listForCwd(cwd).filter((session) => {
-    if (session.updated_at < startedAt - 1000) return false;
-    try { return fs.readFileSync(resolveId(session.id), 'utf8').includes(marker); } catch { return false; }
-  });
+export function findByLaunchMarker(cwd, marker, startedAt = 0, root = ROOT) {
+  const want = norm(cwd);
+  const out = [];
+  for (const file of rolloutFiles(root)) {
+    let st;
+    try { st = fs.statSync(file); } catch { continue; }
+    if (st.mtimeMs < startedAt - 1000) continue;
+    try { if (!fs.readFileSync(file, 'utf8').includes(marker)) continue; } catch { continue; }
+    const meta = headMeta(file, st);
+    if (meta.subagent || norm(meta.cwd) !== want) continue;
+    out.push({
+      id: path.relative(root, file).split(path.sep).join('/'), provider: 'codex',
+      label: meta.label ?? path.basename(file, '.jsonl').replace(/^rollout-/, '').slice(0, 19),
+      cwd: meta.cwd, updated_at: st.mtimeMs, size: st.size,
+    });
+  }
+  return out;
 }
 
 // transcript + call_id -> render metadata (one entry per file for multi-file patches)

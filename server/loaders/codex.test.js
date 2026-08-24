@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { callRender, callRenders, parseHead, parseThreadNames, patchRender, patchRenders, projectPathKey, resultRender, splitNumberedResults, tailFile, toolLabel } from './codex.js';
+import { callRender, callRenders, findByLaunchMarker, parseHead, parseThreadNames, patchRender, patchRenders, projectPathKey, resultRender, splitNumberedResults, tailFile, toolLabel } from './codex.js';
 
 test('project path identity folds Windows paths but preserves POSIX case', () => {
   assert.equal(projectPathKey('C:\\Repo\\App'), projectPathKey('c:/repo/app'));
@@ -208,6 +208,27 @@ test('recovers McFly table semantics from MCP results', () => {
   }));
   assert.equal(csv.format, 'csv');
   assert.deepEqual(csv.table, { columns: ['name', 'count'], rows: [['alpha, jr', '2']] });
+});
+
+test('launch marker discovery scans only recent matching transcripts', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mcfly-codex-launch-'));
+  const cwd = path.join(root, 'workspace');
+  const marker = 'unique-launch-marker';
+  const write = (name, fileCwd, text = marker) => {
+    const file = path.join(root, `rollout-${name}.jsonl`);
+    fs.writeFileSync(file, `${JSON.stringify({ type: 'session_meta', payload: { id: name, cwd: fileCwd } })}\n${text}\n`);
+    return file;
+  };
+  try {
+    const exact = write('exact', cwd);
+    write('wrong-cwd', path.join(root, 'other'));
+    const old = write('old', cwd);
+    fs.utimesSync(old, new Date(0), new Date(0));
+    write('no-marker', cwd, 'ordinary prompt');
+    assert.deepEqual(findByLaunchMarker(cwd, marker, Date.now(), root).map((session) => session.id), [path.basename(exact)]);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('recovers a delivered McFly peer message with linkable session metadata', () => {
