@@ -66,7 +66,9 @@ async function requestJson(req) {
 
 const ALLOWED_HOSTS = new Set([`localhost:${PORT}`, `127.0.0.1:${PORT}`, `[::1]:${PORT}`]);
 const MCP_TOKEN = crypto.randomBytes(32).toString('hex');
-const isPrivateMcpRoute = (pathname) => ['/api/agent-providers', '/api/spawn-agent', '/api/peer-message', '/api/peer-inbox'].includes(pathname);
+const isPrivateMcpRoute = (pathname) => [
+  '/api/agent-providers', '/api/spawn-agent', '/api/peer-message', '/api/peer-inbox', '/api/codex-session-start',
+].includes(pathname);
 function hasMcpCredential(req) {
   const supplied = req.headers.authorization;
   const expected = `Bearer ${MCP_TOKEN}`;
@@ -211,7 +213,7 @@ const server = http.createServer(async (req, res) => {
             const mapping = claudeRecordMapping(claudeRecord, claudeCode.listForCwd(claudeRecord.cwd));
             exactClaude = !!mapping;
             if (mapping && (p.session?.provider !== mapping.provider || p.session.id !== mapping.id || p.session.pwd !== mapping.pwd)) {
-              const linked = setPtySession(p.id, mapping);
+              const linked = setPtySession(p.id, mapping, undefined, 'exact');
               if (linked) p.session = mapping;
             }
           } catch { /* Claude's PID record is authoritative but best effort */ }
@@ -486,6 +488,23 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, pullPeerInbox(id));
       } catch (error) {
         return errorJson(res, error, 400);
+      }
+    }
+    if (url.pathname === '/api/codex-session-start' && req.method === 'POST') {
+      try {
+        const body = await requestJson(req);
+        if (typeof body.ptyId !== 'string' || !/^[a-f0-9]{16}$/.test(body.ptyId)) {
+          return json(res, 400, { error: 'valid ptyId is required' });
+        }
+        const session = codex.sessionForSessionStart(body);
+        if (!session) return json(res, 404, { ok: false, error: 'Codex session not found for cwd' });
+        const result = setPtySession(body.ptyId, {
+          provider: 'codex', id: session.id, pwd: session.cwd,
+        }, undefined, 'exact');
+        if (result === false) return json(res, 404, { ok: false, error: 'PTY not found' });
+        return json(res, 200, { ok: result === true, blocked: result === null });
+      } catch {
+        return json(res, 400, { error: 'bad body' });
       }
     }
     if (url.pathname === '/api/pty-session' && req.method === 'POST') {

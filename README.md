@@ -24,7 +24,7 @@ The server starts on port 7777 and opens the browser.
 
 ## Agents
 
-McFly reads the sessions that each agent already writes. It installs nothing in the agent, and it never writes to a session.
+McFly reads the sessions that each agent already writes, and it never writes to a session. The optional setup below adds a Codex lifecycle hook that reports the exact session ID to a local McFly terminal.
 
 | Agent | Command | Sessions |
 |---|---|---|
@@ -120,6 +120,8 @@ mcfly mcp config
 ```
 
 This command writes `~/.mcfly/mcp.json`. When Codex or Claude Code is installed, the command adds the MCP to it. For Cursor Agent, the command merges the entry into `~/.cursor/mcp.json`.
+
+The command also merges McFly's `SessionStart` entry into `~/.codex/hooks.json`. Codex does not run a new or changed user hook until you open `/hooks` and trust its exact definition. Until then, or when hooks are disabled, McFly keeps using its existing matching and manual follow behavior. McFly never bypasses Codex hook trust.
 
 | Tool | Function |
 |---|---|

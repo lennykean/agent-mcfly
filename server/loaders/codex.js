@@ -9,8 +9,9 @@ import { StringDecoder } from 'node:string_decoder';
 import { dataEnvelope, highlightCall, highlightResult, isHighlightTool, isPeerMessageTool, isSpawnAgentTool, isTableTool, isWaypointRemoveTool, isWaypointTool, peerMessageCall, peerMessageResult, spawnAgentCall, spawnAgentResult, tableCall, tableResult, waypointCall, waypointRemoveCall, waypointRemoveResult, waypointResult } from '../mcfly-data.js';
 import { idsFor, MAX_CHUNK, memoByStamp, readTail, truncate } from './transcript.js';
 
-const ROOT = path.join(os.homedir(), '.codex', 'sessions');
-const INDEX = path.join(os.homedir(), '.codex', 'session_index.jsonl');
+const CODEX_HOME = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+const ROOT = path.join(CODEX_HOME, 'sessions');
+const INDEX = path.join(CODEX_HOME, 'session_index.jsonl');
 
 const { rel, resolveId, tip } = idsFor(ROOT);
 export { tip };
@@ -163,6 +164,63 @@ export function listForCwd(cwd) {
   }
   out.sort((a, b) => b.updated_at - a.updated_at);
   return out;
+}
+
+const SESSION_START_SOURCES = new Set(['startup', 'resume', 'clear', 'compact']);
+const PERMISSION_MODES = new Set(['default', 'acceptEdits', 'plan', 'dontAsk', 'bypassPermissions']);
+const hookText = (value, max) => typeof value === 'string' && value.length > 0
+  && value.length <= max && !/[\u0000-\u001f\u007f]/.test(value);
+const hookSession = (file, root, meta, st, cwd) => ({
+  id: path.relative(root, file).split(path.sep).join('/'), provider: 'codex', cwd,
+  label: meta.label ?? path.basename(file, '.jsonl').replace(/^rollout-/, '').slice(0, 19),
+  updated_at: st.mtimeMs, size: st.size,
+});
+const hookMetaMatches = (meta, input, want) => !meta.subagent
+  && meta.id === input.session_id
+  && hookText(meta.cwd, 32 * 1024) && path.isAbsolute(meta.cwd)
+  && norm(meta.cwd) === want;
+
+// Resolve Codex's supported SessionStart identity to the rollout McFly reads.
+// transcript_path is nullable. When present it identifies the resumed rollout;
+// when absent, the newest rollout for the exact id and cwd is selected.
+export function sessionForSessionStart(input, root = ROOT) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)
+    || input.hook_event_name !== 'SessionStart'
+    || !SESSION_START_SOURCES.has(input.source)
+    || !hookText(input.session_id, 512)
+    || !hookText(input.cwd, 32 * 1024) || !path.isAbsolute(input.cwd)
+    || (input.transcript_path != null
+      && (!hookText(input.transcript_path, 32 * 1024) || !path.isAbsolute(input.transcript_path)))
+    || !hookText(input.model, 512)
+    || !PERMISSION_MODES.has(input.permission_mode)) return null;
+
+  const want = norm(input.cwd);
+  if (input.transcript_path) {
+    try {
+      const realRoot = fs.realpathSync(root);
+      const file = fs.realpathSync(input.transcript_path);
+      const relative = path.relative(realRoot, file);
+      if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)
+        || !path.basename(file).startsWith('rollout-') || !file.endsWith('.jsonl')) return null;
+      const st = fs.statSync(file);
+      const meta = headMeta(file, st);
+      return hookMetaMatches(meta, input, want)
+        ? hookSession(file, realRoot, meta, st, meta.cwd) : null;
+    } catch { return null; }
+  }
+
+  let found = null;
+  for (const file of rolloutFiles(root)) {
+    let st;
+    try { st = fs.statSync(file); } catch { continue; }
+    const meta = headMeta(file, st);
+    if (!hookMetaMatches(meta, input, want)) continue;
+    const candidate = hookSession(file, root, meta, st, meta.cwd);
+    // One exact thread can have more than one rollout after continuation.
+    // Without a transcript_path, its actively written rollout is the newest.
+    if (!found || candidate.updated_at > found.updated_at) found = candidate;
+  }
+  return found;
 }
 
 // Interactive Codex has no caller-assigned session id. Its first prompt gets

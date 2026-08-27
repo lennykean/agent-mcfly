@@ -6,7 +6,17 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import WebSocket from 'ws';
-import { attachPty, claudePtySessions, claudeRecordMapping, killAllPtys, killPty, launchAgentPty, listPeers, listPtys, pullPeerInbox, sendPeerMessage, setPtyRelay, setPtySession, TOKEN, toolPath } from './pty.js';
+import { attachPty, claudePtySessions, claudeRecordMapping, killAllPtys, killPty, launchAgentPty, listPeers, listPtys, ptyEnv, pullPeerInbox, sendPeerMessage, setPtyRelay, setPtySession, TOKEN, toolPath } from './pty.js';
+
+test('hosted shells receive a fresh private PTY identity before descendants start', () => {
+  const env = ptyEnv('0123456789abcdef', { KEEP: 'yes' }, {
+    PORT: '8765', MCFLY_PTY_ID: 'parent', MCFLY_PTY_PORT: '1111', KEEP_PARENT: 'yes',
+  });
+  assert.equal(env.MCFLY_PTY_ID, '0123456789abcdef');
+  assert.equal(env.MCFLY_PTY_PORT, '8765');
+  assert.equal(env.KEEP, 'yes');
+  assert.equal(env.KEEP_PARENT, 'yes');
+});
 
 test('Claude PID records prove the live process and resolve an exact transcript', async (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcfly-claude-pids-'));
@@ -69,7 +79,7 @@ test('programmatic agent terminals start visible with human input locked', async
   }
 });
 
-test('unfollow blocks automatic session writes until an explicit follow', async () => {
+test('session precedence is unfollow, explicit, exact, then automatic', async () => {
   const peer = launchAgentPty('_', process.cwd(), [], 'test');
   const first = { provider: 'claude-code', id: 'first.jsonl', pwd: process.cwd() };
   const second = { provider: 'claude-code', id: 'second.jsonl', pwd: process.cwd() };
@@ -78,12 +88,20 @@ test('unfollow blocks automatic session writes until an explicit follow', async 
     assert.equal(setPtySession(peer.terminal_id, first), true);
     assert.equal(setPtySession(peer.terminal_id, second), true);
     assert.deepEqual(listPtys().find((item) => item.id === peer.terminal_id)?.session, second);
+    assert.equal(setPtySession(peer.terminal_id, third, undefined, 'exact'), true);
+    assert.equal(setPtySession(peer.terminal_id, { ...third, pwd: path.join(process.cwd(), 'alias') }), true);
+    assert.equal(setPtySession(peer.terminal_id, first), null);
+    assert.deepEqual(listPtys().find((item) => item.id === peer.terminal_id)?.session, third);
+    assert.equal(setPtySession(peer.terminal_id, second, undefined, 'exact'), true); // clear/resume changes session
+    assert.deepEqual(listPtys().find((item) => item.id === peer.terminal_id)?.session, second);
     assert.equal(setPtySession(peer.terminal_id, null, undefined, 'unfollow'), true);
     assert.equal(listPtys().find((item) => item.id === peer.terminal_id)?.session, null);
     assert.equal(setPtySession(peer.terminal_id, first), null);
+    assert.equal(setPtySession(peer.terminal_id, second, undefined, 'exact'), null);
     assert.equal(listPtys().find((item) => item.id === peer.terminal_id)?.session, null);
     assert.equal(setPtySession(peer.terminal_id, first, undefined, 'explicit'), true);
     assert.equal(setPtySession(peer.terminal_id, second), null);
+    assert.equal(setPtySession(peer.terminal_id, second, undefined, 'exact'), null);
     assert.deepEqual(listPtys().find((item) => item.id === peer.terminal_id)?.session, first);
     assert.equal(setPtySession(peer.terminal_id, third, undefined, 'explicit'), true);
     assert.deepEqual(listPtys().find((item) => item.id === peer.terminal_id)?.session, third);

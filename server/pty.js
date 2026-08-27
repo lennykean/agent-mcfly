@@ -90,16 +90,24 @@ export function openInEditor(dir) {
 // (a nested claude that sees CLAUDECODE disables transcript saving) and
 // NO_COLOR, and advertise full color support for node-based CLIs.
 // CLAUDE_CONFIG_DIR and other user-set vars are kept.
-function sanitizedEnv() {
+function sanitizedEnv(source = process.env) {
   const env = {};
-  for (const [k, v] of Object.entries(process.env)) {
-    if (k === 'CLAUDECODE' || k === 'NO_COLOR' || k.startsWith('CLAUDE_CODE_')) continue;
+  for (const [k, v] of Object.entries(source)) {
+    if (k === 'CLAUDECODE' || k === 'NO_COLOR' || k.startsWith('CLAUDE_CODE_') || k.startsWith('MCFLY_PTY_')) continue;
     env[k] = v;
   }
   return { ...env, TERM: 'xterm-256color', COLORTERM: 'truecolor', FORCE_COLOR: '3' };
 }
 
-// ptyId -> { p, buffer, ws, tool, cwd, created, session, sessionSuppressed, sessionExplicit, relayEnabled }
+export function ptyEnv(id, extra = {}, source = process.env) {
+  return {
+    ...sanitizedEnv(source), ...extra,
+    MCFLY_PTY_ID: id,
+    MCFLY_PTY_PORT: String(source.PORT || 7777),
+  };
+}
+
+// ptyId -> { p, buffer, ws, tool, cwd, created, session, sessionSuppressed, sessionExplicit, sessionExact, relayEnabled }
 const sessions = new Map();
 // SSH PTYs are channels owned by this local McFly process. They need the
 // connection in their identity because two hosts can produce the same id.
@@ -315,15 +323,23 @@ export function setPtySession(ptyId, mapping, connection, intent = 'automatic') 
     s.session = null;
     s.sessionSuppressed = true;
     s.sessionExplicit = false;
+    s.sessionExact = false;
     return true;
   }
   // null means the PTY still exists, but the user has blocked this automatic
   // write. false remains "terminal not found" for callers that must clean up.
   if ((s.sessionSuppressed || s.sessionExplicit) && intent !== 'explicit') return null;
+  if (s.sessionExact && intent === 'automatic') {
+    return mapping && s.session?.provider === mapping.provider && s.session.id === mapping.id ? true : null;
+  }
   s.session = mapping;
   if (intent === 'explicit') {
     s.sessionSuppressed = false;
     s.sessionExplicit = true;
+    s.sessionExact = false;
+  } else if (intent === 'exact') {
+    s.sessionExplicit = false;
+    s.sessionExact = true;
   }
   return true;
 }
@@ -512,13 +528,18 @@ const shQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 const powershellBody = (s) => String(s).replace(/'/g, "''");
 
 function localPty(cwd, tool, line, relayEnabled = false, ws = null, env = {}) {
+  const id = crypto.randomBytes(8).toString('hex');
   const p = pty.spawn(SHELL, [], {
-    name: 'xterm-256color', cols: 100, rows: 30, cwd, env: { ...sanitizedEnv(), ...env },
+    name: 'xterm-256color', cols: 100, rows: 30, cwd,
+    // Descendants such as a manually typed Codex inherit the owning PTY.
+    // The hook callback uses the existing per-boot McFly server transport.
+    env: ptyEnv(id, env),
     ...(WIN ? { useConptyDll: true } : {}),
   });
   const s = {
-    id: crypto.randomBytes(8).toString('hex'), p, buffer: '', ws: null,
-    tool, cwd, created: Date.now(), session: null, sessionSuppressed: false, sessionExplicit: false, title: '', relayEnabled,
+    id, p, buffer: '', ws: null,
+    tool, cwd, created: Date.now(), session: null, sessionSuppressed: false, sessionExplicit: false, sessionExact: false,
+    title: '', relayEnabled,
     relayQueue: Promise.resolve(),
     shadow: new ShadowTerminal({ cols: 100, rows: 30, scrollback: 20, allowProposedApi: true }),
   };
@@ -636,7 +657,7 @@ export function attachPty(server, allowedHosts, getRemote = () => undefined) {
           p.stderr?.setEncoding?.('utf8');
           const s = {
             id: crypto.randomBytes(8).toString('hex'), p, buffer: '', ws: null,
-            connection, tool, cwd, created: Date.now(), session: null, sessionSuppressed: false, sessionExplicit: false, title: '',
+            connection, tool, cwd, created: Date.now(), session: null, sessionSuppressed: false, sessionExplicit: false, sessionExact: false, title: '',
             relayEnabled: false, relayQueue: Promise.resolve(),
             shadow: new ShadowTerminal({ cols: 100, rows: 30, scrollback: 20, allowProposedApi: true }),
           };

@@ -47,10 +47,10 @@ function launchError(message, status = 400, code = 'AGENT_LAUNCH_FAILED') {
   return Object.assign(new Error(message), { status, code });
 }
 
-function cleanEnv() {
+export function cleanEnv(source = process.env) {
   const env = {};
-  for (const [key, value] of Object.entries(process.env)) {
-    if (key === 'CLAUDECODE' || key === 'NO_COLOR' || key.startsWith('CLAUDE_CODE_')) continue;
+  for (const [key, value] of Object.entries(source)) {
+    if (key === 'CLAUDECODE' || key === 'NO_COLOR' || key.startsWith('CLAUDE_CODE_') || key.startsWith('MCFLY_PTY_')) continue;
     env[key] = value;
   }
   return env;

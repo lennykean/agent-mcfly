@@ -13,6 +13,9 @@ if (group === 'mcp' && command === 'start') {
   console.log(`wrote ${result.file}`);
   console.log(JSON.stringify(result.manifest, null, 2));
   for (const status of result.adapters) console.log(status);
+} else if (group === 'codex-hook' && command === undefined) {
+  const { runCodexHook } = await import('./mcp.js');
+  await runCodexHook();
 } else if (group === 'mcp') {
   console.error('usage: mcfly mcp <start|config>');
   process.exitCode = 1;

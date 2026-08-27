@@ -1,10 +1,126 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import { DATA_MARKER, dataEnvelope, highlightResult, parseLineSpec, parseTsv } from './mcfly-data.js';
-import { checklistFiles, findWorkspaceState, runListAgentProviders, runListPeers, runPullInbox, runSendMessage, runSpawnAgent } from './mcp.js';
+import { checklistFiles, configureCodexHook, findWorkspaceState, runCodexHook, runListAgentProviders, runListPeers, runPullInbox, runSendMessage, runSpawnAgent } from './mcp.js';
+
+test('Codex hook transport validates private PTY identity and preserves split UTF-8 input', async () => {
+  const event = {
+    hook_event_name: 'SessionStart', source: 'startup', session_id: 'thread-1',
+    cwd: path.join(process.cwd(), 'café'), transcript_path: null,
+    model: 'gpt-5.6', permission_mode: 'default',
+  };
+  const bytes = Buffer.from(JSON.stringify(event));
+  const split = bytes.indexOf(Buffer.from('é')) + 1;
+  let request;
+  const ok = await runCodexHook({
+    stdin: Readable.from([bytes.subarray(0, split), bytes.subarray(split)]),
+    env: { MCFLY_PTY_ID: '0123456789abcdef', MCFLY_PTY_PORT: '4321' },
+    processCwd: event.cwd,
+    servers: [{ port: 4321, mcpToken: 'private' }],
+    request: async (url, options) => { request = { url, options }; return { ok: true }; },
+  });
+  assert.equal(ok, true);
+  assert.equal(request.url, 'http://127.0.0.1:4321/api/codex-session-start');
+  assert.equal(request.options.headers.Authorization, 'Bearer private');
+  assert.deepEqual(JSON.parse(request.options.body), { ...event, ptyId: '0123456789abcdef' });
+
+  request = undefined;
+  assert.equal(await runCodexHook({
+    stdin: Readable.from([JSON.stringify(event)]),
+    env: { MCFLY_PTY_ID: '0123456789abcdef', MCFLY_PTY_PORT: '4321' },
+    processCwd: process.cwd(), servers: [{ port: 4321, mcpToken: 'private' }],
+    request: async () => { request = true; return { ok: true }; },
+  }), false);
+  assert.equal(request, undefined);
+
+  let called = false;
+  assert.equal(await runCodexHook({
+    stdin: Readable.from(['{}']), env: {}, servers: [], request: async () => { called = true; },
+  }), false);
+  assert.equal(called, false);
+  assert.equal(await runCodexHook({
+    stdin: Readable.from(['not json']),
+    env: { MCFLY_PTY_ID: '0123456789abcdef', MCFLY_PTY_PORT: '4321' },
+    servers: [{ port: 4321, mcpToken: 'private' }], request: async () => ({ ok: true }),
+  }), false);
+  assert.equal(await runCodexHook({
+    stdin: Readable.from(['{}']),
+    env: { MCFLY_PTY_ID: '0123456789abcdef', MCFLY_PTY_PORT: '4321' },
+    servers: [{ port: 4321, mcpToken: 'private' }], request: async () => ({ ok: false }),
+  }), false);
+
+  const env = { ...process.env };
+  delete env.MCFLY_PTY_ID;
+  delete env.MCFLY_PTY_PORT;
+  const silent = spawnSync(process.execPath, ['server/cli.js', 'codex-hook'], {
+    cwd: process.cwd(), env, input: JSON.stringify(event), encoding: 'utf8', timeout: 5000,
+  });
+  assert.equal(silent.status, 0, silent.stderr);
+  assert.equal(silent.stdout, '');
+});
+
+test('Codex hook setup merges once and leaves malformed or unfamiliar config untouched', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mcfly-codex-config-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const home = path.join(root, 'good');
+  fs.mkdirSync(home);
+  const file = path.join(home, 'hooks.json');
+  const existing = {
+    description: 'keep me',
+    hooks: {
+      Stop: [{ hooks: [{ type: 'command', command: 'echo stop' }] }],
+      SessionStart: [{ matcher: '^resume$', hooks: [{ type: 'command', command: 'echo resume' }] }],
+      PostToolUse: [{ matcher: 'Bash', hooks: [{
+        type: 'mcp_tool', server: 'scanner', tool: 'scan', input: { path: '${tool_input.command}' }, timeout: 5,
+      }] }],
+    },
+  };
+  fs.writeFileSync(file, JSON.stringify(existing));
+  assert.match(configureCodexHook(home), /configured.*trust/);
+  const configured = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(configured.description, existing.description);
+  assert.deepEqual(configured.hooks.Stop, existing.hooks.Stop);
+  assert.deepEqual(configured.hooks.PostToolUse, existing.hooks.PostToolUse);
+  assert.deepEqual(configured.hooks.SessionStart[0], existing.hooks.SessionStart[0]);
+  assert.deepEqual(configured.hooks.SessionStart[1], {
+    matcher: '^(startup|resume|clear|compact)$',
+    hooks: [{ type: 'command', command: 'mcfly codex-hook', timeout: 2 }],
+  });
+  const once = fs.readFileSync(file, 'utf8');
+  assert.match(configureCodexHook(home), /already configured.*trust/);
+  assert.equal(fs.readFileSync(file, 'utf8'), once);
+
+  const invalid = [
+    ['malformed', '{'],
+    ['unfamiliar', JSON.stringify({ hooks: null })],
+    ['null-handler', JSON.stringify({ hooks: { Stop: [{ hooks: [null] }] } })],
+    ['missing-command', JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command' }] }] } })],
+    ['bad-mcp', JSON.stringify({ hooks: { PostToolUse: [{ hooks: [{ type: 'mcp_tool', server: 's', tool: 't', input: [] }] }] } })],
+    ['bad-unrelated-event', JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'ok' }] }], PostToolUse: null } })],
+    ['unknown-handler', JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'prompt', prompt: 'hi' }] }] } })],
+    ['unknown-event', JSON.stringify({ hooks: { FutureEvent: [{ hooks: [{ type: 'command', command: 'echo hi' }] }] } })],
+  ];
+  for (const [name, content] of invalid) {
+    const other = path.join(root, name);
+    fs.mkdirSync(other);
+    const otherFile = path.join(other, 'hooks.json');
+    fs.writeFileSync(otherFile, content);
+    assert.match(configureCodexHook(other), /unchanged/);
+    assert.equal(fs.readFileSync(otherFile, 'utf8'), content);
+  }
+
+  const inline = path.join(root, 'inline');
+  fs.mkdirSync(inline);
+  fs.writeFileSync(path.join(inline, 'config.toml'), '[[hooks.SessionStart]]\nmatcher = "startup"\n');
+  assert.match(configureCodexHook(inline), /inline hooks.*unchanged/);
+  assert.equal(fs.existsSync(path.join(inline, 'hooks.json')), false);
+});
 
 test('validates strict TSV and serves it through MCP stdio', () => {
   assert.deepEqual(parseTsv('name\tcount\nalpha\t2\n'), {

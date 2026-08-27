@@ -5,6 +5,7 @@ import readline from 'node:readline';
 import { execFile, execFileSync, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { DATA_MARKER, parseLineSpec, parseTable, TABLE_FORMATS } from './mcfly-data.js';
+import { projectPathKey } from './loaders/codex.js';
 
 const exec = promisify(execFile);
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url))).version;
@@ -236,6 +237,40 @@ function liveServers() {
     const all = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.mcfly', 'servers.json'), 'utf8'));
     return all.filter((s) => { try { process.kill(s.pid, 0); return true; } catch { return false; } });
   } catch { return []; }
+}
+
+export async function runCodexHook({
+  stdin = process.stdin, env = process.env, processCwd = process.cwd(),
+  servers = liveServers(), request = fetch, timeoutMs = 1000,
+} = {}) {
+  try {
+    const ptyId = env.MCFLY_PTY_ID;
+    const portText = env.MCFLY_PTY_PORT;
+    const port = Number(portText);
+    if (typeof ptyId !== 'string' || !/^[a-f0-9]{16}$/.test(ptyId)
+      || !/^\d{1,5}$/.test(portText ?? '') || port < 1 || port > 65535) return false;
+    const server = servers.find((entry) => Number(entry.port) === port);
+    if (!server || typeof server.mcpToken !== 'string' || !server.mcpToken) return false;
+
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of stdin) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buffer.length;
+      if (size > 64 * 1024) return false;
+      chunks.push(buffer);
+    }
+    const event = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    if (!event || typeof event !== 'object' || Array.isArray(event)) return false;
+    if (projectPathKey(event.cwd) !== projectPathKey(processCwd)) return false;
+    const response = await request(`http://127.0.0.1:${port}/api/codex-session-start`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${server.mcpToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...event, cwd: processCwd, ptyId }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return response.ok;
+  } catch { return false; }
 }
 
 const workspacePath = (p) => {
@@ -766,6 +801,48 @@ const START = process.platform === 'win32'
   ? { command: 'cmd', args: ['/c', 'mcfly', 'mcp', 'start'] }
   : { command: 'mcfly', args: ['mcp', 'start'] };
 const MANIFEST = { mcpServers: { mcfly: START } };
+const CODEX_HOOK_COMMAND = 'mcfly codex-hook';
+const CODEX_HOOK_STATUS = 'open /hooks in Codex and trust the McFly hook; exact terminal matching starts only after Codex runs it';
+const CODEX_HOOK_EVENTS = new Set([
+  'SessionStart', 'SessionEnd', 'SubagentStart', 'PreToolUse', 'PermissionRequest',
+  'PostToolUse', 'PreCompact', 'PostCompact', 'UserPromptSubmit', 'SubagentStop', 'Stop',
+]);
+const COMMAND_HOOK_KEYS = new Set([
+  'type', 'command', 'commandWindows', 'timeout', 'statusMessage', 'additionalContextLimit', 'async',
+]);
+const MCP_HOOK_KEYS = new Set(['type', 'server', 'tool', 'input', 'timeout', 'statusMessage']);
+const MATCHER_KEYS = new Set(['matcher', 'hooks']);
+const plainObject = (value) => !!value && typeof value === 'object' && !Array.isArray(value);
+const onlyKeys = (value, allowed) => Object.keys(value).every((key) => allowed.has(key));
+const optionalNumber = (value) => value === undefined || (typeof value === 'number' && Number.isFinite(value) && value >= 0);
+const optionalString = (value) => value === undefined || typeof value === 'string';
+const validHookHandler = (handler) => {
+  if (!plainObject(handler)) return false;
+  if (handler.type === 'command') {
+    return onlyKeys(handler, COMMAND_HOOK_KEYS)
+      && typeof handler.command === 'string' && !!handler.command.trim()
+      && optionalString(handler.commandWindows) && optionalNumber(handler.timeout)
+      && optionalString(handler.statusMessage)
+      && (handler.additionalContextLimit === undefined
+        || (Number.isInteger(handler.additionalContextLimit) && handler.additionalContextLimit >= 0))
+      && (handler.async === undefined || typeof handler.async === 'boolean');
+  }
+  if (handler.type === 'mcp_tool') {
+    return onlyKeys(handler, MCP_HOOK_KEYS)
+      && typeof handler.server === 'string' && !!handler.server.trim()
+      && typeof handler.tool === 'string' && !!handler.tool.trim()
+      && (handler.input === undefined || plainObject(handler.input))
+      && optionalNumber(handler.timeout) && optionalString(handler.statusMessage);
+  }
+  return false;
+};
+const validHooks = (hooks) => plainObject(hooks) && Object.entries(hooks).every(([event, groups]) => (
+  CODEX_HOOK_EVENTS.has(event) && Array.isArray(groups) && groups.every((group) => (
+    plainObject(group) && onlyKeys(group, MATCHER_KEYS)
+    && (group.matcher === undefined || typeof group.matcher === 'string')
+    && Array.isArray(group.hooks) && group.hooks.length > 0 && group.hooks.every(validHookHandler)
+  ))
+));
 
 function configure(command, args) {
   const options = { encoding: 'utf8', windowsHide: true, shell: process.platform === 'win32' };
@@ -799,6 +876,57 @@ function configureCursorFile() {
   } catch { return CURSOR_FAILED; }
 }
 
+export function configureCodexHook(codexHome = process.env.CODEX_HOME || path.join(os.homedir(), '.codex')) {
+  const file = path.join(codexHome, 'hooks.json');
+  const toml = path.join(codexHome, 'config.toml');
+  if (!fs.existsSync(file) && fs.existsSync(toml)) {
+    try {
+      if (/^\s*\[\[?\s*hooks(?:\s*[.\]])/m.test(fs.readFileSync(toml, 'utf8'))) {
+        return `codex hook: inline hooks found in ${toml}; unchanged to avoid mixed hook sources; exact terminal matching is unavailable`;
+      }
+    } catch { return `codex hook: could not inspect ${toml}; unchanged; exact terminal matching is unavailable`; }
+  }
+  let config = {};
+  if (fs.existsSync(file)) {
+    try { config = JSON.parse(fs.readFileSync(file, 'utf8')); } catch {
+      return `codex hook: existing ${file} is invalid; unchanged; exact terminal matching is unavailable`;
+    }
+    if (!config || typeof config !== 'object' || Array.isArray(config)) {
+      return `codex hook: existing ${file} is invalid; unchanged; exact terminal matching is unavailable`;
+    }
+  }
+  const hooks = config.hooks === undefined ? {} : config.hooks;
+  if (!validHooks(hooks)) {
+    return `codex hook: existing ${file} has an unsupported shape; unchanged; exact terminal matching is unavailable`;
+  }
+  const starts = hooks.SessionStart ?? [];
+  if (starts.some((group) => (group.matcher === undefined || group.matcher === '^(startup|resume|clear|compact)$')
+    && group.hooks.some((hook) => hook?.type === 'command' && hook.command?.trim() === CODEX_HOOK_COMMAND))) {
+    return `codex hook: already configured; ${CODEX_HOOK_STATUS}`;
+  }
+
+  try {
+    fs.mkdirSync(codexHome, { recursive: true });
+    const temporary = `${file}.${process.pid}.tmp`;
+    const next = {
+      ...config,
+      hooks: {
+        ...hooks,
+        SessionStart: [...starts, {
+          matcher: '^(startup|resume|clear|compact)$',
+          hooks: [{ type: 'command', command: CODEX_HOOK_COMMAND, timeout: 2 }],
+        }],
+      },
+    };
+    fs.writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
+    fs.renameSync(temporary, file);
+    return `codex hook: configured; ${CODEX_HOOK_STATUS}`;
+  } catch {
+    try { fs.unlinkSync(`${file}.${process.pid}.tmp`); } catch { /* nothing staged */ }
+    return `codex hook: could not write ${file}; exact terminal matching is unavailable`;
+  }
+}
+
 export function configureMcp() {
   const dir = path.join(os.homedir(), '.mcfly');
   fs.mkdirSync(dir, { recursive: true });
@@ -806,6 +934,7 @@ export function configureMcp() {
   fs.writeFileSync(file, `${JSON.stringify(MANIFEST, null, 2)}\n`);
   const adapters = [
     configure('codex', ['mcp', 'add', 'mcfly', '--', START.command, ...START.args]),
+    configureCodexHook(),
     configure('claude', ['mcp', 'add', '--transport', 'stdio', '--scope', 'user', 'mcfly', '--', START.command, ...START.args]),
     configureCursorFile(),
   ];

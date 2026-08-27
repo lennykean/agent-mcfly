@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { callRender, callRenders, findByLaunchMarker, parseHead, parseThreadNames, patchRender, patchRenders, projectPathKey, resultRender, splitNumberedResults, tailFile, toolLabel } from './codex.js';
+import { callRender, callRenders, findByLaunchMarker, parseHead, parseThreadNames, patchRender, patchRenders, projectPathKey, resultRender, sessionForSessionStart, splitNumberedResults, tailFile, toolLabel } from './codex.js';
 
 test('project path identity folds Windows paths but preserves POSIX case', () => {
   assert.equal(projectPathKey('C:\\Repo\\App'), projectPathKey('c:/repo/app'));
@@ -208,6 +208,62 @@ test('recovers McFly table semantics from MCP results', () => {
   }));
   assert.equal(csv.format, 'csv');
   assert.deepEqual(csv.table, { columns: ['name', 'count'], rows: [['alpha, jr', '2']] });
+});
+
+test('SessionStart resolves the exact Codex thread for its cwd without requiring a transcript path', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mcfly-codex-hook-'));
+  const cwd = path.join(root, 'workspace');
+  fs.mkdirSync(cwd);
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const write = (name, id, fileCwd = cwd) => {
+    const file = path.join(root, `rollout-${name}.jsonl`);
+    fs.writeFileSync(file, `${JSON.stringify({ type: 'session_meta', payload: { id, cwd: fileCwd } })}\n`);
+    return path.basename(file);
+  };
+  const first = write('first', 'thread-first');
+  const second = write('second', 'thread-second');
+  write('wrong-cwd', 'thread-wrong', path.join(root, 'other'));
+  const event = (session_id, source, extra = {}) => ({
+    hook_event_name: 'SessionStart', session_id, cwd, source,
+    model: 'gpt-5.6', permission_mode: 'default', ...extra,
+  });
+
+  for (const source of ['startup', 'resume', 'clear', 'compact']) {
+    assert.equal(sessionForSessionStart(event('thread-first', source, { transcript_path: null }), root)?.id, first);
+  }
+  const resumedCwd = path.join(root, 'resumed-here');
+  fs.mkdirSync(resumedCwd);
+  assert.equal(sessionForSessionStart(event('thread-first', 'resume', {
+    cwd: resumedCwd, transcript_path: path.join(root, first),
+  }), root), null);
+  const resumed = write('resumed', 'thread-first', resumedCwd);
+  assert.deepEqual(
+    sessionForSessionStart(event('thread-first', 'resume', {
+      cwd: resumedCwd, transcript_path: path.join(root, resumed),
+    }), root)?.cwd,
+    resumedCwd,
+  );
+  assert.equal(sessionForSessionStart(event('thread-second', 'resume', {
+    transcript_path: path.join(root, first),
+  }), root), null);
+  assert.equal(sessionForSessionStart(event('thread-first', 'resume', {
+    transcript_path: path.join(cwd, 'missing.jsonl'),
+  }), root), null);
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'mcfly-codex-outside-'));
+  t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+  const outsideFile = path.join(outside, 'rollout-outside.jsonl');
+  fs.writeFileSync(outsideFile, `${JSON.stringify({ type: 'session_meta', payload: { id: 'thread-first', cwd } })}\n`);
+  assert.equal(sessionForSessionStart(event('thread-first', 'resume', { transcript_path: outsideFile }), root), null);
+  assert.equal(sessionForSessionStart(event('thread-second', 'clear'), root)?.id, second);
+  fs.utimesSync(path.join(root, first), new Date(0), new Date(0));
+  const continuation = write('continued', 'thread-first');
+  assert.equal(sessionForSessionStart(event('thread-first', 'compact', { transcript_path: null }), root)?.id, continuation);
+  assert.equal(sessionForSessionStart(event('missing', 'startup', { transcript_path: null }), root), null);
+  assert.equal(sessionForSessionStart(event('thread-wrong', 'startup'), root), null);
+  assert.equal(sessionForSessionStart(event('thread-first', 'unknown'), root), null);
+  assert.equal(sessionForSessionStart({ ...event('thread-first', 'startup'), model: undefined }, root), null);
+  assert.equal(sessionForSessionStart({ ...event('thread-first', 'startup'), cwd: 42 }, root), null);
+  assert.equal(sessionForSessionStart({ ...event('thread-first', 'startup'), transcript_path: 42 }, root), null);
 });
 
 test('launch marker discovery scans only recent matching transcripts', () => {

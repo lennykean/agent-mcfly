@@ -4,8 +4,14 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 import test from 'node:test';
 import {
-  AGENT_PROVIDERS, codexThreadId, launchAgent, listAgentProviders,
+  AGENT_PROVIDERS, cleanEnv, codexThreadId, launchAgent, listAgentProviders,
 } from './agent-launch.js';
+
+test('headless agents cannot inherit a hosted parent PTY identity', () => {
+  assert.deepEqual(cleanEnv({
+    KEEP: 'yes', MCFLY_PTY_ID: 'parent', MCFLY_PTY_PORT: '7777', MCFLY_PTY_FUTURE: 'private',
+  }), { KEEP: 'yes' });
+});
 
 const cwd = fs.realpathSync(process.cwd());
 const session = (id, provider = 'codex') => ({ id, provider, cwd, updated_at: Date.now(), size: 1 });
