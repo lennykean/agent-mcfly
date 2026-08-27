@@ -195,13 +195,14 @@ const server = http.createServer(async (req, res) => {
     // mapped sessions carry their transcript title so the picker reads human
     if (url.pathname === '/api/ptys') {
       const remote = remoteConnection(url);
-      // ?screens=1 only from the gallery — see listPtys
-      const ptys = listPtys(remote?.id, { screens: url.searchParams.get('screens') === '1' });
       // Remote mappings are made by the same post-launch session hunt as
       // local mappings. Avoid rescanning every remote transcript over SFTP
       // on this frequent terminal-registry poll.
-      if (remote) return json(res, 200, ptys);
+      if (remote) return json(res, 200, listPtys(remote.id, { screens: url.searchParams.get('screens') === '1' }));
       const claudeRecords = await claudePtySessions();
+      // Snapshot after the only await so an unfollow handled while process
+      // discovery runs cannot leak its stale mapping back to the browser.
+      const ptys = listPtys(undefined, { screens: url.searchParams.get('screens') === '1' });
       for (const p of ptys) {
         const claudeRecord = claudeRecords.get(p.id);
         let exactClaude = false;
@@ -210,8 +211,8 @@ const server = http.createServer(async (req, res) => {
             const mapping = claudeRecordMapping(claudeRecord, claudeCode.listForCwd(claudeRecord.cwd));
             exactClaude = !!mapping;
             if (mapping && (p.session?.provider !== mapping.provider || p.session.id !== mapping.id || p.session.pwd !== mapping.pwd)) {
-              p.session = mapping;
-              setPtySession(p.id, p.session);
+              const linked = setPtySession(p.id, mapping);
+              if (linked) p.session = mapping;
             }
           } catch { /* Claude's PID record is authoritative but best effort */ }
         }
@@ -235,11 +236,12 @@ const server = http.createServer(async (req, res) => {
               }
             }
             if (matches.length === 1 && p.session?.id !== matches[0].s.id) {
-              p.session = { provider: matches[0].prov, id: matches[0].s.id, pwd: p.cwd };
-              setPtySession(p.id, p.session);
+              const mapping = { provider: matches[0].prov, id: matches[0].s.id, pwd: p.cwd };
+              const linked = setPtySession(p.id, mapping);
+              if (linked) p.session = mapping;
             } else if (matches.length > 1 && p.session && !matches.some((m) => m.s.id === p.session.id)) {
-              p.session = null;
-              setPtySession(p.id, null);
+              const linked = setPtySession(p.id, null);
+              if (linked) p.session = null;
             }
             hunted.set(p.id, { title: p.title, at: Date.now(), found: !!p.session });
           } catch { /* title mapping is best effort */ }
@@ -491,7 +493,21 @@ const server = http.createServer(async (req, res) => {
         const body = await requestJson(req);
         const connection = remoteConnection(url)?.id ?? body.connection;
         const { ptyId, provider, session, pwd } = body;
-        return json(res, 200, { ok: setPtySession(ptyId, { provider, id: session, pwd }, connection) });
+        const intent = body.intent ?? 'automatic';
+        if (!['automatic', 'explicit', 'unfollow'].includes(intent)) {
+          return json(res, 400, { error: 'intent must be automatic, explicit, or unfollow' });
+        }
+        if (typeof ptyId !== 'string' || !ptyId
+          || (intent !== 'unfollow' && [provider, session, pwd].some((value) => typeof value !== 'string' || !value.trim()))) {
+          return json(res, 400, { error: 'ptyId and session mapping are required' });
+        }
+        const result = setPtySession(
+          ptyId,
+          intent === 'unfollow' ? null : { provider, id: session, pwd },
+          connection,
+          intent,
+        );
+        return json(res, 200, { ok: result === true, blocked: result === null });
       } catch (error) {
         return error.status ? errorJson(res, error) : json(res, 400, { error: 'bad body' });
       }

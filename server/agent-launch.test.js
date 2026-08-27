@@ -139,6 +139,26 @@ test('interactive Codex correlates by an unguessable prompt marker, not the newe
   assert.equal(out.session_id, exact.id);
 });
 
+test('programmatic correlation leaves an unfollowed peer unassociated', async () => {
+  const marker = '44444444-4444-4444-8444-444444444444';
+  const exact = session('2026/rollout-suppressed.jsonl');
+  let killed = false;
+  const out = await launchAgent({ harness: 'codex', kind: 'peer', prompt: 'pair' }, {
+    toolPath: () => '/bin/codex', randomUUID: () => marker,
+    loaders: { codex: { listForCwd: () => [exact], findByLaunchMarker: () => [exact] } },
+    launchAgentPty: () => ({
+      id: 'pty-suppressed', terminal_id: 'pty-suppressed', relay_enabled: true,
+      interactive: false, session_available: false, messageable: false,
+    }),
+    setPtySession: () => null,
+    killPty: () => { killed = true; },
+    timeoutMs: 1000,
+  });
+  assert.equal(out.peer.session_id, undefined);
+  assert.equal(out.peer.messageable, false);
+  assert.equal(killed, false);
+});
+
 test('rejects terminal controls before a peer PTY can receive bytes', async () => {
   let launched = false;
   await assert.rejects(launchAgent({ harness: 'codex', kind: 'peer', prompt: 'unsafe\u001b[2J' }, {

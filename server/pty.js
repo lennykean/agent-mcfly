@@ -99,7 +99,7 @@ function sanitizedEnv() {
   return { ...env, TERM: 'xterm-256color', COLORTERM: 'truecolor', FORCE_COLOR: '3' };
 }
 
-// ptyId -> { p, buffer, ws, tool, cwd, created, session, relayEnabled }
+// ptyId -> { p, buffer, ws, tool, cwd, created, session, sessionSuppressed, sessionExplicit, relayEnabled }
 const sessions = new Map();
 // SSH PTYs are channels owned by this local McFly process. They need the
 // connection in their identity because two hosts can produce the same id.
@@ -308,10 +308,23 @@ export function listPeers() {
   return [...sessions.values(), ...remoteSessions.values()].map(peerView);
 }
 
-export function setPtySession(ptyId, mapping, connection) {
+export function setPtySession(ptyId, mapping, connection, intent = 'automatic') {
   const s = sessionOf(ptyId, connection);
   if (!s) return false;
+  if (intent === 'unfollow') {
+    s.session = null;
+    s.sessionSuppressed = true;
+    s.sessionExplicit = false;
+    return true;
+  }
+  // null means the PTY still exists, but the user has blocked this automatic
+  // write. false remains "terminal not found" for callers that must clean up.
+  if ((s.sessionSuppressed || s.sessionExplicit) && intent !== 'explicit') return null;
   s.session = mapping;
+  if (intent === 'explicit') {
+    s.sessionSuppressed = false;
+    s.sessionExplicit = true;
+  }
   return true;
 }
 
@@ -505,7 +518,7 @@ function localPty(cwd, tool, line, relayEnabled = false, ws = null, env = {}) {
   });
   const s = {
     id: crypto.randomBytes(8).toString('hex'), p, buffer: '', ws: null,
-    tool, cwd, created: Date.now(), session: null, title: '', relayEnabled,
+    tool, cwd, created: Date.now(), session: null, sessionSuppressed: false, sessionExplicit: false, title: '', relayEnabled,
     relayQueue: Promise.resolve(),
     shadow: new ShadowTerminal({ cols: 100, rows: 30, scrollback: 20, allowProposedApi: true }),
   };
@@ -623,7 +636,7 @@ export function attachPty(server, allowedHosts, getRemote = () => undefined) {
           p.stderr?.setEncoding?.('utf8');
           const s = {
             id: crypto.randomBytes(8).toString('hex'), p, buffer: '', ws: null,
-            connection, tool, cwd, created: Date.now(), session: null, title: '',
+            connection, tool, cwd, created: Date.now(), session: null, sessionSuppressed: false, sessionExplicit: false, title: '',
             relayEnabled: false, relayQueue: Promise.resolve(),
             shadow: new ShadowTerminal({ cols: 100, rows: 30, scrollback: 20, allowProposedApi: true }),
           };

@@ -213,6 +213,7 @@ export async function launchAgent(input, deps = {}) {
   let launchPrompt = prompt;
   let args = [...provider[kind === 'peer' ? 'peer' : 'headless']];
   let peer;
+  let peerLinked = false;
   let state = null;
   let linked = false;
   try {
@@ -235,15 +236,19 @@ export async function launchAgent(input, deps = {}) {
     );
     const session = await discoverLaunchedSession(loader, cwd, provider.provider, correlation, state, deps.timeoutMs);
     const mapping = { provider: provider.provider, id: session.id, pwd: session.cwd ?? cwd };
-    if (peer && !(deps.setPtySession ?? setPtySession)(peer.terminal_id, mapping)) {
-      throw launchError('peer terminal ended before its session could be linked', 500);
+    if (peer) {
+      const result = (deps.setPtySession ?? setPtySession)(peer.terminal_id, mapping);
+      if (result === false) throw launchError('peer terminal ended before its session could be linked', 500);
+      peerLinked = result === true;
     }
     linked = true;
     state?.release?.();
     return {
       kind, harness, provider: provider.provider, session_id: session.id,
       workspace: mapping.pwd,
-      ...(peer ? { peer: { ...peer, provider: mapping.provider, session_id: mapping.id, workspace: mapping.pwd, session_available: true, messageable: true } } : {}),
+      ...(peer ? { peer: peerLinked
+        ? { ...peer, provider: mapping.provider, session_id: mapping.id, workspace: mapping.pwd, session_available: true, messageable: true }
+        : peer } : {}),
     };
   } catch (error) {
     if (!linked) state?.cancel?.();

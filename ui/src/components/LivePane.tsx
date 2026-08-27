@@ -629,6 +629,17 @@ export function LiveTerm({ cwd, source, projects, currentSession, linkedRoots, d
     removeTerm(key);
   };
 
+  const unfollowTerm = (pty: LivePty) => {
+    void fetch(withConnection('/api/pty-session', pty.source?.connection), {
+      method: 'POST',
+      body: JSON.stringify({ ptyId: pty.id, intent: 'unfollow' }),
+    }).then((response) => response.json()).then((result) => {
+      if (!result.ok) return;
+      setPtys((cur) => cur.map((item) => ptyKey(item.id, item.source) === ptyKey(pty.id, pty.source)
+        ? { ...item, session: null } : item));
+    }).catch(() => { /* the registry poll will retain the authoritative mapping */ });
+  };
+
   const takeBack = (key: number) => {
     setTerms((t) => t.map((e) => (
       e.key === key ? { ...e, attachId: e.ptyId ?? e.attachId, steal: true, nonce: e.nonce + 1 } : e
@@ -910,6 +921,14 @@ export function LiveTerm({ cwd, source, projects, currentSession, linkedRoots, d
                   title={same ? "You're already watching this terminal's session" : "Open this terminal's session in the replayer"}
                 >⏵ follow</button>
               )}
+              {sess && pty && (
+                <button
+                  type="button"
+                  onClick={() => unfollowTerm(pty)}
+                  title="Unfollow: leave the terminal running without an associated session"
+                  aria-label="Unfollow this terminal from its associated session"
+                >unfollow</button>
+              )}
               {!sess && pty && onFollowResolve && (
                 <button
                   onClick={() => onFollowResolve(pty)}
@@ -945,7 +964,8 @@ export function LiveTerm({ cwd, source, projects, currentSession, linkedRoots, d
                 setTerms((t) => t.map((x) => (x.key === e.key ? { ...x, ptyId: id } : x)));
                 // fresh = started here, not adopted/taken back — only fresh
                 // starts may satisfy a session hunt
-                onPtyId?.(id, e.tool, !e.attachId, termProject);
+                const fresh = !e.attachId && !e.ptyId;
+                if (fresh || !sessionOf(id, e.source)) onPtyId?.(id, e.tool, fresh, termProject);
               }}
               onExit={() => removeTerm(e.key)}
               onTakeBack={() => takeBack(e.key)}

@@ -373,24 +373,19 @@ export default function Workbench({
                 .sort((a, b) => a.updated_at - b.updated_at)[0])
             : undefined;
           if (!cand) continue;
-          if (h.adopt) {
-            setHunts((hs) => hs.filter((x) => x.key !== h.key));
-            void fetch(withConnection('/api/pty-session', source?.connection), {
-              method: 'POST',
-              body: JSON.stringify({ ptyId: h.ptyId, provider: cand.provider, session: cand.id, pwd: dir }),
-            });
-            continue;
-          }
-          claimed.current.add(cand.id);
+          // The PTY record owns unfollow suppression. Make the automatic
+          // mapping first so a racing unfollow can veto both the link and the
+          // fresh-launch auto-open below.
+          if (!h.ptyId) continue;
+          const response = await fetch(withConnection('/api/pty-session', source?.connection), {
+            method: 'POST',
+            body: JSON.stringify({ ptyId: h.ptyId, provider: cand.provider, session: cand.id, pwd: dir, intent: 'automatic' }),
+          });
+          const linked = response.ok ? await response.json() : undefined;
           setHunts((hs) => hs.filter((x) => x.key !== h.key));
+          if (!linked?.ok || h.adopt) continue;
+          claimed.current.add(cand.id);
           onSessionFound(dir, cand, source); // the shell routes it: here, elsewhere, or a new root
-          // label the PTY with its transcript so the live-terminal picker can offer it
-          if (h.ptyId) {
-            void fetch(withConnection('/api/pty-session', source?.connection), {
-              method: 'POST',
-              body: JSON.stringify({ ptyId: h.ptyId, provider: cand.provider, session: cand.id, pwd: dir }),
-            });
-          }
         } catch { /* retry next tick */ }
       }
     }, 3000);

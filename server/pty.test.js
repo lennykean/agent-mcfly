@@ -69,6 +69,35 @@ test('programmatic agent terminals start visible with human input locked', async
   }
 });
 
+test('unfollow blocks automatic session writes until an explicit follow', async () => {
+  const peer = launchAgentPty('_', process.cwd(), [], 'test');
+  const first = { provider: 'claude-code', id: 'first.jsonl', pwd: process.cwd() };
+  const second = { provider: 'claude-code', id: 'second.jsonl', pwd: process.cwd() };
+  const third = { provider: 'claude-code', id: 'third.jsonl', pwd: process.cwd() };
+  try {
+    assert.equal(setPtySession(peer.terminal_id, first), true);
+    assert.equal(setPtySession(peer.terminal_id, second), true);
+    assert.deepEqual(listPtys().find((item) => item.id === peer.terminal_id)?.session, second);
+    assert.equal(setPtySession(peer.terminal_id, null, undefined, 'unfollow'), true);
+    assert.equal(listPtys().find((item) => item.id === peer.terminal_id)?.session, null);
+    assert.equal(setPtySession(peer.terminal_id, first), null);
+    assert.equal(listPtys().find((item) => item.id === peer.terminal_id)?.session, null);
+    assert.equal(setPtySession(peer.terminal_id, first, undefined, 'explicit'), true);
+    assert.equal(setPtySession(peer.terminal_id, second), null);
+    assert.deepEqual(listPtys().find((item) => item.id === peer.terminal_id)?.session, first);
+    assert.equal(setPtySession(peer.terminal_id, third, undefined, 'explicit'), true);
+    assert.deepEqual(listPtys().find((item) => item.id === peer.terminal_id)?.session, third);
+    assert.equal(setPtySession(peer.terminal_id, null, undefined, 'unfollow'), true);
+    assert.equal(setPtySession(peer.terminal_id, second), null);
+    assert.equal(listPtys().find((item) => item.id === peer.terminal_id)?.session, null);
+  } finally {
+    killPty(peer.terminal_id);
+    for (let i = 0; i < 20 && listPtys().some((item) => item.id === peer.terminal_id); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+});
+
 test('kills hosted terminals during shutdown', async () => {
   const server = http.createServer();
   const hosts = new Set();

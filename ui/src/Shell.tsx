@@ -496,7 +496,7 @@ export default function Shell() {
     if (ptyId) {
       void fetch(withConnection('/api/pty-session', source?.connection), {
         method: 'POST',
-        body: JSON.stringify({ ptyId, provider: s.provider, session: s.id, pwd }),
+        body: JSON.stringify({ ptyId, provider: s.provider, session: s.id, pwd, intent: 'explicit' }),
       });
     }
     followSession(pwd, s, source);
