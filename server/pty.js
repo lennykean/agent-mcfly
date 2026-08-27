@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile, execFileSync, spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { WebSocketServer } from 'ws';
 import pty from '@lydell/node-pty';
@@ -30,6 +31,7 @@ const BUFFER_CAP = 256 * 1024;
 const INBOX_CAP = 100;
 const INBOX_BYTES_CAP = 1024 * 1024;
 const PROCESS_QUERY_TIMEOUT_MS = 2000;
+const OPENCODE_TUI_CONFIG = path.join(path.dirname(fileURLToPath(import.meta.url)), 'opencode-tui.json');
 
 export const hasTerminalControls = (value) => /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(String(value));
 
@@ -100,8 +102,15 @@ function sanitizedEnv(source = process.env) {
 }
 
 export function ptyEnv(id, extra = {}, source = process.env) {
+  const env = { ...sanitizedEnv(source), ...extra };
+  // OpenCode merges this invocation-scoped layer with its normal global and
+  // project configuration. An explicit layer belongs to the user, though, so
+  // never replace it (environment keys are case-insensitive on Windows).
+  if (!Object.keys(env).some((key) => key.toUpperCase() === 'OPENCODE_TUI_CONFIG')) {
+    env.OPENCODE_TUI_CONFIG = OPENCODE_TUI_CONFIG;
+  }
   return {
-    ...sanitizedEnv(source), ...extra,
+    ...env,
     MCFLY_PTY_ID: id,
     MCFLY_PTY_PORT: String(source.PORT || 7777),
   };
@@ -341,6 +350,19 @@ export function setPtySession(ptyId, mapping, connection, intent = 'automatic') 
     s.sessionExplicit = false;
     s.sessionExact = true;
   }
+  return true;
+}
+
+// A route returning home must release only the automatic OpenCode link it
+// owns. Explicit follows and unfollow suppression are user decisions; an
+// exact callback for another provider is not ours to erase.
+export function clearPtyProviderSession(ptyId, provider, connection) {
+  const s = sessionOf(ptyId, connection);
+  if (!s) return false;
+  if (s.sessionSuppressed || s.sessionExplicit) return null;
+  if (!s.session || s.session.provider !== provider) return null;
+  s.session = null;
+  s.sessionExact = false;
   return true;
 }
 

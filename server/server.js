@@ -11,7 +11,8 @@ import { fileURLToPath } from 'node:url';
 import * as claudeCode from './loaders/claude-code.js';
 import * as codex from './loaders/codex.js';
 import * as cursor from './loaders/cursor.js';
-import { alive, attachPty, claudePtySessions, claudeRecordMapping, detectTools, hasEditor, openInEditor, killAllPtys, killPty, listPeers, listPtys, pullPeerInbox, reapOrphans, sendPeerMessage, setPtyRelay, setPtySession, TOKEN } from './pty.js';
+import * as opencode from './loaders/opencode.js';
+import { alive, attachPty, claudePtySessions, claudeRecordMapping, clearPtyProviderSession, detectTools, hasEditor, openInEditor, killAllPtys, killPty, listPeers, listPtys, pullPeerInbox, reapOrphans, sendPeerMessage, setPtyRelay, setPtySession, TOKEN } from './pty.js';
 import { launchAgent, listAgentProviders } from './agent-launch.js';
 import { connectSsh, disconnectAllSsh, disconnectSsh, getSshConnection, listSshConnections } from './ssh.js';
 import * as review from './review.js';
@@ -19,7 +20,7 @@ import * as matchers from './matchers.js';
 import * as git from './git.js';
 import * as remoteData from './remote-data.js';
 
-const PROVIDERS = { 'claude-code': claudeCode, codex, cursor };
+const PROVIDERS = { 'claude-code': claudeCode, codex, cursor, opencode };
 const PORT = process.env.PORT || 7777;
 const DIST = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'ui', 'dist');
 const MIME = {
@@ -68,6 +69,7 @@ const ALLOWED_HOSTS = new Set([`localhost:${PORT}`, `127.0.0.1:${PORT}`, `[::1]:
 const MCP_TOKEN = crypto.randomBytes(32).toString('hex');
 const isPrivateMcpRoute = (pathname) => [
   '/api/agent-providers', '/api/spawn-agent', '/api/peer-message', '/api/peer-inbox', '/api/codex-session-start',
+  '/api/opencode-route',
 ].includes(pathname);
 function hasMcpCredential(req) {
   const supplied = req.headers.authorization;
@@ -505,6 +507,45 @@ const server = http.createServer(async (req, res) => {
         return json(res, 200, { ok: result === true, blocked: result === null });
       } catch {
         return json(res, 400, { error: 'bad body' });
+      }
+    }
+    if (url.pathname === '/api/opencode-route' && req.method === 'POST') {
+      try {
+        const body = await requestJson(req);
+        if (typeof body.ptyId !== 'string' || !/^[a-f0-9]{16}$/.test(body.ptyId)) {
+          return json(res, 400, { error: 'valid ptyId is required' });
+        }
+        // The private id names one local hosted shell. Do not accept a remote
+        // identity or validate a transcript before proving that owner exists.
+        if (!listPtys().some((pty) => pty.id === body.ptyId)) {
+          return json(res, 404, { ok: false, error: 'PTY not found' });
+        }
+        if (body.sessionID === null) {
+          const result = clearPtyProviderSession(body.ptyId, 'opencode');
+          return json(res, 200, { ok: result === true, blocked: result === null });
+        }
+        if (typeof body.sessionID !== 'string' || !body.sessionID || body.sessionID.length > 512
+          || typeof body.cwd !== 'string' || !body.cwd || body.cwd.length > 32 * 1024) {
+          return json(res, 400, { error: 'valid sessionID and cwd are required' });
+        }
+        const resolved = opencode.routeSession(body.sessionID, body.cwd);
+        if (['unsupported', 'unavailable', 'incompatible'].includes(resolved.kind)) {
+          return json(res, 200, { ok: false, unsupported: true });
+        }
+        if (resolved.kind !== 'session') {
+          return json(res, 404, { ok: false, error: 'OpenCode session not found for cwd' });
+        }
+        const session = resolved.session;
+        const result = setPtySession(body.ptyId, {
+          provider: 'opencode', id: session.id, pwd: session.cwd,
+        }, undefined, 'exact');
+        if (result === false) return json(res, 404, { ok: false, error: 'PTY not found' });
+        return json(res, 200, { ok: result === true, blocked: result === null });
+      } catch (error) {
+        if (error instanceof SyntaxError || error?.message === 'request too large') {
+          return json(res, 400, { error: 'bad body' });
+        }
+        return errorJson(res, error);
       }
     }
     if (url.pathname === '/api/pty-session' && req.method === 'POST') {

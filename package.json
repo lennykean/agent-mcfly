@@ -1,7 +1,7 @@
 {
   "name": "agent-mcfly",
   "version": "0.0.37",
-  "description": "Replay and inspect Codex, Claude Code, and Cursor Agent sessions in a live workbench",
+  "description": "Replay and inspect Codex, Claude Code, Cursor Agent, and OpenCode sessions in a live workbench",
   "type": "module",
   "bin": {
     "mcfly": "server/cli.js"
@@ -17,10 +17,13 @@
     "server/ssh.js",
     "server/remote-data.js",
     "server/pty.js",
+    "server/opencode-tui-plugin.js",
+    "server/opencode-tui.json",
     "server/agent-launch.js",
     "server/loaders/claude-code.js",
     "server/loaders/codex.js",
     "server/loaders/cursor.js",
+    "server/loaders/opencode.js",
     "server/loaders/transcript.js",
     "ui/dist"
   ],
@@ -47,6 +50,7 @@
     "codex",
     "claude",
     "cursor",
+    "opencode",
     "session-replay"
   ],
   "license": "MIT",

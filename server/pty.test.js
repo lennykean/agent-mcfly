@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import WebSocket from 'ws';
-import { attachPty, claudePtySessions, claudeRecordMapping, killAllPtys, killPty, launchAgentPty, listPeers, listPtys, ptyEnv, pullPeerInbox, sendPeerMessage, setPtyRelay, setPtySession, TOKEN, toolPath } from './pty.js';
+import { attachPty, claudePtySessions, claudeRecordMapping, clearPtyProviderSession, killAllPtys, killPty, launchAgentPty, listPeers, listPtys, ptyEnv, pullPeerInbox, sendPeerMessage, setPtyRelay, setPtySession, TOKEN, toolPath } from './pty.js';
 
 test('hosted shells receive a fresh private PTY identity before descendants start', () => {
   const env = ptyEnv('0123456789abcdef', { KEEP: 'yes' }, {
@@ -16,6 +16,12 @@ test('hosted shells receive a fresh private PTY identity before descendants star
   assert.equal(env.MCFLY_PTY_PORT, '8765');
   assert.equal(env.KEEP, 'yes');
   assert.equal(env.KEEP_PARENT, 'yes');
+  assert.equal(path.basename(env.OPENCODE_TUI_CONFIG), 'opencode-tui.json');
+
+  const explicit = ptyEnv('0123456789abcdef', {}, { OPENCODE_TUI_CONFIG: 'user-layer.json' });
+  assert.equal(explicit.OPENCODE_TUI_CONFIG, 'user-layer.json');
+  const extra = ptyEnv('0123456789abcdef', { OPENCODE_TUI_CONFIG: 'launch-layer.json' }, {});
+  assert.equal(extra.OPENCODE_TUI_CONFIG, 'launch-layer.json');
 });
 
 test('Claude PID records prove the live process and resolve an exact transcript', async (t) => {
@@ -107,6 +113,35 @@ test('session precedence is unfollow, explicit, exact, then automatic', async ()
     assert.deepEqual(listPtys().find((item) => item.id === peer.terminal_id)?.session, third);
     assert.equal(setPtySession(peer.terminal_id, null, undefined, 'unfollow'), true);
     assert.equal(setPtySession(peer.terminal_id, second), null);
+    assert.equal(listPtys().find((item) => item.id === peer.terminal_id)?.session, null);
+  } finally {
+    killPty(peer.terminal_id);
+    for (let i = 0; i < 20 && listPtys().some((item) => item.id === peer.terminal_id); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+});
+
+test('OpenCode home and disposal clear only their own automatic or exact link', async () => {
+  const peer = launchAgentPty('_', process.cwd(), [], 'test');
+  const opencode = { provider: 'opencode', id: 'ses_a', pwd: process.cwd() };
+  const other = { provider: 'codex', id: 'other.jsonl', pwd: process.cwd() };
+  try {
+    assert.equal(setPtySession(peer.terminal_id, other, undefined, 'exact'), true);
+    assert.equal(clearPtyProviderSession(peer.terminal_id, 'opencode'), null);
+    assert.deepEqual(listPtys().find((item) => item.id === peer.terminal_id)?.session, other);
+
+    assert.equal(setPtySession(peer.terminal_id, opencode, undefined, 'exact'), true);
+    assert.equal(clearPtyProviderSession(peer.terminal_id, 'opencode'), true);
+    assert.equal(listPtys().find((item) => item.id === peer.terminal_id)?.session, null);
+    assert.equal(setPtySession(peer.terminal_id, opencode), true);
+    assert.equal(clearPtyProviderSession(peer.terminal_id, 'opencode'), true);
+
+    assert.equal(setPtySession(peer.terminal_id, opencode, undefined, 'explicit'), true);
+    assert.equal(clearPtyProviderSession(peer.terminal_id, 'opencode'), null);
+    assert.deepEqual(listPtys().find((item) => item.id === peer.terminal_id)?.session, opencode);
+    assert.equal(setPtySession(peer.terminal_id, null, undefined, 'unfollow'), true);
+    assert.equal(clearPtyProviderSession(peer.terminal_id, 'opencode'), null);
     assert.equal(listPtys().find((item) => item.id === peer.terminal_id)?.session, null);
   } finally {
     killPty(peer.terminal_id);
