@@ -180,20 +180,16 @@ const hookMetaMatches = (meta, input, want) => !meta.subagent
   && hookText(meta.cwd, 32 * 1024) && path.isAbsolute(meta.cwd)
   && norm(meta.cwd) === want;
 
-// Resolve Codex's supported SessionStart identity to the rollout McFly reads.
-// transcript_path is nullable. When present it identifies the resumed rollout;
-// when absent, the newest rollout for the exact id and cwd is selected.
-export function sessionForSessionStart(input, root = ROOT) {
-  if (!input || typeof input !== 'object' || Array.isArray(input)
-    || input.hook_event_name !== 'SessionStart'
-    || !SESSION_START_SOURCES.has(input.source)
-    || !hookText(input.session_id, 512)
-    || !hookText(input.cwd, 32 * 1024) || !path.isAbsolute(input.cwd)
-    || (input.transcript_path != null
-      && (!hookText(input.transcript_path, 32 * 1024) || !path.isAbsolute(input.transcript_path)))
-    || !hookText(input.model, 512)
-    || !PERMISSION_MODES.has(input.permission_mode)) return null;
+const validHookBase = (input) => input && typeof input === 'object' && !Array.isArray(input)
+  && hookText(input.session_id, 512)
+  && hookText(input.cwd, 32 * 1024) && path.isAbsolute(input.cwd)
+  && (input.transcript_path == null
+    || (hookText(input.transcript_path, 32 * 1024) && path.isAbsolute(input.transcript_path)));
 
+// Resolve a validated Codex lifecycle identity to the rollout McFly reads.
+// transcript_path is nullable. When present it selects that exact rollout;
+// when absent, the newest rollout for the exact id and cwd is selected.
+function sessionForHook(input, root) {
   const want = norm(input.cwd);
   if (input.transcript_path) {
     try {
@@ -216,11 +212,23 @@ export function sessionForSessionStart(input, root = ROOT) {
     const meta = headMeta(file, st);
     if (!hookMetaMatches(meta, input, want)) continue;
     const candidate = hookSession(file, root, meta, st, meta.cwd);
-    // One exact thread can have more than one rollout after continuation.
-    // Without a transcript_path, its actively written rollout is the newest.
     if (!found || candidate.updated_at > found.updated_at) found = candidate;
   }
   return found;
+}
+
+export function sessionForSessionStart(input, root = ROOT) {
+  if (!validHookBase(input) || input.hook_event_name !== 'SessionStart'
+    || !SESSION_START_SOURCES.has(input.source)
+    || !hookText(input.model, 512)
+    || !PERMISSION_MODES.has(input.permission_mode)) return null;
+  return sessionForHook(input, root);
+}
+
+export function sessionForSessionEnd(input, root = ROOT) {
+  if (!validHookBase(input) || input.hook_event_name !== 'SessionEnd' || input.reason !== 'other'
+    || (input.model !== undefined && !hookText(input.model, 512))) return null;
+  return sessionForHook(input, root);
 }
 
 // Interactive Codex has no caller-assigned session id. Its first prompt gets

@@ -92,9 +92,25 @@ test('Codex hook setup merges once and leaves malformed or unfamiliar config unt
     matcher: '^(startup|resume|clear|compact)$',
     hooks: [{ type: 'command', command: 'mcfly codex-hook', timeout: 2 }],
   });
+  assert.deepEqual(configured.hooks.SessionEnd, [{
+    matcher: '^other$', hooks: [{ type: 'command', command: 'mcfly codex-hook', timeout: 2 }],
+  }]);
   const once = fs.readFileSync(file, 'utf8');
   assert.match(configureCodexHook(home), /already configured.*trust/);
   assert.equal(fs.readFileSync(file, 'utf8'), once);
+
+  const upgrade = path.join(root, 'upgrade');
+  fs.mkdirSync(upgrade);
+  const upgradeFile = path.join(upgrade, 'hooks.json');
+  fs.writeFileSync(upgradeFile, JSON.stringify({ hooks: {
+    SessionStart: [{ matcher: '^(startup|resume|clear|compact)$', hooks: [{
+      type: 'command', command: 'mcfly codex-hook', timeout: 2,
+    }] }],
+  } }));
+  assert.match(configureCodexHook(upgrade), /configured.*trust/);
+  const upgraded = JSON.parse(fs.readFileSync(upgradeFile, 'utf8')).hooks;
+  assert.equal(upgraded.SessionStart.length, 1);
+  assert.equal(upgraded.SessionEnd.length, 1);
 
   const invalid = [
     ['malformed', '{'],

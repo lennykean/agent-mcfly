@@ -122,28 +122,40 @@ test('Codex hook binds a post-cd session to its owning hosted PTY only when ever
   };
 
   const thread = 'thread-exact-e2e';
-  const rollout = (name, cwd) => {
+  const rollout = (name, cwd, id = thread) => {
     const file = path.join(sessions, `rollout-${name}.jsonl`);
-    fs.writeFileSync(file, `${JSON.stringify({ type: 'session_meta', payload: { id: thread, cwd } })}\n`);
+    fs.writeFileSync(file, `${JSON.stringify({ type: 'session_meta', payload: { id, cwd } })}\n`);
     return file;
   };
   const initialRollout = rollout('initial-cwd', initialCwd);
   const activeRollout = rollout('active-cwd', activeCwd);
-  const event = (cwd, transcript_path) => ({
-    hook_event_name: 'SessionStart', source: 'startup', session_id: thread, cwd, transcript_path,
+  const start = (cwd, transcript_path, session_id = thread) => ({
+    hook_event_name: 'SessionStart', source: 'startup', session_id, cwd, transcript_path,
     model: 'gpt-5.6', permission_mode: 'default',
   });
+  const end = (transcript_path, session_id = thread) => ({
+    hook_event_name: 'SessionEnd', session_id, cwd: activeCwd, transcript_path, reason: 'other',
+  });
 
-  await runHook(event(initialCwd, initialRollout), 'PROCESS_MISMATCH');
+  await runHook(start(initialCwd, initialRollout), 'PROCESS_MISMATCH');
   assert.equal((await mapped()).session, null);
 
-  await runHook(event(activeCwd, initialRollout), 'METADATA_MISMATCH');
+  await runHook(start(activeCwd, initialRollout), 'METADATA_MISMATCH');
   assert.equal((await mapped()).session, null);
 
-  await runHook(event(activeCwd, activeRollout), 'POST_CD_MATCH');
+  await runHook(start(activeCwd, activeRollout), 'POST_CD_MATCH');
   const pty = await mapped();
   assert.equal(pty.cwd, initialCwd);
   assert.deepEqual(pty.session, {
     provider: 'codex', id: path.basename(activeRollout), pwd: activeCwd, label: 'active-cwd',
   });
+
+  const newerThread = 'thread-newer-e2e';
+  const newerRollout = rollout('newer-session', activeCwd, newerThread);
+  await runHook(start(activeCwd, newerRollout, newerThread), 'NEWER_START');
+  await runHook(end(activeRollout), 'STALE_END');
+  assert.equal((await mapped()).session.id, path.basename(newerRollout));
+
+  await runHook(end(newerRollout, newerThread), 'CURRENT_END');
+  assert.equal((await mapped()).session, null);
 });

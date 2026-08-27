@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
-import { EventEmitter } from 'node:events';
+import { execFileSync, spawn } from 'node:child_process';
+import { EventEmitter, once } from 'node:events';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import WebSocket from 'ws';
-import { attachPty, claudePtySessions, claudeRecordMapping, clearPtyProviderSession, killAllPtys, killPty, launchAgentPty, listPeers, listPtys, ptyEnv, pullPeerInbox, sendPeerMessage, setPtyRelay, setPtySession, TOKEN, toolPath } from './pty.js';
+import { attachPty, claudePtySessions, claudeRecordMapping, clearExactPtySession, clearPtyProviderSession, killAllPtys, killPty, launchAgentPty, listPeers, listPtys, ptyEnv, pullPeerInbox, sendPeerMessage, setPtyRelay, setPtySession, TOKEN, toolPath } from './pty.js';
 
 test('hosted shells receive a fresh private PTY identity before descendants start', () => {
   const env = ptyEnv('0123456789abcdef', { KEEP: 'yes' }, {
@@ -33,7 +34,7 @@ test('Claude PID records prove the live process and resolve an exact transcript'
   fs.writeFileSync(path.join(dir, '404.json'), JSON.stringify({ pid: 404, sessionId: 'no-start', cwd: '/repo/d' }));
   fs.writeFileSync(path.join(dir, '505.json'), 'not json');
 
-  const found = await claudePtySessions({
+  const probe = await claudePtySessions({
     dir,
     roots: [{ id: 'blank-pty', pid: 10, tool: '_' }, { id: 'other-pty', pid: 20 }],
     processes: new Map([
@@ -42,16 +43,148 @@ test('Claude PID records prove the live process and resolve an exact transcript'
       [202, { parent: 20, starts: ['reused-b'] }],
     ]),
   });
+  const found = probe.records;
 
   assert.equal(found.get('blank-pty').sessionId, 'session-a');
   assert.equal(found.has('other-pty'), false); // PID 202 was reused; 303 is dead
+  assert.equal(probe.definitive.size, 0); // malformed records make absence inconclusive
   const wrong = { provider: 'claude-code', id: 'project/wrong.jsonl', pwd: '/repo/a' };
   const exact = claudeRecordMapping(found.get('blank-pty'), [{ id: 'project/session-a.jsonl' }]);
   assert.notDeepEqual(exact, wrong);
   assert.deepEqual(exact, { provider: 'claude-code', id: 'project/session-a.jsonl', pwd: '/repo/a' });
   assert.equal(claudeRecordMapping(found.get('blank-pty'), []), null); // caller falls back
-  assert.deepEqual(await claudePtySessions({ dir, roots: [{ id: 'blank-pty', pid: 10 }], processes: new Map() }), new Map());
-  assert.deepEqual(await claudePtySessions({ dir: path.join(dir, 'missing'), roots: [{ id: 'blank-pty', pid: 10 }] }), new Map());
+  assert.equal((await claudePtySessions({
+    dir, roots: [{ id: 'blank-pty', pid: 10 }], processes: new Map(),
+  })).definitive.has('blank-pty'), false);
+  assert.equal((await claudePtySessions({
+    dir: path.join(dir, 'missing'), roots: [{ id: 'blank-pty', pid: 10 }],
+  })).definitive.has('blank-pty'), false);
+});
+
+test('PTY polling promotes an equal Claude PID mapping before clearing and tombstoning it', {
+  timeout: 45_000,
+}, async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mcfly-claude-poll-'));
+  const home = path.join(root, 'home');
+  const cwd = path.join(root, 'repo');
+  const pidFile = path.join(root, 'shell-pid');
+  const sessionsDir = path.join(home, '.claude', 'sessions');
+  const project = cwd.replace(/[:\\/.]/g, '-');
+  const projectDir = path.join(home, '.claude', 'projects', project);
+  const sessionId = 'same-visible-session';
+  const sessionPath = `${project}/${sessionId}.jsonl`;
+  const title = 'same visible Claude session';
+  for (const dir of [home, cwd, sessionsDir, projectDir]) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(projectDir, `${sessionId}.jsonl`), [
+    JSON.stringify({ type: 'user', cwd, message: { content: 'test' } }),
+    JSON.stringify({ type: 'custom-title', customTitle: title }),
+    '',
+  ].join('\n'));
+
+  const listener = http.createServer();
+  await new Promise((resolve) => listener.listen(0, '127.0.0.1', resolve));
+  const { port } = listener.address();
+  await new Promise((resolve) => listener.close(resolve));
+  const server = spawn(process.execPath, ['server/server.js'], {
+    cwd: process.cwd(), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
+    env: { ...process.env, PORT: String(port), MCFLY_OPEN: '0', HOME: home, USERPROFILE: home },
+  });
+  let ws;
+  let ptyId;
+  t.after(async () => {
+    try {
+      if (ptyId) await fetch(`http://127.0.0.1:${port}/api/pty-kill`, {
+        method: 'POST', body: JSON.stringify({ id: ptyId }),
+      });
+    } catch { /* server may already be gone */ }
+    try { ws?.close(); } catch { /* already closed */ }
+    if (server.exitCode === null) {
+      server.kill();
+      await Promise.race([once(server, 'exit'), new Promise((resolve) => setTimeout(resolve, 5000))]);
+    }
+    if (server.exitCode === null) server.kill('SIGKILL');
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+
+  let startup = '';
+  let startupError = '';
+  server.stdout.setEncoding('utf8');
+  server.stderr.setEncoding('utf8');
+  server.stdout.on('data', (chunk) => { startup += chunk; });
+  server.stderr.on('data', (chunk) => { startupError += chunk; });
+  for (let i = 0; i < 600 && !startup.includes('Agent McFly API:') && server.exitCode === null; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.equal(server.exitCode, null, startupError);
+  assert.match(startup, /Agent McFly API:/, startupError);
+
+  const base = `http://127.0.0.1:${port}`;
+  const config = await (await fetch(`${base}/api/config`)).json();
+  ws = new WebSocket(`ws://127.0.0.1:${port}/ws/pty?token=${config.token}&tool=_&cwd=${encodeURIComponent(cwd)}`);
+  const ready = new Promise((resolve, reject) => {
+    ws.on('message', (data) => {
+      const value = data.toString();
+      if (value.charCodeAt(0) !== 0) return;
+      const control = JSON.parse(value.slice(1));
+      if (control.ptyId) { ptyId = control.ptyId; resolve(); }
+    });
+    ws.once('error', reject);
+  });
+  await once(ws, 'open');
+  await ready;
+
+  const quote = (value) => String(value).replace(/'/g, process.platform === 'win32' ? "''" : `'\\''`);
+  const shellCommand = process.platform === 'win32'
+    ? `[IO.File]::WriteAllText('${quote(pidFile)}',[string]$PID);[Console]::Write(([char]27)+']0;${title}'+([char]7))`
+    : `printf %s "$$" > '${quote(pidFile)}'; printf '\\033]0;${title}\\007'`;
+  ws.send(JSON.stringify({ t: 'i', d: `${shellCommand}\r` }));
+  for (let i = 0; i < 200 && !fs.existsSync(pidFile); i++) await new Promise((resolve) => setTimeout(resolve, 25));
+  const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+  assert.equal(Number.isInteger(pid) && pid > 0, true);
+
+  let procStart;
+  if (process.platform === 'win32') {
+    procStart = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      `$d=(Get-Process -Id ${pid}).StartTime;[Console]::Write($d.ToUniversalTime().ToFileTimeUtc())`],
+    { encoding: 'utf8', windowsHide: true }).trim();
+  } else if (process.platform === 'linux') {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    procStart = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19];
+  } else {
+    procStart = execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], {
+      encoding: 'utf8', env: { ...process.env, TZ: 'UTC', LC_ALL: 'C' },
+    }).replace(/\s+/g, ' ').trim();
+  }
+
+  const heuristic = await fetch(`${base}/api/pty-session`, {
+    method: 'POST', body: JSON.stringify({
+      ptyId, provider: 'claude-code', session: sessionPath, pwd: cwd, intent: 'automatic',
+    }),
+  });
+  assert.deepEqual(await heuristic.json(), { ok: true, blocked: false });
+  const record = path.join(sessionsDir, `${pid}.json`);
+  fs.writeFileSync(record, JSON.stringify({ pid, procStart, sessionId, cwd }));
+
+  const mapped = async () => (await (await fetch(`${base}/api/ptys`)).json()).find((pty) => pty.id === ptyId);
+  let promoted;
+  for (let i = 0; i < 100; i++) {
+    promoted = await mapped();
+    if (promoted?.title === title && promoted.session?.id === sessionPath) break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.equal(promoted.title, title);
+  assert.equal(promoted.session.id, sessionPath);
+
+  fs.rmSync(record);
+  const ended = await mapped();
+  assert.equal(ended.title, title);
+  assert.equal(ended.session, null); // stale title was rejected in this same poll
+  const stale = await fetch(`${base}/api/pty-session`, {
+    method: 'POST', body: JSON.stringify({
+      ptyId, provider: 'claude-code', session: sessionPath, pwd: cwd, intent: 'automatic',
+    }),
+  });
+  assert.deepEqual(await stale.json(), { ok: false, blocked: true });
 });
 
 test('Windows tool lookup keeps PATH order when a later stale executable exists', () => {
@@ -122,9 +255,67 @@ test('session precedence is unfollow, explicit, exact, then automatic', async ()
   }
 });
 
+test('lifecycle cleanup blocks only automatic resurrection of the ended mapping', async () => {
+  const peer = launchAgentPty('_', process.cwd(), [], 'test');
+  const ended = { provider: 'codex', id: 'ended.jsonl', pwd: process.cwd() };
+  const next = { provider: 'codex', id: 'next.jsonl', pwd: process.cwd() };
+  try {
+    assert.equal(setPtySession(peer.terminal_id, ended, undefined, 'exact'), true);
+    assert.equal(clearExactPtySession(peer.terminal_id, ended), true);
+    assert.equal(setPtySession(peer.terminal_id, ended), null);
+    assert.equal(setPtySession(peer.terminal_id, next), true);
+    assert.deepEqual(listPtys().find((item) => item.id === peer.terminal_id)?.session, next);
+    assert.equal(setPtySession(peer.terminal_id, ended), true); // different mapping removed the marker
+    assert.equal(setPtySession(peer.terminal_id, next, undefined, 'exact'), true);
+    assert.equal(clearExactPtySession(peer.terminal_id, ended), null); // late end cannot clear next
+    assert.deepEqual(listPtys().find((item) => item.id === peer.terminal_id)?.session, next);
+
+    assert.equal(setPtySession(peer.terminal_id, ended, undefined, 'exact'), true);
+    assert.equal(clearExactPtySession(peer.terminal_id, ended), true);
+    assert.equal(setPtySession(peer.terminal_id, ended, undefined, 'exact'), true); // exact resume
+    assert.equal(clearExactPtySession(peer.terminal_id, ended), true);
+    assert.equal(setPtySession(peer.terminal_id, ended, undefined, 'explicit'), true);
+    assert.deepEqual(listPtys().find((item) => item.id === peer.terminal_id)?.session, ended);
+  } finally {
+    killPty(peer.terminal_id);
+    for (let i = 0; i < 20 && listPtys().some((item) => item.id === peer.terminal_id); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+});
+
+test('Claude PID promotion lets definitive disappearance clear and tombstone a heuristic link', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcfly-claude-ended-'));
+  const peer = launchAgentPty('_', process.cwd(), [], 'test');
+  const mapping = { provider: 'claude-code', id: 'ended.jsonl', pwd: process.cwd() };
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  try {
+    assert.equal(setPtySession(peer.terminal_id, mapping), true);
+    assert.equal(setPtySession(peer.terminal_id, mapping, undefined, 'exact'), true); // authoritative PID promotion
+    const ended = await claudePtySessions({ dir, roots: [{ id: peer.terminal_id, pid: 1 }] });
+    assert.equal(ended.definitive.has(peer.terminal_id), true);
+    assert.equal(clearExactPtySession(peer.terminal_id, mapping), true);
+    assert.equal(listPtys().find((item) => item.id === peer.terminal_id)?.session, null);
+
+    assert.equal(setPtySession(peer.terminal_id, mapping), null); // stale title cannot resurrect it
+    assert.equal(setPtySession(peer.terminal_id, mapping, undefined, 'exact'), true);
+    const failed = await claudePtySessions({
+      dir: path.join(dir, 'unreadable'), roots: [{ id: peer.terminal_id, pid: 1 }],
+    });
+    assert.equal(failed.definitive.has(peer.terminal_id), false);
+    assert.deepEqual(listPtys().find((item) => item.id === peer.terminal_id)?.session, mapping);
+  } finally {
+    killPty(peer.terminal_id);
+    for (let i = 0; i < 20 && listPtys().some((item) => item.id === peer.terminal_id); i++) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+});
+
 test('OpenCode home and disposal clear only their own automatic or exact link', async () => {
   const peer = launchAgentPty('_', process.cwd(), [], 'test');
   const opencode = { provider: 'opencode', id: 'ses_a', pwd: process.cwd() };
+  const nextOpenCode = { provider: 'opencode', id: 'ses_b', pwd: process.cwd() };
   const other = { provider: 'codex', id: 'other.jsonl', pwd: process.cwd() };
   try {
     assert.equal(setPtySession(peer.terminal_id, other, undefined, 'exact'), true);
@@ -134,7 +325,8 @@ test('OpenCode home and disposal clear only their own automatic or exact link', 
     assert.equal(setPtySession(peer.terminal_id, opencode, undefined, 'exact'), true);
     assert.equal(clearPtyProviderSession(peer.terminal_id, 'opencode'), true);
     assert.equal(listPtys().find((item) => item.id === peer.terminal_id)?.session, null);
-    assert.equal(setPtySession(peer.terminal_id, opencode), true);
+    assert.equal(setPtySession(peer.terminal_id, opencode), null);
+    assert.equal(setPtySession(peer.terminal_id, nextOpenCode), true);
     assert.equal(clearPtyProviderSession(peer.terminal_id, 'opencode'), true);
 
     assert.equal(setPtySession(peer.terminal_id, opencode, undefined, 'explicit'), true);

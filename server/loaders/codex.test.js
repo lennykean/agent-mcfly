@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { callRender, callRenders, findByLaunchMarker, parseHead, parseThreadNames, patchRender, patchRenders, projectPathKey, resultRender, sessionForSessionStart, splitNumberedResults, tailFile, toolLabel } from './codex.js';
+import { callRender, callRenders, findByLaunchMarker, parseHead, parseThreadNames, patchRender, patchRenders, projectPathKey, resultRender, sessionForSessionEnd, sessionForSessionStart, splitNumberedResults, tailFile, toolLabel } from './codex.js';
 
 test('project path identity folds Windows paths but preserves POSIX case', () => {
   assert.equal(projectPathKey('C:\\Repo\\App'), projectPathKey('c:/repo/app'));
@@ -258,6 +258,13 @@ test('SessionStart resolves the exact Codex thread for its cwd without requiring
   fs.utimesSync(path.join(root, first), new Date(0), new Date(0));
   const continuation = write('continued', 'thread-first');
   assert.equal(sessionForSessionStart(event('thread-first', 'compact', { transcript_path: null }), root)?.id, continuation);
+  const ended = (extra = {}) => ({
+    hook_event_name: 'SessionEnd', session_id: 'thread-first', cwd,
+    transcript_path: path.join(root, first), reason: 'other', ...extra,
+  });
+  assert.equal(sessionForSessionEnd(ended(), root)?.id, first);
+  assert.equal(sessionForSessionEnd(ended({ transcript_path: null }), root)?.id, continuation);
+  assert.equal(sessionForSessionEnd(ended({ reason: 'unknown' }), root), null);
   assert.equal(sessionForSessionStart(event('missing', 'startup', { transcript_path: null }), root), null);
   assert.equal(sessionForSessionStart(event('thread-wrong', 'startup'), root), null);
   assert.equal(sessionForSessionStart(event('thread-first', 'unknown'), root), null);

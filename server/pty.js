@@ -116,7 +116,7 @@ export function ptyEnv(id, extra = {}, source = process.env) {
   };
 }
 
-// ptyId -> { p, buffer, ws, tool, cwd, created, session, sessionSuppressed, sessionExplicit, sessionExact, relayEnabled }
+// ptyId -> { p, buffer, ws, tool, cwd, created, session, sessionEnded, sessionSuppressed, sessionExplicit, sessionExact, relayEnabled }
 const sessions = new Map();
 // SSH PTYs are channels owned by this local McFly process. They need the
 // connection in their identity because two hosts can produce the same id.
@@ -145,6 +145,7 @@ async function processTable(records) {
         if (kind === 'P' && Number.isInteger(pid)) table.set(pid, { parent: Number(rest[0]), starts: [] });
         else if (kind === 'S' && table.has(pid)) table.get(pid).starts = rest;
       }
+      if (records.some((record) => table.has(record.pid) && !table.get(record.pid).starts.length)) return null;
       return table;
     }
 
@@ -169,11 +170,17 @@ async function processTable(records) {
           const stat = fs.readFileSync(`/proc/${record.pid}/stat`, 'utf8');
           const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
           if (table.has(record.pid) && fields[19]) table.get(record.pid).starts = [fields[19]];
-        } catch { /* process exited or /proc is unavailable */ }
+        } catch {
+          try { process.kill(record.pid, 0); return null; } catch (error) {
+            if (error?.code === 'ESRCH') table.delete(record.pid);
+            else return null;
+          }
+        }
       }
     }
+    if (records.some((record) => table.has(record.pid) && !table.get(record.pid).starts.length)) return null;
     return table;
-  } catch { return new Map(); }
+  } catch { return null; }
 }
 
 const descendsFrom = (pid, root, processes) => {
@@ -203,30 +210,41 @@ export function claudeRecordMapping(record, available) {
 export async function claudePtySessions({ roots, dir = CLAUDE_SESSIONS, processes } = {}) {
   roots ??= [...sessions.values()]
     .map((s) => ({ id: s.id, pid: s.p.pid }));
-  if (!roots.length) return new Map();
+  const out = new Map();
+  const definitive = new Set();
+  if (!roots.length) return { records: out, definitive };
 
   let names;
-  try { names = fs.readdirSync(dir).filter((name) => /^\d+\.json$/.test(name)); } catch { return new Map(); }
+  try { names = fs.readdirSync(dir).filter((name) => /^\d+\.json$/.test(name)); } catch {
+    return { records: out, definitive };
+  }
+  let readable = true;
   const records = names.flatMap((name) => {
     try {
       const record = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
-      return Number(name.slice(0, -5)) === record.pid
+      const valid = Number(name.slice(0, -5)) === record.pid
         && typeof record.sessionId === 'string' && record.sessionId
         && typeof record.cwd === 'string' && record.cwd
-        && typeof (record.procStartFt ?? record.procStart) === 'string'
-        ? [record] : [];
-    } catch { return []; }
+        && typeof (record.procStartFt ?? record.procStart) === 'string';
+      if (!valid) readable = false;
+      return valid ? [record] : [];
+    } catch { readable = false; return []; }
   });
-  if (!records.length) return new Map();
+  if (!records.length) {
+    if (readable) for (const root of roots) definitive.add(root.id);
+    return { records: out, definitive };
+  }
 
-  processes ??= await processTable(records);
-  const out = new Map();
+  if (processes === undefined) processes = await processTable(records);
+  if (!(processes instanceof Map)) return { records: out, definitive };
   for (const root of roots) {
+    if (!processes.has(root.pid)) continue;
     const matches = records.filter((record) => sameStart(record, processes.get(record.pid))
       && descendsFrom(record.pid, root.pid, processes));
     if (matches.length === 1) out.set(root.id, matches[0]);
+    else if (!matches.length && readable) definitive.add(root.id);
   }
-  return out;
+  return { records: out, definitive };
 }
 
 const ctl = (obj) => '\x00' + JSON.stringify(obj);
@@ -325,11 +343,15 @@ export function listPeers() {
   return [...sessions.values(), ...remoteSessions.values()].map(peerView);
 }
 
+const sameSessionMapping = (a, b) => !!a && !!b
+  && a.provider === b.provider && a.id === b.id && a.pwd === b.pwd;
+
 export function setPtySession(ptyId, mapping, connection, intent = 'automatic') {
   const s = sessionOf(ptyId, connection);
   if (!s) return false;
   if (intent === 'unfollow') {
     s.session = null;
+    s.sessionEnded = null;
     s.sessionSuppressed = true;
     s.sessionExplicit = false;
     s.sessionExact = false;
@@ -341,7 +363,11 @@ export function setPtySession(ptyId, mapping, connection, intent = 'automatic') 
   if (s.sessionExact && intent === 'automatic') {
     return mapping && s.session?.provider === mapping.provider && s.session.id === mapping.id ? true : null;
   }
+  // A lifecycle clear leaves one PTY-local tombstone so delayed title, launch,
+  // or adopt guesses cannot immediately recreate the session that just ended.
+  if (intent === 'automatic' && mapping && sameSessionMapping(s.sessionEnded, mapping)) return null;
   s.session = mapping;
+  if (intent !== 'automatic' || mapping) s.sessionEnded = null;
   if (intent === 'explicit') {
     s.sessionSuppressed = false;
     s.sessionExplicit = true;
@@ -361,6 +387,21 @@ export function clearPtyProviderSession(ptyId, provider, connection) {
   if (!s) return false;
   if (s.sessionSuppressed || s.sessionExplicit) return null;
   if (!s.session || s.session.provider !== provider) return null;
+  s.sessionEnded = { ...s.session };
+  s.session = null;
+  s.sessionExact = false;
+  return true;
+}
+
+// Provider lifecycle signals may release only the exact mapping they name.
+// Matching the whole mapping makes a late end event harmless after a new
+// session, explicit follow, heuristic match, or another provider takes over.
+export function clearExactPtySession(ptyId, mapping, connection) {
+  const s = sessionOf(ptyId, connection);
+  if (!s) return false;
+  if (s.sessionSuppressed || s.sessionExplicit || !s.sessionExact || !s.session) return null;
+  if (s.session.provider !== mapping?.provider || s.session.id !== mapping?.id || s.session.pwd !== mapping?.pwd) return null;
+  s.sessionEnded = { ...s.session };
   s.session = null;
   s.sessionExact = false;
   return true;
@@ -560,7 +601,7 @@ function localPty(cwd, tool, line, relayEnabled = false, ws = null, env = {}) {
   });
   const s = {
     id, p, buffer: '', ws: null,
-    tool, cwd, created: Date.now(), session: null, sessionSuppressed: false, sessionExplicit: false, sessionExact: false,
+    tool, cwd, created: Date.now(), session: null, sessionEnded: null, sessionSuppressed: false, sessionExplicit: false, sessionExact: false,
     title: '', relayEnabled,
     relayQueue: Promise.resolve(),
     shadow: new ShadowTerminal({ cols: 100, rows: 30, scrollback: 20, allowProposedApi: true }),
@@ -679,7 +720,7 @@ export function attachPty(server, allowedHosts, getRemote = () => undefined) {
           p.stderr?.setEncoding?.('utf8');
           const s = {
             id: crypto.randomBytes(8).toString('hex'), p, buffer: '', ws: null,
-            connection, tool, cwd, created: Date.now(), session: null, sessionSuppressed: false, sessionExplicit: false, sessionExact: false, title: '',
+            connection, tool, cwd, created: Date.now(), session: null, sessionEnded: null, sessionSuppressed: false, sessionExplicit: false, sessionExact: false, title: '',
             relayEnabled: false, relayQueue: Promise.resolve(),
             shadow: new ShadowTerminal({ cols: 100, rows: 30, scrollback: 20, allowProposedApi: true }),
           };

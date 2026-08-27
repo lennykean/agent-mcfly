@@ -263,7 +263,10 @@ export async function runCodexHook({
     const event = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     if (!event || typeof event !== 'object' || Array.isArray(event)) return false;
     if (projectPathKey(event.cwd) !== projectPathKey(processCwd)) return false;
-    const response = await request(`http://127.0.0.1:${port}/api/codex-session-start`, {
+    const endpoint = event.hook_event_name === 'SessionStart' ? 'start'
+      : event.hook_event_name === 'SessionEnd' ? 'end' : null;
+    if (!endpoint) return false;
+    const response = await request(`http://127.0.0.1:${port}/api/codex-session-${endpoint}`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${server.mcpToken}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...event, cwd: processCwd, ptyId }),
@@ -802,7 +805,7 @@ const START = process.platform === 'win32'
   : { command: 'mcfly', args: ['mcp', 'start'] };
 const MANIFEST = { mcpServers: { mcfly: START } };
 const CODEX_HOOK_COMMAND = 'mcfly codex-hook';
-const CODEX_HOOK_STATUS = 'open /hooks in Codex and trust the McFly hook; exact terminal matching starts only after Codex runs it';
+const CODEX_HOOK_STATUS = 'open /hooks in Codex and trust the McFly hook; exact terminal lifecycle matching starts only after Codex runs it';
 const CODEX_HOOK_EVENTS = new Set([
   'SessionStart', 'SessionEnd', 'SubagentStart', 'PreToolUse', 'PermissionRequest',
   'PostToolUse', 'PreCompact', 'PostCompact', 'UserPromptSubmit', 'SubagentStop', 'Stop',
@@ -900,8 +903,14 @@ export function configureCodexHook(codexHome = process.env.CODEX_HOME || path.jo
     return `codex hook: existing ${file} has an unsupported shape; unchanged; exact terminal matching is unavailable`;
   }
   const starts = hooks.SessionStart ?? [];
-  if (starts.some((group) => (group.matcher === undefined || group.matcher === '^(startup|resume|clear|compact)$')
-    && group.hooks.some((hook) => hook?.type === 'command' && hook.command?.trim() === CODEX_HOOK_COMMAND))) {
+  const ends = hooks.SessionEnd ?? [];
+  const hasCommand = (groups, matcher) => groups.some((group) => (
+    (group.matcher === undefined || group.matcher === matcher)
+    && group.hooks.some((hook) => hook.type === 'command' && hook.command.trim() === CODEX_HOOK_COMMAND)
+  ));
+  const hasStart = hasCommand(starts, '^(startup|resume|clear|compact)$');
+  const hasEnd = hasCommand(ends, '^other$');
+  if (hasStart && hasEnd) {
     return `codex hook: already configured; ${CODEX_HOOK_STATUS}`;
   }
 
@@ -912,10 +921,14 @@ export function configureCodexHook(codexHome = process.env.CODEX_HOME || path.jo
       ...config,
       hooks: {
         ...hooks,
-        SessionStart: [...starts, {
+        ...(!hasStart ? { SessionStart: [...starts, {
           matcher: '^(startup|resume|clear|compact)$',
           hooks: [{ type: 'command', command: CODEX_HOOK_COMMAND, timeout: 2 }],
-        }],
+        }] } : {}),
+        ...(!hasEnd ? { SessionEnd: [...ends, {
+          matcher: '^other$',
+          hooks: [{ type: 'command', command: CODEX_HOOK_COMMAND, timeout: 2 }],
+        }] } : {}),
       },
     };
     fs.writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, { mode: 0o600 });
