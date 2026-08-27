@@ -9,7 +9,8 @@ import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { execFileSync, spawn } from 'node:child_process';
+import { execFile, execFileSync, spawn } from 'node:child_process';
+import { promisify } from 'node:util';
 import { WebSocketServer } from 'ws';
 import pty from '@lydell/node-pty';
 import headless from '@xterm/headless';
@@ -17,6 +18,7 @@ import headless from '@xterm/headless';
 // server-side VT interpreter: each PTY keeps a "shadow screen" so previews
 // show true terminal state (TUIs included), with no client attached
 const ShadowTerminal = headless.Terminal ?? headless.default?.Terminal;
+const execFileAsync = promisify(execFile);
 
 export const TOKEN = crypto.randomBytes(16).toString('hex');
 
@@ -27,6 +29,7 @@ export const AGENT_TOOLS = ['claude', 'codex', 'cursor-agent', 'agy', 'pi', 'ope
 const BUFFER_CAP = 256 * 1024;
 const INBOX_CAP = 100;
 const INBOX_BYTES_CAP = 1024 * 1024;
+const PROCESS_QUERY_TIMEOUT_MS = 2000;
 
 export const hasTerminalControls = (value) => /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(String(value));
 
@@ -106,6 +109,108 @@ const remoteKey = (connection, id) => `${connection}\0${id}`;
 const sessionOf = (id, connection) => connection
   ? remoteSessions.get(remoteKey(connection, id))
   : sessions.get(id);
+
+const CLAUDE_SESSIONS = path.join(os.homedir(), '.claude', 'sessions');
+
+async function processTable(records) {
+  try {
+    if (WIN) {
+      const wanted = records.map((record) => record.pid).join(',');
+      const script = '$wanted=@(' + wanted + '); Get-CimInstance Win32_Process | ForEach-Object { "P`t$($_.ProcessId)`t$($_.ParentProcessId)" }; foreach ($id in $wanted) { try { $p=Get-Process -Id $id -ErrorAction Stop; $d=$p.StartTime; "S`t$id`t$($d.ToUniversalTime().ToFileTimeUtc())`t$($d.Ticks)`t$($d.ToUniversalTime().Ticks)`t$(([DateTimeOffset]$d).ToUnixTimeMilliseconds())" } catch {} }';
+      const { stdout } = await execFileAsync('powershell.exe', [
+        '-NoProfile', '-NonInteractive', '-Command',
+        script,
+      ], { encoding: 'utf8', windowsHide: true, timeout: PROCESS_QUERY_TIMEOUT_MS });
+      const table = new Map();
+      for (const line of stdout.split(/\r?\n/)) {
+        const [kind, pidText, ...rest] = line.trim().split('\t');
+        const pid = Number(pidText);
+        if (kind === 'P' && Number.isInteger(pid)) table.set(pid, { parent: Number(rest[0]), starts: [] });
+        else if (kind === 'S' && table.has(pid)) table.get(pid).starts = rest;
+      }
+      return table;
+    }
+
+    const withStart = process.platform !== 'linux';
+    const { stdout } = await execFileAsync('ps', ['-A', '-o', withStart ? 'pid=,ppid=,lstart=' : 'pid=,ppid='], {
+      encoding: 'utf8', timeout: PROCESS_QUERY_TIMEOUT_MS, env: { ...process.env, TZ: 'UTC', LC_ALL: 'C' },
+    });
+    const table = new Map();
+    for (const line of stdout.split(/\r?\n/)) {
+      const match = line.match(/^\s*(\d+)\s+(\d+)(?:\s+(.+?))?\s*$/);
+      if (!match) continue;
+      const start = match[3]?.replace(/\s+/g, ' ').trim();
+      const ms = start ? Date.parse(`${start} UTC`) : NaN;
+      table.set(Number(match[1]), {
+        parent: Number(match[2]),
+        starts: start ? [start, ...(Number.isNaN(ms) ? [] : [String(ms)])] : [],
+      });
+    }
+    if (process.platform === 'linux') {
+      for (const record of records) {
+        try {
+          const stat = fs.readFileSync(`/proc/${record.pid}/stat`, 'utf8');
+          const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/);
+          if (table.has(record.pid) && fields[19]) table.get(record.pid).starts = [fields[19]];
+        } catch { /* process exited or /proc is unavailable */ }
+      }
+    }
+    return table;
+  } catch { return new Map(); }
+}
+
+const descendsFrom = (pid, root, processes) => {
+  const seen = new Set();
+  for (let current = pid; current && !seen.has(current); current = processes.get(current)?.parent) {
+    if (current === root) return true;
+    seen.add(current);
+  }
+  return false;
+};
+
+const sameStart = (record, process) => {
+  const token = record.procStartFt ?? record.procStart;
+  if (typeof token !== 'string' || !token || !process?.starts?.length) return false;
+  const want = token.replace(/\s+/g, ' ').trim();
+  return process.starts.some((start) => String(start).replace(/\s+/g, ' ').trim() === want);
+};
+
+export function claudeRecordMapping(record, available) {
+  const meta = available.find((session) => path.basename(session.id) === `${record.sessionId}.jsonl`);
+  return meta ? { provider: 'claude-code', id: meta.id, pwd: record.cwd } : null;
+}
+
+// Claude Code publishes each live CLI's exact session id in
+// ~/.claude/sessions/<pid>.json. Match that PID to its hosted shell; title
+// matching remains the fallback when the record or process list is absent.
+export async function claudePtySessions({ roots, dir = CLAUDE_SESSIONS, processes } = {}) {
+  roots ??= [...sessions.values()]
+    .map((s) => ({ id: s.id, pid: s.p.pid }));
+  if (!roots.length) return new Map();
+
+  let names;
+  try { names = fs.readdirSync(dir).filter((name) => /^\d+\.json$/.test(name)); } catch { return new Map(); }
+  const records = names.flatMap((name) => {
+    try {
+      const record = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+      return Number(name.slice(0, -5)) === record.pid
+        && typeof record.sessionId === 'string' && record.sessionId
+        && typeof record.cwd === 'string' && record.cwd
+        && typeof (record.procStartFt ?? record.procStart) === 'string'
+        ? [record] : [];
+    } catch { return []; }
+  });
+  if (!records.length) return new Map();
+
+  processes ??= await processTable(records);
+  const out = new Map();
+  for (const root of roots) {
+    const matches = records.filter((record) => sameStart(record, processes.get(record.pid))
+      && descendsFrom(record.pid, root.pid, processes));
+    if (matches.length === 1) out.set(root.id, matches[0]);
+  }
+  return out;
+}
 
 const ctl = (obj) => '\x00' + JSON.stringify(obj);
 const peerIdOf = (s) => s.connection ? `${s.connection}:${s.id}` : s.id;

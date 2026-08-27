@@ -1,9 +1,42 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import fs from 'node:fs';
 import http from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import WebSocket from 'ws';
-import { attachPty, killAllPtys, killPty, launchAgentPty, listPeers, listPtys, pullPeerInbox, sendPeerMessage, setPtyRelay, setPtySession, TOKEN, toolPath } from './pty.js';
+import { attachPty, claudePtySessions, claudeRecordMapping, killAllPtys, killPty, launchAgentPty, listPeers, listPtys, pullPeerInbox, sendPeerMessage, setPtyRelay, setPtySession, TOKEN, toolPath } from './pty.js';
+
+test('Claude PID records prove the live process and resolve an exact transcript', async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcfly-claude-pids-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(dir, '101.json'), JSON.stringify({ pid: 101, procStart: 'live-a', sessionId: 'session-a', cwd: '/repo/a' }));
+  fs.writeFileSync(path.join(dir, '202.json'), JSON.stringify({ pid: 202, procStart: 'old-b', sessionId: 'session-b', cwd: '/repo/b' }));
+  fs.writeFileSync(path.join(dir, '303.json'), JSON.stringify({ pid: 303, procStart: 'dead-c', sessionId: 'session-c', cwd: '/repo/c' }));
+  fs.writeFileSync(path.join(dir, '404.json'), JSON.stringify({ pid: 404, sessionId: 'no-start', cwd: '/repo/d' }));
+  fs.writeFileSync(path.join(dir, '505.json'), 'not json');
+
+  const found = await claudePtySessions({
+    dir,
+    roots: [{ id: 'blank-pty', pid: 10, tool: '_' }, { id: 'other-pty', pid: 20 }],
+    processes: new Map([
+      [10, { parent: 1, starts: [] }], [11, { parent: 10, starts: [] }],
+      [101, { parent: 11, starts: ['live-a'] }],
+      [202, { parent: 20, starts: ['reused-b'] }],
+    ]),
+  });
+
+  assert.equal(found.get('blank-pty').sessionId, 'session-a');
+  assert.equal(found.has('other-pty'), false); // PID 202 was reused; 303 is dead
+  const wrong = { provider: 'claude-code', id: 'project/wrong.jsonl', pwd: '/repo/a' };
+  const exact = claudeRecordMapping(found.get('blank-pty'), [{ id: 'project/session-a.jsonl' }]);
+  assert.notDeepEqual(exact, wrong);
+  assert.deepEqual(exact, { provider: 'claude-code', id: 'project/session-a.jsonl', pwd: '/repo/a' });
+  assert.equal(claudeRecordMapping(found.get('blank-pty'), []), null); // caller falls back
+  assert.deepEqual(await claudePtySessions({ dir, roots: [{ id: 'blank-pty', pid: 10 }], processes: new Map() }), new Map());
+  assert.deepEqual(await claudePtySessions({ dir: path.join(dir, 'missing'), roots: [{ id: 'blank-pty', pid: 10 }] }), new Map());
+});
 
 test('Windows tool lookup keeps PATH order when a later stale executable exists', () => {
   const current = 'C:\\current\\codex.cmd';

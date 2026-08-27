@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import * as claudeCode from './loaders/claude-code.js';
 import * as codex from './loaders/codex.js';
 import * as cursor from './loaders/cursor.js';
-import { alive, attachPty, detectTools, hasEditor, openInEditor, killAllPtys, killPty, listPeers, listPtys, pullPeerInbox, reapOrphans, sendPeerMessage, setPtyRelay, setPtySession, TOKEN } from './pty.js';
+import { alive, attachPty, claudePtySessions, claudeRecordMapping, detectTools, hasEditor, openInEditor, killAllPtys, killPty, listPeers, listPtys, pullPeerInbox, reapOrphans, sendPeerMessage, setPtyRelay, setPtySession, TOKEN } from './pty.js';
 import { launchAgent, listAgentProviders } from './agent-launch.js';
 import { connectSsh, disconnectAllSsh, disconnectSsh, getSshConnection, listSshConnections } from './ssh.js';
 import * as review from './review.js';
@@ -201,7 +201,20 @@ const server = http.createServer(async (req, res) => {
       // local mappings. Avoid rescanning every remote transcript over SFTP
       // on this frequent terminal-registry poll.
       if (remote) return json(res, 200, ptys);
+      const claudeRecords = await claudePtySessions();
       for (const p of ptys) {
+        const claudeRecord = claudeRecords.get(p.id);
+        let exactClaude = false;
+        if (claudeRecord) {
+          try {
+            const mapping = claudeRecordMapping(claudeRecord, claudeCode.listForCwd(claudeRecord.cwd));
+            exactClaude = !!mapping;
+            if (mapping && (p.session?.provider !== mapping.provider || p.session.id !== mapping.id || p.session.pwd !== mapping.pwd)) {
+              p.session = mapping;
+              setPtySession(p.id, p.session);
+            }
+          } catch { /* Claude's PID record is authoritative but best effort */ }
+        }
         // the terminal title is the agent's own announcement of its session:
         // exactly one transcript whose name the title contains -> map to it.
         // Titles can duplicate, so several matches (none of them the current
@@ -213,7 +226,7 @@ const server = http.createServer(async (req, res) => {
         // hunted is only re-hunted after HUNT_RETRY_MS, and a title that
         // resolved is never re-hunted at all. A CHANGED title always is —
         // that is the event the mapping actually depends on.
-        if (p.title && p.cwd && shouldHunt(p)) {
+        if (!exactClaude && p.title && p.cwd && shouldHunt(p)) {
           try {
             const matches = [];
             for (const [prov, loader] of Object.entries(PROVIDERS)) {
